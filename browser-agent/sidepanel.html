@@ -6,11 +6,13 @@
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
-    <header class="tabs">
-      <button class="tab-btn" data-tab="dialogue">Dialogue</button>
-      <button class="tab-btn active" data-tab="agent">Agent</button>
-      <button class="tab-btn" data-tab="trackers">Trackers</button>
-      <button class="tab-btn" data-tab="settings">Settings</button>
+    <header class="topbar">
+      <div class="tabs">
+        <button class="tab-btn" data-tab="dialogue">Dialogue</button>
+        <button class="tab-btn active" data-tab="agent">Agent</button>
+        <button class="tab-btn" data-tab="trackers">Trackers</button>
+      </div>
+      <button id="settings-icon-btn" type="button" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
     </header>
 
     <section id="onboarding" class="onboarding hidden">
@@ -61,40 +63,48 @@
           <button type="submit">Add tracker</button>
         </form>
       </section>
-
-      <section id="tab-settings" class="tab-panel">
-        <label for="provider-select">Provider</label>
-        <select id="provider-select">
-          <option value="onnx">Built-in (ONNX, runs in your browser)</option>
-          <option value="ollama">Ollama</option>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openai-compatible">OpenAI-compatible / custom</option>
-        </select>
-
-        <div id="onnx-settings" class="provider-block hidden">
-          <div id="onnx-device" class="device-line">Device: unknown</div>
-          <ul id="onnx-registry"></ul>
-          <div id="onnx-progress-wrap" class="hidden">
-            <div class="progress-bar"><div id="onnx-progress-fill"></div></div>
-            <div id="onnx-progress-label"></div>
-          </div>
-          <button id="onnx-unload-btn" type="button">Unload model</button>
-        </div>
-
-        <div id="remote-settings" class="provider-block hidden">
-          <label for="base-url">Base URL</label>
-          <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
-          <label for="api-key">API key</label>
-          <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
-          <label for="model-name">Model</label>
-          <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
-        </div>
-
-        <button id="test-connection-btn" type="button">Test connection</button>
-        <span id="test-connection-result"></span>
-      </section>
     </main>
+
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="settings-close-btn" type="button" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+        <div id="tab-settings" class="modal-body">
+          <label for="provider-select">Provider</label>
+          <select id="provider-select">
+            <option value="onnx">Built-in (ONNX, runs in your browser)</option>
+            <option value="ollama">Ollama</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai-compatible">OpenAI-compatible / custom</option>
+          </select>
+
+          <div id="onnx-settings" class="provider-block hidden">
+            <div id="onnx-device" class="device-line">Device: unknown</div>
+            <ul id="onnx-registry"></ul>
+            <div id="onnx-progress-wrap" class="hidden">
+              <div class="progress-bar"><div id="onnx-progress-fill"></div></div>
+              <div id="onnx-progress-label"></div>
+            </div>
+            <button id="onnx-unload-btn" type="button">Unload model</button>
+          </div>
+
+          <div id="remote-settings" class="provider-block hidden">
+            <label for="base-url">Base URL</label>
+            <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
+            <label for="api-key">API key</label>
+            <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
+            <label for="model-name">Model</label>
+            <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
+          </div>
+
+          <button id="test-connection-btn" type="button">Test connection</button>
+          <span id="test-connection-result"></span>
+        </div>
+      </div>
+    </div>
 
     <script src="sidepanel.js" type="module"></script>
   </body>

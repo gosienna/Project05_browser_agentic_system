@@ -19,6 +19,7 @@ async function init() {
   wireTabs();
   wireOnboarding();
   wireSettingsForm();
+  wireSettingsModal();
   wireAgentForm();
   wireTrackers();
   wireDialogue();
@@ -49,9 +50,30 @@ function wireTabs() {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
       document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
-      if (btn.dataset.tab === "settings" && settings.provider === "onnx") refreshOnnxSettings();
     });
   });
+}
+
+// --- Settings modal ---------------------------------------------------------
+
+function wireSettingsModal() {
+  $("#settings-icon-btn").addEventListener("click", openSettingsModal);
+  $("#settings-close-btn").addEventListener("click", closeSettingsModal);
+  $("#settings-modal").addEventListener("click", (e) => {
+    if (e.target.id === "settings-modal") closeSettingsModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#settings-modal").classList.contains("hidden")) closeSettingsModal();
+  });
+}
+
+function openSettingsModal() {
+  $("#settings-modal").classList.remove("hidden");
+  if (settings.provider === "onnx") refreshOnnxSettings();
+}
+
+function closeSettingsModal() {
+  $("#settings-modal").classList.add("hidden");
 }
 
 // --- Onboarding -------------------------------------------------------------
@@ -60,7 +82,7 @@ function wireOnboarding() {
   $("#ob-onnx").addEventListener("click", async () => {
     await saveSettings({ provider: "onnx", onnxModel: "onnx-community/Qwen2.5-1.5B-Instruct" });
     $("#onboarding").classList.add("hidden");
-    document.querySelector('.tab-btn[data-tab="settings"]').click();
+    openSettingsModal();
     await refreshOnnxSettings();
     startDownload("onnx-community/Qwen2.5-1.5B-Instruct");
   });
@@ -73,7 +95,7 @@ function wireOnboarding() {
     await saveSettings({ provider: "openai" });
     $("#onboarding").classList.add("hidden");
     applySettingsToForm();
-    document.querySelector('.tab-btn[data-tab="settings"]').click();
+    openSettingsModal();
   });
 }
 
