@@ -1,0 +1,14 @@
+{
+  "name": "browser-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chrome MV3 browser agent with an in-browser ONNX LLM engine.",
+  "type": "module",
+  "scripts": {
+    "build:vendor": "node build/build-vendor.mjs"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "esbuild": "^0.24.0"
+  }
+}

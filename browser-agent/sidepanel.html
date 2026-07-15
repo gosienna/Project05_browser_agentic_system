@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser Agent</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="tabs">
+      <button class="tab-btn" data-tab="dialogue">Dialogue</button>
+      <button class="tab-btn active" data-tab="agent">Agent</button>
+      <button class="tab-btn" data-tab="trackers">Trackers</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </header>
+
+    <section id="onboarding" class="onboarding hidden">
+      <h2>Welcome — pick an engine</h2>
+      <button id="ob-onnx" class="ob-card">
+        <strong>Built-in engine</strong>
+        <span>No setup. Downloads a model (~0.7–2 GB) once, then runs fully offline.</span>
+      </button>
+      <button id="ob-ollama" class="ob-card">
+        <strong>Ollama</strong>
+        <span id="ob-ollama-status">Checking for a local Ollama server…</span>
+      </button>
+      <button id="ob-api" class="ob-card">
+        <strong>API key</strong>
+        <span>OpenAI, Anthropic, or a custom OpenAI-compatible endpoint.</span>
+      </button>
+    </section>
+
+    <main>
+      <section id="tab-dialogue" class="tab-panel">
+        <div class="model-badge dialogue-badge"></div>
+        <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
+        <div id="dialogue-system-wrap" class="hidden">
+          <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>
+        </div>
+        <div id="dialogue-chat" class="dialogue-chat"></div>
+        <form id="dialogue-form">
+          <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
+          <button type="submit" id="dialogue-send-btn">Send</button>
+        </form>
+      </section>
+
+      <section id="tab-agent" class="tab-panel active">
+        <div id="model-badge" class="model-badge"></div>
+        <div id="trace" class="trace"></div>
+        <form id="agent-form">
+          <textarea id="task-input" placeholder="What should the agent do? e.g. Summarize this page in 5 bullets" rows="3"></textarea>
+          <button type="submit" id="run-btn">Run</button>
+        </form>
+      </section>
+
+      <section id="tab-trackers" class="tab-panel">
+        <ul id="tracker-list"></ul>
+        <form id="tracker-form">
+          <input id="tracker-label" placeholder="Label (e.g. Price watch)" required />
+          <textarea id="tracker-prompt" placeholder="What should be checked each run?" rows="2" required></textarea>
+          <label>Every <input id="tracker-interval" type="number" min="1" value="60" style="width:4em" /> minutes</label>
+          <button type="submit">Add tracker</button>
+        </form>
+      </section>
+
+      <section id="tab-settings" class="tab-panel">
+        <label for="provider-select">Provider</label>
+        <select id="provider-select">
+          <option value="onnx">Built-in (ONNX, runs in your browser)</option>
+          <option value="ollama">Ollama</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai-compatible">OpenAI-compatible / custom</option>
+        </select>
+
+        <div id="onnx-settings" class="provider-block hidden">
+          <div id="onnx-device" class="device-line">Device: unknown</div>
+          <ul id="onnx-registry"></ul>
+          <div id="onnx-progress-wrap" class="hidden">
+            <div class="progress-bar"><div id="onnx-progress-fill"></div></div>
+            <div id="onnx-progress-label"></div>
+          </div>
+          <button id="onnx-unload-btn" type="button">Unload model</button>
+        </div>
+
+        <div id="remote-settings" class="provider-block hidden">
+          <label for="base-url">Base URL</label>
+          <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
+          <label for="api-key">API key</label>
+          <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
+          <label for="model-name">Model</label>
+          <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
+        </div>
+
+        <button id="test-connection-btn" type="button">Test connection</button>
+        <span id="test-connection-result"></span>
+      </section>
+    </main>
+
+    <script src="sidepanel.js" type="module"></script>
+  </body>
+</html>
