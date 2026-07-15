@@ -10,6 +10,7 @@
   },
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "scripting",
     "activeTab",
@@ -36,5 +37,17 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-  }
+  },
+  "cross_origin_embedder_policy": {
+    "value": "credentialless"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["vendor/transformers/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

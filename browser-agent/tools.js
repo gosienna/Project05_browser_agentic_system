@@ -2,6 +2,8 @@
 // object (always includes tabId when relevant) and returns a plain
 // string/object result suitable for feeding back into the chat transcript.
 
+import { ensureOffscreenDocument } from "./llm.js";
+
 export async function read_page({ tabId, maxChars = 14000 }) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: requireTabId(tabId) },
@@ -94,6 +96,85 @@ export async function fetch_url({ url, maxChars = 12000 }) {
 
 export function wait({ ms = 1000 }) {
   return new Promise((resolve) => setTimeout(() => resolve({ ok: true }), Math.min(ms, 15000)));
+}
+
+/** Caption an image via local Transformers.js image-to-text. */
+export async function describe_image({ tabId, imageUrl, dataUrl } = {}) {
+  const image = await resolveImageInput({ tabId, imageUrl, dataUrl });
+  const model = await preferredModel("image-to-text", "onnxCaptionModel");
+  const res = await engineRun({
+    task: "image-to-text",
+    model,
+    input: image,
+  });
+  if (res.error) throw new Error(res.error.message);
+  return { caption: res.output?.caption ?? "", model: res.model };
+}
+
+/** Classify an image via local Transformers.js ViT. */
+export async function classify_image({ tabId, imageUrl, dataUrl, topK = 5 } = {}) {
+  const image = await resolveImageInput({ tabId, imageUrl, dataUrl });
+  const model = await preferredModel("image-classification", "onnxClassifyModel");
+  const res = await engineRun({
+    task: "image-classification",
+    model,
+    input: image,
+    options: { topK },
+  });
+  if (res.error) throw new Error(res.error.message);
+  return { labels: res.output?.labels ?? [], model: res.model };
+}
+
+/** Transcribe audio via local Whisper (automatic-speech-recognition). */
+export async function transcribe_audio({ audioUrl, dataUrl } = {}) {
+  const audio = await resolveAudioInput({ audioUrl, dataUrl });
+  const model = await preferredModel("automatic-speech-recognition", "onnxAsrModel");
+  const res = await engineRun({
+    task: "automatic-speech-recognition",
+    model,
+    input: audio,
+  });
+  if (res.error) throw new Error(res.error.message);
+  return { text: res.output?.text ?? "", model: res.model };
+}
+
+async function preferredModel(_task, settingsKey) {
+  const { settings } = await chrome.storage.local.get("settings");
+  return settings?.[settingsKey] || undefined; // engine falls back to defaultModelForTask
+}
+
+async function engineRun(request) {
+  await ensureOffscreenDocument();
+  const response = await chrome.runtime.sendMessage({
+    target: "onnx-engine",
+    type: "engine.run",
+    request,
+  });
+  if (!response) throw new Error("Local engine did not respond (offscreen document may have been evicted).");
+  return response;
+}
+
+async function resolveImageInput({ tabId, imageUrl, dataUrl }) {
+  if (dataUrl) return dataUrl;
+  // Remote URLs are fetched inside the offscreen Transformers.js pipeline.
+  if (imageUrl) return imageUrl;
+  if (tabId != null) return captureTab(tabId);
+  throw new Error("describe_image/classify_image requires tabId, imageUrl, or dataUrl");
+}
+
+async function resolveAudioInput({ audioUrl, dataUrl }) {
+  if (dataUrl) return dataUrl;
+  if (audioUrl) return audioUrl;
+  throw new Error("transcribe_audio requires audioUrl or dataUrl");
+}
+
+async function captureTab(tabId) {
+  const id = requireTabId(tabId);
+  const tab = await chrome.tabs.get(id);
+  if (tab.windowId == null) throw new Error(`Tab ${id} has no windowId`);
+  // captureVisibleTab only sees the foreground tab in that window.
+  if (!tab.active) await chrome.tabs.update(id, { active: true });
+  return chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
 }
 
 function requireTabId(tabId) {

@@ -1,41 +1,229 @@
-// Transformers.js integration: device probing, model registry, pipeline
-// cache, and OpenAI-shaped generation. Lives entirely inside the offscreen
-// document (see plan §4). Phase 1: non-streaming only.
+// Transformers.js multi-task engine: device probing, task-keyed model registry,
+// pipeline cache, run() for any supported task, and OpenAI-shaped chat for
+// text-generation. Intended to run inside ort-worker.js (Dedicated Worker).
+
+import { applyIndexedDbCache, clearModelCache, listCachedFiles } from "./model-cache.js";
+
+const VENDOR_DIR = "vendor/transformers/";
+// transformers.js ≥4 uses asyncify for WebGPU (exports webgpuInit).
+// Older jsep builds export jsepInit instead — loading them for WebGPU yields:
+// "Ae(...).webgpuInit is not a function".
+const ASYNCIFY_WASM = "ort-wasm-simd-threaded.asyncify.wasm";
+const ASYNCIFY_MJS = "ort-wasm-simd-threaded.asyncify.mjs";
+const CPU_WASM = "ort-wasm-simd-threaded.wasm";
+const CPU_MJS = "ort-wasm-simd-threaded.mjs";
 
 let transformersModule = null;
+/** @type {"asyncify"|"cpu"|null} */
+let ortFlavor = null;
+
+function vendorUrl(file) {
+  const path = VENDOR_DIR + file;
+  if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
+    return chrome.runtime.getURL(path);
+  }
+  // Module workers sometimes lack chrome.*; resolve against extension origin.
+  return new URL(path, self.location.href).href;
+}
+
+/**
+ * Point ORT at the bundled binaries and (re)assert MV3-safe flags.
+ * Call just before model load so values stick past Transformers' backend setup.
+ *
+ * This engine is expected to run inside ort-worker.js (a Dedicated Worker).
+ * There Atomics.wait is legal, so ORT's nested `proxy` worker must stay OFF.
+ */
+async function configureOrt(preferredDevice) {
+  const { env } = await loadTransformers();
+  const wasm = env.backends.onnx.wasm;
+
+  // Match transformers.js v4 defaults: asyncify for WebGPU, cpu build otherwise.
+  const flavor = preferredDevice === "webgpu" ? "asyncify" : "cpu";
+  if (ortFlavor && ortFlavor !== flavor) {
+    throw new Error(
+      `ORT already started as "${ortFlavor}" but this model wants "${flavor}". ` +
+        `Reload the extension (or Unload all models) before switching WebGPU ↔ CPU.`
+    );
+  }
+
+  const mjs = vendorUrl(flavor === "asyncify" ? ASYNCIFY_MJS : CPU_MJS);
+  const wasmFile = vendorUrl(flavor === "asyncify" ? ASYNCIFY_WASM : CPU_WASM);
+  wasm.wasmPaths = { mjs, wasm: wasmFile };
+
+  wasm.numThreads = 1;
+  // Already inside a Dedicated Worker — nested ORT proxy Workers are unnecessary
+  // and often Aborted/CSP-blocked under MV3.
+  wasm.proxy = false;
+
+  // Drop a previously preloaded binary if the flavor changed (fresh worker).
+  if (wasm._baFlavor && wasm._baFlavor !== flavor) {
+    wasm.wasmBinary = undefined;
+  }
+  if (!wasm.wasmBinary) {
+    const res = await fetch(wasmFile);
+    if (!res.ok) throw new Error(`Failed to fetch ORT wasm (${res.status}): ${wasmFile}`);
+    wasm.wasmBinary = await res.arrayBuffer();
+    wasm._baFlavor = flavor;
+  }
+
+  const inWorker =
+    typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+  console.log(
+    `[onnx] ORT configured device=${preferredDevice} flavor=${flavor} proxy=${wasm.proxy} ` +
+      `numThreads=${wasm.numThreads} inWorker=${inWorker} crossOriginIsolated=${globalThis.crossOriginIsolated === true}`
+  );
+  if (!inWorker) {
+    console.warn(
+      "[onnx] Engine is not running in a Dedicated Worker — threaded ORT will likely Aborted(). " +
+        "Expected host: ort-worker.js via offscreen.js."
+    );
+  }
+  return env;
+}
+
+function markOrtFlavor(preferredDevice) {
+  ortFlavor = preferredDevice === "webgpu" ? "asyncify" : "cpu";
+}
+
 async function loadTransformers() {
   if (!transformersModule) {
-    transformersModule = await import(chrome.runtime.getURL("vendor/transformers/transformers.min.js"));
-    transformersModule.env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("vendor/transformers/");
+    transformersModule = await import(vendorUrl("transformers.min.js"));
+    const wasm = transformersModule.env.backends.onnx.wasm;
+    // Override CDN default — prefer asyncify so the first WebGPU init is correct.
+    wasm.wasmPaths = {
+      mjs: vendorUrl(ASYNCIFY_MJS),
+      wasm: vendorUrl(ASYNCIFY_WASM),
+    };
+    wasm.numThreads = 1;
+    wasm.proxy = false;
     transformersModule.env.allowRemoteModels = true;
-    // Offscreen documents aren't reliably cross-origin-isolated, so
-    // SharedArrayBuffer isn't guaranteed. The threaded wasm build spawns
-    // worker threads unconditionally on init and aborts if that fails
-    // ("Aborted()" from ort-wasm-simd-threaded[.jsep].mjs) — force
-    // single-threaded mode so it never tries. This applies to both the
-    // wasm and webgpu (jsep) backends, which share this binary.
-    transformersModule.env.backends.onnx.wasm.numThreads = 1;
+    transformersModule.env.allowLocalModels = false;
+    // Persist HF weight blobs in IndexedDB (not Cache Storage).
+    applyIndexedDbCache(transformersModule.env);
+
+    const coi = globalThis.crossOriginIsolated === true;
+    const sab = typeof SharedArrayBuffer !== "undefined";
+    console.log(`[onnx] crossOriginIsolated=${coi} SharedArrayBuffer=${sab}`);
   }
   return transformersModule;
 }
 
-// Repo ids verified against the HF Hub API (many onnx-community models carry
-// an "-ONNX" or "-onnx-web" suffix not obvious from the base model name).
+/** @typedef {"text-generation"|"image-to-text"|"image-classification"|"automatic-speech-recognition"} EngineTask */
+/** @typedef {"llm"|"vision"|"audio"} Modality */
+
+/**
+ * Multi-task registry. LLM entries keep the previous chat path; vision/audio
+ * defaults power agent tools (describe_image, classify_image, transcribe_audio).
+ * Models are Xenova / onnx-community ONNX builds verified on the HF Hub.
+ */
 export const MODEL_REGISTRY = [
-  { id: "onnx-community/Llama-3.2-1B-Instruct-ONNX", label: "Llama 3.2 1B", approxSizeMB: 700, tier: "fast" },
-  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1000, tier: "fast" },
-  { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX", label: "Llama 3.2 3B", approxSizeMB: 1800, tier: "default" },
-  { id: "onnx-community/Phi-3.5-mini-instruct-onnx-web", label: "Phi 3.5 mini (3.8B)", approxSizeMB: 2200, tier: "max" },
+  // LLM — ordered smallest → largest for OOM downshift
+  { id: "onnx-community/Llama-3.2-1B-Instruct-ONNX", label: "Llama 3.2 1B", approxSizeMB: 700, tier: "fast", task: "text-generation", modality: "llm" },
+  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1000, tier: "fast", task: "text-generation", modality: "llm" },
+  { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX", label: "Llama 3.2 3B", approxSizeMB: 1800, tier: "default", task: "text-generation", modality: "llm" },
+  { id: "onnx-community/gemma-4-E2B-it-ONNX", label: "Gemma 4 E2B", approxSizeMB: 2200, tier: "default", task: "text-generation", modality: "llm", loader: "gemma4" },
+  { id: "onnx-community/Phi-3.5-mini-instruct-onnx-web", label: "Phi 3.5 mini (3.8B)", approxSizeMB: 2200, tier: "max", task: "text-generation", modality: "llm" },
+  { id: "onnx-community/gemma-4-E4B-it-ONNX", label: "Gemma 4 E4B", approxSizeMB: 4200, tier: "max", task: "text-generation", modality: "llm", loader: "gemma4" },
+
+  // Captioning / OCR (image-to-text)
+  { id: "Xenova/vit-gpt2-image-captioning", label: "ViT-GPT2 captioning", approxSizeMB: 250, tier: "default", task: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-small-printed", label: "TrOCR small (printed)", approxSizeMB: 60, tier: "fast", task: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-small-handwritten", label: "TrOCR small (handwritten)", approxSizeMB: 60, tier: "fast", task: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-base-printed", label: "TrOCR base (printed)", approxSizeMB: 330, tier: "max", task: "image-to-text", modality: "vision" },
+  { id: "Xenova/nougat-small", label: "Nougat small (docs→MD)", approxSizeMB: 500, tier: "max", task: "image-to-text", modality: "vision" },
+
+  // Image classification
+  { id: "Xenova/vit-base-patch16-224", label: "ViT base (ImageNet)", approxSizeMB: 90, tier: "default", task: "image-classification", modality: "vision" },
+  { id: "onnx-community/mobilenetv4_conv_small.e2400_r224_in1k", label: "MobileNetV4 small", approxSizeMB: 15, tier: "fast", task: "image-classification", modality: "vision" },
+  { id: "Xenova/mobilevit-small", label: "MobileViT small", approxSizeMB: 20, tier: "fast", task: "image-classification", modality: "vision" },
+  { id: "Xenova/resnet-50", label: "ResNet-50", approxSizeMB: 100, tier: "default", task: "image-classification", modality: "vision" },
+  { id: "Xenova/convnext-tiny-224", label: "ConvNeXt tiny", approxSizeMB: 110, tier: "default", task: "image-classification", modality: "vision" },
+
+  // Speech recognition
+  { id: "Xenova/whisper-tiny.en", label: "Whisper tiny.en", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "onnx-community/whisper-tiny.en", label: "Whisper tiny.en (onnx-community)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-base.en", label: "Whisper base.en", approxSizeMB: 150, tier: "default", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-tiny", label: "Whisper tiny (multilingual)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-small.en", label: "Whisper small.en", approxSizeMB: 500, tier: "max", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "onnx-community/moonshine-tiny-ONNX", label: "Moonshine tiny", approxSizeMB: 50, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
 ];
 
 const DEFAULT_TOP_P = 0.9;
+const TEXT_GENERATION = "text-generation";
 
 let device = null; // "webgpu" | "wasm", probed once and cached
 let dtype = null;
-let currentModelId = null;
-let currentPipeline = null;
+/** @type {Map<string, { pipeline: object, task: string, modelId: string }>} */
+const loaded = new Map();
 let busy = false;
 let queue = Promise.resolve();
+
+function slotKey(task, modelId) {
+  return `${task}::${modelId}`;
+}
+
+function registryEntry(modelId) {
+  return MODEL_REGISTRY.find((m) => m.id === modelId) || null;
+}
+
+function isGemma4Model(modelId) {
+  return registryEntry(modelId)?.loader === "gemma4" || /gemma-4/i.test(modelId || "");
+}
+
+function dtypeForModel(modelId, device) {
+  const entry = registryEntry(modelId);
+  if (entry?.dtype) return entry.dtype;
+  if (device === "webgpu") return "q4f16";
+  return "q4";
+}
+
+/** WebGPU GatherBlockQuantized only accepts 4- or 8-bit weights (ORT). */
+function isWebGpuBlockedQuant(dtypeName) {
+  return /^(q2|q2f16|q3|q3f16)$/i.test(String(dtypeName || ""));
+}
+
+/**
+ * Pick the ORT *runtime* flavor (wasm binary) vs the session device (EP).
+ * q2f16 mobile weights must use the CPU EP even when WebGPU runtime is loaded.
+ */
+function sessionDeviceForModel(modelId, preferredDevice) {
+  const dt = dtypeForModel(modelId, preferredDevice);
+  if (preferredDevice === "webgpu" && isWebGpuBlockedQuant(dt)) {
+    console.warn(
+      `[onnx] ${dt} is not supported by WebGPU GatherBlockQuantized (bits must be 4 or 8); using CPU EP for ${modelId}`
+    );
+    return "wasm";
+  }
+  return preferredDevice;
+}
+
+function toGemmaMessages(messages) {
+  return (messages || []).map((m) => {
+    const role = m.role === "system" ? "system" : m.role === "assistant" ? "assistant" : "user";
+    if (Array.isArray(m.content)) return { role, content: m.content };
+    return { role, content: [{ type: "text", text: String(m.content ?? "") }] };
+  });
+}
+
+export function defaultModelForTask(task) {
+  return MODEL_REGISTRY.find((m) => m.task === task)?.id || null;
+}
+
+export function modelsForTask(task) {
+  if (!task) return MODEL_REGISTRY.filter((m) => m.task === TEXT_GENERATION);
+  return MODEL_REGISTRY.filter((m) => m.task === task);
+}
+
+function findLoadedForTask(task) {
+  for (const entry of loaded.values()) {
+    if (entry.task === task) return entry;
+  }
+  return null;
+}
+
+function llmLoadedModelId() {
+  return findLoadedForTask(TEXT_GENERATION)?.modelId || null;
+}
 
 async function probeDevice() {
   if (device) return { device, dtype };
@@ -68,47 +256,169 @@ function markDownloaded(modelId) {
 }
 
 export async function status() {
+  let cachedFiles = [];
+  try {
+    cachedFiles = await listCachedFiles();
+  } catch {
+    // cache may not be open yet
+  }
+  const loadedList = [...loaded.values()].map(({ task, modelId }) => ({ task, model: modelId }));
   return {
     device,
     dtype,
-    loadedModel: currentModelId,
+    // Back-compat for Settings UI (LLM picker).
+    loadedModel: llmLoadedModelId(),
+    loaded: loadedList,
     busy,
     registry: MODEL_REGISTRY,
+    cacheBackend: "indexeddb",
+    cachedFiles,
   };
 }
 
-export async function unload() {
-  if (currentPipeline?.dispose) {
-    try {
-      await currentPipeline.dispose();
-    } catch {
-      // best-effort
-    }
-  }
-  currentPipeline = null;
-  currentModelId = null;
+/** Drop all IndexedDB-cached weight files (in-memory pipelines untouched). */
+export async function clearCache() {
+  await clearModelCache();
   return status();
 }
 
-export async function loadModel(modelId) {
-  if (currentModelId === modelId && currentPipeline) return status();
+async function disposeEntry(entry) {
+  try {
+    if (entry?.model?.dispose) await entry.model.dispose();
+    else if (entry?.pipeline?.dispose) await entry.pipeline.dispose();
+  } catch {
+    // best-effort
+  }
+}
 
-  const { pipeline } = await loadTransformers();
-  const { device: d, dtype: dt } = await probeDevice();
+/**
+ * @param {{ task?: string, model?: string }|string|undefined} opts
+ *   Back-compat: unload() / unload(modelId) unloads all or a single LLM model.
+ */
+export async function unload(opts) {
+  if (typeof opts === "string") {
+    opts = { model: opts, task: TEXT_GENERATION };
+  }
+  const task = opts?.task;
+  const model = opts?.model;
 
-  if (currentPipeline) await unload();
+  if (!task && !model) {
+    for (const [key, entry] of [...loaded.entries()]) {
+      await disposeEntry(entry);
+      loaded.delete(key);
+    }
+    return status();
+  }
 
-  console.log(`[onnx] loading ${modelId} on ${d} (${dt})`);
-  currentPipeline = await pipeline("text-generation", modelId, {
-    device: d,
-    dtype: dt,
-    progress_callback: (event) => {
-      broadcastProgress({ file: event.file, status: event.status, progress: event.progress, loaded: event.loaded, total: event.total, model: modelId });
-    },
-  });
-  currentModelId = modelId;
+  for (const [key, entry] of [...loaded.entries()]) {
+    if (task && entry.task !== task) continue;
+    if (model && entry.modelId !== model) continue;
+    await disposeEntry(entry);
+    loaded.delete(key);
+  }
+  return status();
+}
+
+async function unloadOthersExcept(keepTask, keepModelId) {
+  for (const [key, entry] of [...loaded.entries()]) {
+    if (entry.task === keepTask && entry.modelId === keepModelId) continue;
+    console.warn(`[onnx] unloading ${entry.task}:${entry.modelId} to free memory`);
+    await disposeEntry(entry);
+    loaded.delete(key);
+  }
+}
+
+/**
+ * Load (or reuse) a pipeline for a task.
+ * @param {string|{ task?: string, model: string }} modelOrOpts
+ *   Back-compat: loadModel(modelId) loads text-generation.
+ */
+export async function loadModel(modelOrOpts) {
+  const opts =
+    typeof modelOrOpts === "string"
+      ? { model: modelOrOpts, task: TEXT_GENERATION }
+      : modelOrOpts || {};
+
+  const modelId = opts.model;
+  if (!modelId) throw new Error("No model specified.");
+
+  const task = opts.task || registryEntry(modelId)?.task || TEXT_GENERATION;
+  const key = slotKey(task, modelId);
+  if (loaded.has(key)) return status();
+
+  // Same task, different model → dispose the previous one for that task.
+  const sameTask = findLoadedForTask(task);
+  if (sameTask && sameTask.modelId !== modelId) {
+    await unload({ task });
+  }
+
+  const { pipeline, AutoProcessor, Gemma4ForConditionalGeneration } = await loadTransformers();
+  const { device: preferred } = await probeDevice();
+  // Keep WebGPU/asyncify runtime when available so other models stay on GPU;
+  // individual sessions may still use CPU EP (e.g. q2f16 mobile).
+  await configureOrt(preferred === "webgpu" ? "webgpu" : "wasm");
+
+  const sessionDevice = sessionDeviceForModel(modelId, preferred);
+  const modelDtype = dtypeForModel(modelId, sessionDevice);
+  const progress_callback = (event) => {
+    broadcastProgress({
+      file: event.file,
+      status: event.status,
+      progress: event.progress,
+      loaded: event.loaded,
+      total: event.total,
+      model: modelId,
+      task,
+    });
+  };
+
+  console.log(
+    `[onnx] loading ${task} ${modelId} on ${sessionDevice} (${modelDtype})` +
+      `${isGemma4Model(modelId) ? " [gemma4]" : ""}${sessionDevice !== preferred ? ` (runtime=${preferred})` : ""}`
+  );
+
+  let entry;
+  try {
+    if (isGemma4Model(modelId)) {
+      if (!Gemma4ForConditionalGeneration || !AutoProcessor) {
+        throw new Error("Gemma4 support missing — rebuild vendor/transformers (need @huggingface/transformers ≥ 4.2).");
+      }
+      const processor = await AutoProcessor.from_pretrained(modelId, { progress_callback });
+      const model = await Gemma4ForConditionalGeneration.from_pretrained(modelId, {
+        device: sessionDevice,
+        dtype: modelDtype,
+        progress_callback,
+      });
+      entry = { kind: "gemma4", model, processor, pipeline: null, task, modelId };
+    } else {
+      const pipelineOpts = {
+        device: sessionDevice,
+        progress_callback,
+      };
+      if (task === TEXT_GENERATION) pipelineOpts.dtype = modelDtype;
+      const pipe = await pipeline(task, modelId, pipelineOpts);
+      entry = { kind: "pipeline", pipeline: pipe, task, modelId };
+    }
+  } catch (err) {
+    const message = String(err?.message || err);
+    if (/webgpuInit is not a function/i.test(message)) {
+      throw new Error(
+        `WebGPU backend failed (${message}). Reload the extension so ORT can start with the asyncify WASM build, then try again.`
+      );
+    }
+    if (/bits.must be 4 or 8|GatherBlockQuantized/i.test(message)) {
+      throw new Error(
+        `"${modelId}" uses a quantization WebGPU cannot run (need 4- or 8-bit). ` +
+          `Use Gemma 4 E2B/E4B (q4f16) on GPU, or reload and retry — mobile QAT now forces CPU.`
+      );
+    }
+    throw err;
+  }
+
+  loaded.set(key, entry);
+  markOrtFlavor(preferred === "webgpu" ? "webgpu" : "wasm");
   markDownloaded(modelId);
-  console.log(`[onnx] ${modelId} ready`);
+  console.log(`[onnx] ${task} ${modelId} ready`);
   return status();
 }
 
@@ -127,7 +437,7 @@ function errorResponse(message, type) {
   return { error: { message, type, code: null } };
 }
 
-/** FIFO-serialize concurrent requests (trackers + chat may collide). */
+/** FIFO-serialize concurrent requests (trackers + chat + media tools may collide). */
 function enqueue(fn) {
   const run = queue.then(fn, fn);
   queue = run.then(
@@ -137,81 +447,249 @@ function enqueue(fn) {
   return run;
 }
 
+/**
+ * Run any registered task. Returns `{ task, model, output }` or `{ error }`.
+ * @param {{ task: string, model?: string, input: unknown, options?: object }} request
+ */
+export function run(request) {
+  return enqueue(() => runInference(request));
+}
+
 export function chatCompletions(request) {
   return enqueue(() => runChatCompletions(request));
+}
+
+async function ensureLoaded(task, modelId) {
+  const key = slotKey(task, modelId);
+  if (loaded.has(key)) return loaded.get(key);
+
+  try {
+    await loadModel({ task, model: modelId });
+    return loaded.get(key);
+  } catch (err) {
+    return await handleLoadFailure(task, modelId, err);
+  }
+}
+
+async function runInference(request) {
+  const task = request?.task;
+  if (!task) return errorResponse("No task specified.", "engine_error");
+
+  const modelId = request.model || defaultModelForTask(task);
+  if (!modelId) return errorResponse(`No model available for task "${task}".`, "model_not_loaded");
+  if (request.input === undefined || request.input === null) {
+    return errorResponse("No input provided.", "engine_error");
+  }
+
+  busy = true;
+  try {
+    const entryOrErr = await ensureLoaded(task, modelId);
+    if (entryOrErr?.error) return entryOrErr;
+    const entry = entryOrErr;
+    if (!entry?.pipeline && !entry?.model) {
+      return errorResponse(`Failed to load model "${modelId}".`, "download_failed");
+    }
+
+    const options = request.options || {};
+    let raw;
+    try {
+      raw = await invokeEntry(entry, task, request.input, options);
+    } catch (err) {
+      const message = String(err?.message || err);
+      if (isOomError(message)) {
+        console.warn(`[onnx] OOM during ${task}, unloading other pipelines and retrying once`);
+        await unloadOthersExcept(task, modelId);
+        const reloaded = await ensureLoaded(task, modelId);
+        if (reloaded?.error) return reloaded;
+        if (!reloaded?.pipeline && !reloaded?.model) {
+          return errorResponse(`Failed to reload model "${modelId}" after OOM.`, "oom");
+        }
+        try {
+          raw = await invokeEntry(reloaded, task, request.input, options);
+        } catch (err2) {
+          return await handleGenerationFailure(task, modelId, err2);
+        }
+      } else {
+        return await handleGenerationFailure(task, modelId, err);
+      }
+    }
+
+    return { task, model: modelId, output: normalizeOutput(task, raw, options) };
+  } finally {
+    busy = false;
+  }
+}
+
+async function invokeGemma4(entry, input, options) {
+  const { model, processor } = entry;
+  const messages = Array.isArray(input) ? toGemmaMessages(input) : toGemmaMessages([{ role: "user", content: String(input) }]);
+  const prompt = processor.apply_chat_template(messages, {
+    enable_thinking: false,
+    add_generation_prompt: true,
+  });
+  const inputs = await processor(prompt, undefined, undefined, { add_special_tokens: false });
+  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const temperature = options.temperature ?? 0.2;
+  const outputs = await model.generate({
+    ...inputs,
+    max_new_tokens: maxNewTokens,
+    temperature,
+    do_sample: temperature > 0,
+    top_p: options.top_p ?? DEFAULT_TOP_P,
+  });
+  const promptLen = inputs.input_ids.dims.at(-1);
+  const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
+    skip_special_tokens: true,
+  });
+  return [{ generated_text: decoded?.[0] ?? "" }];
+}
+
+async function invokeEntry(entry, task, input, options) {
+  if (entry?.kind === "gemma4" || entry?.model) {
+    return invokeGemma4(entry, input, options);
+  }
+  return invokePipeline(entry.pipeline, task, input, options);
+}
+
+async function invokePipeline(pipe, task, input, options) {
+  if (task === TEXT_GENERATION) {
+    const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+    const temperature = options.temperature ?? 0.2;
+    return pipe(input, {
+      max_new_tokens: maxNewTokens,
+      temperature,
+      do_sample: temperature > 0,
+      top_p: options.top_p ?? DEFAULT_TOP_P,
+      return_full_text: false,
+    });
+  }
+  if (task === "image-classification") {
+    const topk = options.topK ?? options.topk ?? 5;
+    return pipe(input, { topk });
+  }
+  if (task === "automatic-speech-recognition") {
+    return pipe(input, options);
+  }
+  // image-to-text and other VisionEncoderDecoder-style pipelines
+  return pipe(input, options);
+}
+
+function normalizeOutput(task, raw, options) {
+  if (task === TEXT_GENERATION) {
+    const text = Array.isArray(raw) ? raw[0]?.generated_text ?? "" : raw?.generated_text ?? "";
+    const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
+    return { text: content };
+  }
+  if (task === "image-to-text") {
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const caption = first?.generated_text ?? (typeof first === "string" ? first : JSON.stringify(first));
+    return { caption };
+  }
+  if (task === "image-classification") {
+    const list = Array.isArray(raw) ? raw : [raw];
+    const topK = options.topK ?? options.topk ?? 5;
+    return {
+      labels: list.slice(0, topK).map((r) => ({
+        label: r?.label ?? String(r),
+        score: typeof r?.score === "number" ? r.score : null,
+      })),
+    };
+  }
+  if (task === "automatic-speech-recognition") {
+    const text = typeof raw === "string" ? raw : raw?.text ?? "";
+    return { text };
+  }
+  return raw;
 }
 
 async function runChatCompletions(request) {
   const modelId = request.model;
   if (!modelId) return errorResponse("No model specified.", "model_not_loaded");
 
-  busy = true;
-  try {
-    if (currentModelId !== modelId) {
-      await loadModel(modelId);
-    }
-  } catch (err) {
-    busy = false;
-    return await handleLoadFailure(modelId, err);
-  }
+  const result = await runInference({
+    task: TEXT_GENERATION,
+    model: modelId,
+    input: request.messages,
+    options: {
+      max_new_tokens: request.max_tokens ?? 512,
+      temperature: request.temperature ?? 0.2,
+    },
+  });
 
-  try {
-    const maxNewTokens = request.max_tokens ?? 512;
-    const temperature = request.temperature ?? 0.2;
-    const output = await currentPipeline(request.messages, {
-      max_new_tokens: maxNewTokens,
-      temperature,
-      do_sample: temperature > 0,
-      top_p: DEFAULT_TOP_P,
-      return_full_text: false,
-    });
+  if (result.error) return result;
 
-    const text = Array.isArray(output) ? output[0]?.generated_text ?? "" : output?.generated_text ?? "";
-    const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
-    const finishReason = content.length > 0 ? "stop" : "length";
-
-    return toResponse(modelId, content, finishReason, {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    });
-  } catch (err) {
-    return await handleGenerationFailure(modelId, err);
-  } finally {
-    busy = false;
-  }
+  const content = result.output?.text ?? "";
+  const finishReason = content.length > 0 ? "stop" : "length";
+  return toResponse(result.model, content, finishReason, {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+  });
 }
 
-async function handleLoadFailure(modelId, err) {
+async function handleLoadFailure(task, modelId, err) {
   const message = String(err?.message || err);
-  console.error(`[onnx] failed to load ${modelId}:`, message);
+  console.error(`[onnx] failed to load ${task} ${modelId}:`, message);
   if (isOomError(message) && device === "webgpu") {
-    const smaller = nextSmallerModel(modelId);
-    if (smaller) {
-      console.warn(`[onnx] OOM loading ${modelId}, retrying once on smaller model ${smaller}`);
-      await unload();
+    if (task === TEXT_GENERATION) {
+      const smaller = nextSmallerModel(modelId);
+      if (smaller) {
+        console.warn(`[onnx] OOM loading ${modelId}, retrying once on smaller model ${smaller}`);
+        await unload({ task });
+        try {
+          await loadModel({ task, model: smaller });
+          return errorResponse(
+            `"${modelId}" ran out of GPU memory, so I loaded "${smaller}" instead. Retry your request.`,
+            "oom"
+          );
+        } catch (err2) {
+          return errorResponse(`Out of memory loading "${modelId}", and the smaller fallback also failed: ${err2.message}`, "oom");
+        }
+      }
+    } else {
+      await unloadOthersExcept(task, modelId);
       try {
-        await loadModel(smaller);
+        await loadModel({ task, model: modelId });
         return errorResponse(
-          `"${modelId}" ran out of GPU memory, so I loaded "${smaller}" instead. Retry your request.`,
+          `Ran out of GPU memory loading "${modelId}". Other pipelines were unloaded — retry your request.`,
           "oom"
         );
       } catch (err2) {
-        return errorResponse(`Out of memory loading "${modelId}", and the smaller fallback also failed: ${err2.message}`, "oom");
+        return errorResponse(`Out of memory loading "${modelId}": ${err2.message}`, "oom");
       }
     }
+  }
+  if (/bits.must be 4 or 8|GatherBlockQuantized/i.test(message)) {
+    return errorResponse(
+      `Failed to load "${modelId}": WebGPU only supports 4/8-bit weights. Mobile QAT (q2f16) must run on CPU — reload the extension and try again, or pick Gemma 4 E2B/E4B (non-mobile) for GPU.`,
+      "engine_error"
+    );
+  }
+  if (/webgpuInit is not a function|no available backend/i.test(message)) {
+    return errorResponse(
+      `Failed to load "${modelId}": WebGPU/ORT runtime mismatch. Reload the extension from chrome://extensions ` +
+        `(needed after upgrading Transformers.js), then download again.`,
+      "engine_error"
+    );
+  }
+  if (/Aborted\s*\(/i.test(message)) {
+    return errorResponse(
+      `ORT WASM aborted while loading "${modelId}". Weights may already be in IndexedDB — the failure is runtime init. ` +
+        `Reload the extension and confirm the worker console shows inWorker=true (chrome://inspect/#other → ort-worker).`,
+      "engine_error"
+    );
   }
   return errorResponse(`Failed to load model "${modelId}": ${message}`, "download_failed");
 }
 
-async function handleGenerationFailure(modelId, err) {
+async function handleGenerationFailure(task, modelId, err) {
   const message = String(err?.message || err);
-  console.error(`[onnx] generation failed for ${modelId}:`, message);
+  console.error(`[onnx] ${task} failed for ${modelId}:`, message);
   if (isOomError(message)) {
-    await unload();
-    return errorResponse(`Ran out of memory generating a response. The model was unloaded — try a smaller model.`, "oom");
+    await unload({ task, model: modelId });
+    return errorResponse(`Ran out of memory running "${task}". The model was unloaded — try again or free other models.`, "oom");
   }
-  return errorResponse(`Local generation failed: ${message}`, "engine_error");
+  return errorResponse(`Local ${task} failed: ${message}`, "engine_error");
 }
 
 function isOomError(message) {
@@ -219,7 +697,8 @@ function isOomError(message) {
 }
 
 function nextSmallerModel(modelId) {
-  const idx = MODEL_REGISTRY.findIndex((m) => m.id === modelId);
+  const llm = modelsForTask(TEXT_GENERATION);
+  const idx = llm.findIndex((m) => m.id === modelId);
   if (idx <= 0) return null;
-  return MODEL_REGISTRY[idx - 1].id;
+  return llm[idx - 1].id;
 }

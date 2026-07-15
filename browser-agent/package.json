@@ -8,7 +8,7 @@
     "build:vendor": "node build/build-vendor.mjs"
   },
   "devDependencies": {
-    "@huggingface/transformers": "^3.0.0",
+    "@huggingface/transformers": "4.2.0",
     "esbuild": "^0.24.0"
   }
 }

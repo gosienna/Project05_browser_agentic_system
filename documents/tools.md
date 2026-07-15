@@ -60,6 +60,21 @@ Pauses execution.
 - Sleeps for `ms` milliseconds, capped at 15,000ms (15s) to prevent runaway waits
 - Returns `{ ok: true }`
 
+### `describe_image({ tabId?, imageUrl?, dataUrl? })`
+Captions an image using a local Transformers.js `image-to-text` model (runs in the ONNX offscreen engine).
+- Prefers `dataUrl`, else `imageUrl` (fetched by the pipeline), else screenshots `tabId` via `chrome.tabs.captureVisibleTab` (JPEG quality 70)
+- Returns `{ caption, model }`
+
+### `classify_image({ tabId?, imageUrl?, dataUrl?, topK = 5 })`
+Classifies an image using a local ViT (`image-classification`).
+- Same image resolution as `describe_image`
+- Returns `{ labels: [{ label, score }], model }`
+
+### `transcribe_audio({ audioUrl?, dataUrl? })`
+Transcribes English audio using local Whisper (`automatic-speech-recognition`).
+- Requires `audioUrl` or `dataUrl` (no microphone capture)
+- Returns `{ text, model }`
+
 ---
 
 ## Shared Helpers
@@ -80,5 +95,6 @@ Slices a string to `max` characters and appends `"\n...[truncated]"` if it was c
 | **Tab management** | `list_tabs`, `open_tab`, `navigate` | `chrome.tabs.*` API — no script injection needed |
 | **Network** | `fetch_url` | Plain `fetch()` — bypasses the browser tab entirely |
 | **Timing** | `wait` | `setTimeout` wrapped in a Promise |
+| **Local multimodal (ONNX)** | `describe_image`, `classify_image`, `transcribe_audio` | Offscreen Transformers.js via `engine.run`. Models are picked in Settings (`onnxCaptionModel`, `onnxClassifyModel`, `onnxAsrModel`) from the curated Xenova/onnx-community registry. |
 
 All tools requiring `tabId` validate it via `requireTabId()` before running, so a missing tab produces a clear error the LLM can react to rather than a silent failure.

@@ -144,6 +144,22 @@ button:disabled { opacity: 0.5; cursor: default; }
 .hint { font-size: 12px; color: #666; margin: 0; }
 .secondary-btn { background: #fff; color: #2557d6; align-self: flex-start; }
 
+.dialogue-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dialogue-model-row label {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+.dialogue-model-row select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+
 #dialogue-system-wrap textarea { width: 100%; }
 
 .dialogue-chat { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
@@ -187,19 +203,30 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .device-line { font-size: 12px; color: #444; }
 
-#onnx-registry { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-#onnx-registry li {
+.onnx-section-title {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.onnx-registry { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.onnx-registry li {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   background: #fff;
   border: 1px solid #e5e5e5;
   border-radius: 6px;
   padding: 6px 8px;
 }
-#onnx-registry li.selected { border-color: #2557d6; }
-#onnx-registry .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; }
-#onnx-registry .badge.downloaded { background: #dff4e6; color: #1c7c44; }
+.onnx-registry li.selected { border-color: #2557d6; }
+.onnx-registry .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; white-space: nowrap; }
+.onnx-registry .badge.downloaded { background: #dff4e6; color: #1c7c44; }
+.onnx-registry small { color: #666; }
 
 .progress-bar { height: 6px; background: #eee; border-radius: 999px; overflow: hidden; }
 #onnx-progress-fill { height: 100%; width: 0%; background: #2557d6; transition: width 0.2s; }
@@ -231,13 +258,14 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 @media (prefers-color-scheme: dark) {
   body { background: #1b1b1f; color: #eee; }
-  .topbar, .trace .event, #tracker-list li, #onnx-registry li, .ob-card, .dialogue-bubble { background: #26262c; border-color: #3a3a42; }
+  .topbar, .trace .event, #tracker-list li, .onnx-registry li, .ob-card, .dialogue-bubble { background: #26262c; border-color: #3a3a42; }
   .modal { background: #26262c; }
   .modal-header { border-color: #3a3a42; }
   .icon-btn { color: #aaa; }
   .dialogue-bubble.user { background: #2a2f3d; }
   .dialogue-raw-panel { background: #1f1f24; border-color: #3a3a42; }
   .secondary-btn { background: #26262c; }
+  .dialogue-model-row label { color: #aaa; }
   .hint { color: #aaa; }
   .onboarding { background: #1b1b1f; }
   textarea, input, select { background: #26262c; color: #eee; border-color: #3a3a42; }

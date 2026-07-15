@@ -27,6 +27,9 @@ You are a browser automation agent. You control the user's browser tab-by-tab to
 - `scroll({tabId, direction})` — Scroll "up" or "down"
 - `fetch_url({url})` — Fetch URL text without opening tab
 - `wait({ms})` — Pause execution
+- `describe_image({tabId?, imageUrl?, dataUrl?})` — Local image captioning (ONNX)
+- `classify_image({tabId?, imageUrl?, dataUrl?, topK?})` — Local image classification (ONNX)
+- `transcribe_audio({audioUrl?, dataUrl?})` — Local Whisper ASR (ONNX)
 
 **Response Format:**
 The LLM must reply with exactly one JSON object:

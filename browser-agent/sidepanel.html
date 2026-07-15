@@ -33,7 +33,10 @@
 
     <main>
       <section id="tab-dialogue" class="tab-panel">
-        <div class="model-badge dialogue-badge"></div>
+        <div class="dialogue-model-row">
+          <label for="dialogue-model-select">Model</label>
+          <select id="dialogue-model-select" aria-label="Chat model"></select>
+        </div>
         <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
         <div id="dialogue-system-wrap" class="hidden">
           <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>
@@ -83,12 +86,26 @@
 
           <div id="onnx-settings" class="provider-block hidden">
             <div id="onnx-device" class="device-line">Device: unknown</div>
-            <ul id="onnx-registry"></ul>
+
+            <h3 class="onnx-section-title">Chat model (LLM)</h3>
+            <ul id="onnx-registry" class="onnx-registry"></ul>
+
+            <h3 class="onnx-section-title">Image captioning</h3>
+            <ul id="onnx-registry-caption" class="onnx-registry"></ul>
+
+            <h3 class="onnx-section-title">Image classification</h3>
+            <ul id="onnx-registry-classify" class="onnx-registry"></ul>
+
+            <h3 class="onnx-section-title">Speech transcription</h3>
+            <ul id="onnx-registry-asr" class="onnx-registry"></ul>
+
             <div id="onnx-progress-wrap" class="hidden">
               <div class="progress-bar"><div id="onnx-progress-fill"></div></div>
               <div id="onnx-progress-label"></div>
             </div>
-            <button id="onnx-unload-btn" type="button">Unload model</button>
+            <button id="onnx-unload-btn" type="button">Unload all models</button>
+            <button id="onnx-clear-cache-btn" type="button">Clear model cache</button>
+            <div id="onnx-cache-hint" class="device-line"></div>
           </div>
 
           <div id="remote-settings" class="provider-block hidden">

@@ -110,11 +110,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // it relays through here so background owns the offscreen lifecycle.
   if (msg.type === "onnx.relay") {
     ensureOffscreenDocument()
-      .then(() => chrome.runtime.sendMessage({ target: "onnx-engine", type: msg.engineType, model: msg.model, request: msg.request }))
+      .then(() =>
+        chrome.runtime.sendMessage({
+          target: "onnx-engine",
+          type: msg.engineType,
+          model: msg.model,
+          task: msg.task,
+          request: msg.request,
+        })
+      )
       .then(async (res) => {
         // Persist before responding so the panel's immediate storage read
         // sees the flag (the offscreen broadcast alone would race it).
-        if (msg.engineType === "engine.load" && msg.model && !res?.error) await markModelDownloaded(msg.model);
+        const loadedModel = msg.model || msg.request?.model;
+        if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markModelDownloaded(loadedModel);
         sendResponse(res);
       })
       .catch((err) => sendResponse({ error: { message: err.message, type: "engine_error", code: null } }));

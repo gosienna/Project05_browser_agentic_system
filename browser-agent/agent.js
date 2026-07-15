@@ -15,6 +15,9 @@ Tools:
 - scroll({tabId, direction}): scrolls the tab "up" or "down" by one screen.
 - fetch_url({url}): fetches a URL's text content without opening a tab.
 - wait({ms}): pauses for ms milliseconds.
+- describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image (screenshot of tabId, or imageUrl/dataUrl). Returns {caption, model}.
+- classify_image({tabId?, imageUrl?, dataUrl?, topK?}): locally classifies an image. Returns {labels:[{label,score}], model}.
+- transcribe_audio({audioUrl?, dataUrl?}): locally transcribes English audio via Whisper. Returns {text, model}.
 
 On every turn, reply with exactly ONE JSON object and nothing else:
 - To use a tool: {"thought": "...", "tool": "<name>", "args": {...}}

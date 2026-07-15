@@ -50,6 +50,7 @@ function wireTabs() {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
       document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
+      if (btn.dataset.tab === "dialogue") refreshDialogueModelSelect();
     });
   });
 }
@@ -84,7 +85,7 @@ function wireOnboarding() {
     $("#onboarding").classList.add("hidden");
     openSettingsModal();
     await refreshOnnxSettings();
-    startDownload("onnx-community/Qwen2.5-1.5B-Instruct");
+    startDownload("onnx-community/Qwen2.5-1.5B-Instruct", "text-generation");
   });
   $("#ob-ollama").addEventListener("click", async () => {
     await saveSettings({ provider: "ollama", baseUrl: "http://localhost:11434", model: "llama3.2" });
@@ -132,6 +133,13 @@ function wireSettingsForm() {
     await sendMessage({ type: "onnx.relay", engineType: "engine.unload" });
     await refreshOnnxSettings();
   });
+  $("#onnx-clear-cache-btn").addEventListener("click", async () => {
+    if (!confirm("Delete all cached ONNX model weights from IndexedDB? You'll need to re-download models.")) return;
+    await sendMessage({ type: "onnx.relay", engineType: "engine.clearCache" });
+    await chrome.storage.local.set({ onnxModels: {} });
+    downloadedModels = {};
+    await refreshOnnxSettings();
+  });
   $("#test-connection-btn").addEventListener("click", testConnection);
 }
 
@@ -146,11 +154,13 @@ function applySettingsToForm() {
   $("#remote-settings").classList.toggle("hidden", isOnnx);
   if (isOnnx) refreshOnnxSettings();
   renderModelBadge();
+  refreshDialogueModelSelect();
 }
 
 async function saveSettings(patch) {
   settings = await sendMessage({ type: "settings.set", patch });
   renderModelBadge();
+  refreshDialogueModelSelect();
   return settings;
 }
 
@@ -161,49 +171,86 @@ async function refreshOnnxSettings() {
   const statusRes = await sendMessage({ type: "onnx.relay", engineType: "engine.status" });
   if (statusRes?.error) {
     $("#onnx-device").textContent = "Device: not started yet";
+    $("#onnx-cache-hint").textContent = "";
   } else {
     const deviceLabel = statusRes.device === "webgpu" ? "GPU (WebGPU)" : statusRes.device === "wasm" ? "CPU (slow)" : "unknown";
     $("#onnx-device").textContent = `Device: ${statusRes.device ? deviceLabel : "not started yet"}`;
+    const files = statusRes.cachedFiles || [];
+    const totalMB = files.reduce((sum, f) => sum + (f.size || 0), 0) / (1024 * 1024);
+    $("#onnx-cache-hint").textContent = files.length
+      ? `IndexedDB cache: ${files.length} file(s), ~${totalMB.toFixed(0)} MB`
+      : "IndexedDB cache: empty";
     registry = statusRes.registry || registry;
     lastKnownDevice = statusRes.device || lastKnownDevice;
     renderModelBadge();
   }
 
   if (registry.length === 0) {
-    const modelsRes = await sendMessage({ type: "onnx.relay", engineType: "engine.models" });
-    registry = modelsRes?.models || [];
+    const modelsRes = await sendMessage({ type: "onnx.relay", engineType: "engine.models", task: "*" });
+    // Fallback: full registry via status already attempted; try chat models only then
+    if (!modelsRes?.models?.length) {
+      const llmRes = await sendMessage({ type: "onnx.relay", engineType: "engine.models" });
+      registry = llmRes?.models || [];
+    } else {
+      registry = modelsRes.models;
+    }
   }
 
-  renderRegistry(statusRes?.loadedModel);
+  const loadedByTask = {};
+  for (const entry of statusRes?.loaded || []) {
+    loadedByTask[entry.task] = entry.model;
+  }
+  // Back-compat if older engine only returns loadedModel
+  if (!loadedByTask["text-generation"] && statusRes?.loadedModel) {
+    loadedByTask["text-generation"] = statusRes.loadedModel;
+  }
+
+  renderRegistrySection("onnx-registry", "text-generation", "onnxModel", loadedByTask["text-generation"]);
+  renderRegistrySection("onnx-registry-caption", "image-to-text", "onnxCaptionModel", loadedByTask["image-to-text"]);
+  renderRegistrySection("onnx-registry-classify", "image-classification", "onnxClassifyModel", loadedByTask["image-classification"]);
+  renderRegistrySection("onnx-registry-asr", "automatic-speech-recognition", "onnxAsrModel", loadedByTask["automatic-speech-recognition"]);
+  refreshDialogueModelSelect();
 }
 
-function renderRegistry(loadedModel) {
-  const list = $("#onnx-registry");
+function sizeLabel(mb) {
+  if (mb >= 1000) return `~${(mb / 1000).toFixed(1)} GB`;
+  return `~${mb} MB`;
+}
+
+function renderRegistrySection(listId, task, settingsKey, loadedModel) {
+  const list = document.getElementById(listId);
+  if (!list) return;
   list.innerHTML = "";
-  for (const m of registry) {
+  const models = registry.filter((m) => (m.task || "text-generation") === task);
+  const selectedId = settings[settingsKey] || models.find((m) => m.tier === "default")?.id || models[0]?.id;
+
+  for (const m of models) {
     const li = document.createElement("li");
-    li.className = m.id === settings.onnxModel ? "selected" : "";
+    li.className = m.id === selectedId ? "selected" : "";
     const isDownloaded = !!downloadedModels[m.id];
     li.innerHTML = `
-      <span>${m.label} <small>(~${(m.approxSizeMB / 1000).toFixed(1)} GB)</small></span>
+      <span>${m.label} <small>(${sizeLabel(m.approxSizeMB)})</small></span>
       <span class="badge ${isDownloaded ? "downloaded" : ""}">${isDownloaded ? "Downloaded" : "Not downloaded"}</span>
     `;
     const btn = document.createElement("button");
     btn.textContent = m.id === loadedModel ? "Loaded" : isDownloaded ? "Load" : "Download";
     btn.disabled = m.id === loadedModel;
     btn.addEventListener("click", async () => {
-      await saveSettings({ onnxModel: m.id });
-      startDownload(m.id);
+      await saveSettings({ [settingsKey]: m.id });
+      startDownload(m.id, task);
+      renderRegistrySection(listId, task, settingsKey, loadedModel);
     });
     li.appendChild(btn);
     list.appendChild(li);
   }
 }
 
-function startDownload(modelId) {
+function startDownload(modelId, task) {
   $("#onnx-progress-wrap").classList.remove("hidden");
   $("#onnx-progress-label").textContent = `Loading ${modelId}…`;
-  sendMessage({ type: "onnx.relay", engineType: "engine.load", model: modelId })
+  const payload = { type: "onnx.relay", engineType: "engine.load", model: modelId };
+  if (task) payload.task = task;
+  sendMessage(payload)
     .then(async (res) => {
       if (res?.error) {
         $("#onnx-progress-fill").style.width = "0%";
@@ -323,11 +370,129 @@ function wireDialogue() {
   $("#dialogue-system-input").addEventListener("input", (e) => {
     dialogueSystemPrompt = e.target.value;
   });
+  $("#dialogue-model-select").addEventListener("change", onDialogueModelChange);
   $("#dialogue-form").addEventListener("submit", (e) => {
     e.preventDefault();
     sendDialogue();
   });
   renderDialogue();
+  refreshDialogueModelSelect();
+}
+
+async function listOllamaModels() {
+  const base = (settings.baseUrl || "http://localhost:11434").replace(/\/$/, "");
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2000);
+    const res = await fetch(`${base}/api/tags`, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const body = await res.json();
+    return (body.models || []).map((m) => ({ id: m.name, label: m.name }));
+  } catch {
+    return [];
+  }
+}
+
+async function refreshDialogueModelSelect() {
+  const select = $("#dialogue-model-select");
+  if (!select) return;
+
+  const provider = settings.provider || "onnx";
+  let options = [];
+  let selected = "";
+
+  if (provider === "onnx") {
+    if (registry.length === 0) {
+      try {
+        const modelsRes = await sendMessage({ type: "onnx.relay", engineType: "engine.models" });
+        if (modelsRes?.models?.length) registry = modelsRes.models;
+      } catch {
+        // engine may not be started yet
+      }
+    }
+    options = registry
+      .filter((m) => (m.task || "text-generation") === "text-generation")
+      .map((m) => ({ id: m.id, label: `${m.label} (${sizeLabel(m.approxSizeMB)})` }));
+    selected =
+      settings.onnxModel ||
+      registry.find((m) => (m.task || "text-generation") === "text-generation" && m.tier === "default")?.id ||
+      options[0]?.id ||
+      "";
+  } else if (provider === "ollama") {
+    options = await listOllamaModels();
+    selected = settings.model || options[0]?.id || "";
+  } else {
+    const m = settings.model || "";
+    if (m) options = [{ id: m, label: m }];
+    selected = m;
+  }
+
+  const prev = select.value;
+  select.innerHTML = "";
+
+  if (options.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent =
+      provider === "onnx"
+        ? "No models — open Settings"
+        : provider === "ollama"
+          ? "No Ollama models found"
+          : "Set model in Settings";
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = provider !== "onnx" && provider !== "ollama";
+  if (!options.some((o) => o.id === selected) && selected) {
+    options = [{ id: selected, label: selected.split("/").pop() }, ...options];
+  }
+  for (const o of options) {
+    const opt = document.createElement("option");
+    opt.value = o.id;
+    opt.textContent = o.label;
+    select.appendChild(opt);
+  }
+  select.value = selected || options[0].id;
+  // Avoid clobbering a mid-change selection if the list rebuild races
+  if (prev && options.some((o) => o.id === prev) && document.activeElement === select) {
+    select.value = prev;
+  }
+}
+
+async function onDialogueModelChange(e) {
+  const select = e.target;
+  const modelId = select.value;
+  if (!modelId) return;
+  const provider = settings.provider || "onnx";
+  const previous = provider === "onnx" ? settings.onnxModel || "" : settings.model || "";
+
+  if (provider === "onnx") {
+    if (!downloadedModels[modelId]) {
+      if (!confirmOnnxDownload(modelId)) {
+        select.value = previous;
+        return;
+      }
+    }
+    await saveSettings({ onnxModel: modelId });
+    startDownload(modelId, "text-generation");
+  } else {
+    await saveSettings({ model: modelId });
+    const modelInput = $("#model-name");
+    if (modelInput) modelInput.value = modelId;
+  }
+}
+
+/** Ask before fetching weights that are not yet in IndexedDB. */
+function confirmOnnxDownload(modelId) {
+  const entry = registry.find((m) => m.id === modelId);
+  const label = entry?.label || modelId.split("/").pop();
+  const size = entry ? sizeLabel(entry.approxSizeMB) : "unknown size";
+  return confirm(
+    `"${label}" is not downloaded yet (${size}).\n\nDownload it now? This uses the network and may take a few minutes.`
+  );
 }
 
 function renderDialogue() {
@@ -364,6 +529,11 @@ async function sendDialogue() {
   const input = $("#dialogue-input");
   const text = input.value.trim();
   if (!text) return;
+
+  const provider = settings.provider || "onnx";
+  if (provider === "onnx" && settings.onnxModel && !downloadedModels[settings.onnxModel]) {
+    if (!confirmOnnxDownload(settings.onnxModel)) return;
+  }
 
   const requestMessages = [
     ...(dialogueSystemPrompt.trim() ? [{ role: "system", content: dialogueSystemPrompt }] : []),
