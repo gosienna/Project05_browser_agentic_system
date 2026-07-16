@@ -1,6 +1,5 @@
 import { chat } from "./llm.js";
-
-const MAX_STEPS = 14;
+import { getMaxSteps } from "./agent-config.js";
 
 const SYSTEM_PROMPT = `You are a browser automation agent. You control the user's browser tab-by-tab to complete their task.
 
@@ -31,6 +30,7 @@ const DEFAULT_FETCH_URL_CHARS = 12000;
 const TOOL_RESULT_CHARS_IN_TRANSCRIPT = 8000;
 
 export async function runAgent({ task, settings, tools, tabId, onEvent, onComplete }) {
+  const maxSteps = getMaxSteps(settings);
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `Task: ${task}\nActive tab id: ${tabId ?? "unknown"}` },
@@ -47,7 +47,7 @@ export async function runAgent({ task, settings, tools, tabId, onEvent, onComple
     return final;
   };
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 0; step < maxSteps; step++) {
     const reply = await chat(messages, settings);
     const parsed = extractJson(reply);
 

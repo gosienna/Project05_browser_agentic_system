@@ -10,6 +10,27 @@ const CONVERSATIONS = "conversations";
 
 export const COMPONENT_KINDS = ["agent", "tools", "html", "css", "ui"];
 
+/**
+ * The set of component kinds a level-1 system's editor may touch. Reads the
+ * current `editableKinds` array, falling back to the legacy singular
+ * `editableKind` field (pre-multi-select records), then to `["ui"]`.
+ */
+export function getEditableKinds(system) {
+  if (Array.isArray(system?.editableKinds) && system.editableKinds.length) {
+    const kinds = system.editableKinds.filter((k) => COMPONENT_KINDS.includes(k));
+    if (kinds.length) return kinds;
+  }
+  if (system?.editableKind && COMPONENT_KINDS.includes(system.editableKind)) return [system.editableKind];
+  return ["ui"];
+}
+
+function sanitizeEditableKinds(editableKinds) {
+  const kinds = (Array.isArray(editableKinds) ? editableKinds : [editableKinds]).filter((k) =>
+    COMPONENT_KINDS.includes(k)
+  );
+  return kinds.length ? kinds : ["ui"];
+}
+
 export const BUILTIN_BROWSER_AGENT_ID = "browser-agent";
 export const BUILTIN_CURVE_PLOTTER_ID = "curve-plotter";
 
@@ -75,7 +96,7 @@ async function migrateBuiltinLevels() {
   const browser = await reqToPromise(store.get(BUILTIN_BROWSER_AGENT_ID));
   if (browser && browser.level === undefined) store.put({ ...browser, level: 2 });
   const curve = await reqToPromise(store.get(BUILTIN_CURVE_PLOTTER_ID));
-  if (curve && curve.level === undefined) store.put({ ...curve, level: 1, editableKind: "ui" });
+  if (curve && curve.level === undefined) store.put({ ...curve, level: 1, editableKinds: ["ui"] });
   await txDone(tx);
 }
 
@@ -97,7 +118,7 @@ async function seedBuiltins() {
       updatedAt: now,
       isBuiltin: true,
       level: 1,
-      editableKind: "ui",
+      editableKinds: ["ui"],
     },
   ];
 
@@ -128,7 +149,7 @@ export async function getSystem(id) {
   return reqToPromise(db.transaction(SYSTEMS, "readonly").objectStore(SYSTEMS).get(id));
 }
 
-export async function createSystem(name, { level, editableKind } = {}) {
+export async function createSystem(name, { level, editableKinds } = {}) {
   await ensureSeeded();
   const now = Date.now();
   const id = `sys_${now}_${Math.random().toString(36).slice(2, 8)}`;
@@ -136,7 +157,7 @@ export async function createSystem(name, { level, editableKind } = {}) {
   // The editor access level is fixed at creation and never changes afterwards.
   system.level = Number(level) === 1 ? 1 : 2;
   if (system.level === 1) {
-    system.editableKind = COMPONENT_KINDS.includes(editableKind) ? editableKind : "ui";
+    system.editableKinds = sanitizeEditableKinds(editableKinds || ["ui"]);
   }
   const components = defaultComponents(id);
 
@@ -146,6 +167,28 @@ export async function createSystem(name, { level, editableKind } = {}) {
   for (const c of components) tx.objectStore(COMPONENTS).put(c);
   await txDone(tx);
   return system;
+}
+
+/**
+ * Update a level-1 system's editable component set and/or custom persona
+ * prompt. These are mutable at any time, unlike `level` which is fixed at
+ * creation. Passing `systemPrompt: ""` reverts to the default persona.
+ */
+export async function updateSystemEditorConfig(id, { editableKinds, systemPrompt } = {}) {
+  await ensureSeeded();
+  const system = await getSystem(id);
+  if (!system) throw new Error(`Unknown system "${id}"`);
+  if (system.level !== 1) throw new Error("Editor config only applies to level 1 systems");
+
+  const next = { ...system, updatedAt: Date.now() };
+  if (editableKinds !== undefined) next.editableKinds = sanitizeEditableKinds(editableKinds);
+  if (systemPrompt !== undefined) next.systemPrompt = String(systemPrompt || "").trim();
+
+  const db = await openDb();
+  const tx = db.transaction(SYSTEMS, "readwrite");
+  tx.objectStore(SYSTEMS).put(next);
+  await txDone(tx);
+  return next;
 }
 
 export async function deleteSystem(id) {
@@ -213,9 +256,9 @@ export async function writeComponent(systemId, kind, content) {
 /**
  * Persist one completed run's full LLM message array under its system.
  * `source` distinguishes browser automation runs from component-editor runs;
- * `kind` records which script a level-1 editor was scoped to (else null).
+ * `kinds` records which scripts a level-1 editor was scoped to (else null).
  */
-export async function saveConversation({ systemId, source = "editor", kind = null, task = "", messages = [], final = "" }) {
+export async function saveConversation({ systemId, source = "editor", kinds = null, task = "", messages = [], final = "" }) {
   await ensureSeeded();
   if (!systemId) throw new Error("saveConversation requires a systemId");
   const now = Date.now();
@@ -224,7 +267,7 @@ export async function saveConversation({ systemId, source = "editor", kind = nul
     id,
     systemId,
     source,
-    kind: kind || null,
+    kinds: kinds || null,
     task: String(task || ""),
     messages: Array.isArray(messages) ? messages : [],
     final: String(final ?? ""),
@@ -248,7 +291,7 @@ export async function listConversations(systemId) {
       id: c.id,
       systemId: c.systemId,
       source: c.source,
-      kind: c.kind,
+      kinds: c.kinds,
       task: c.task,
       final: c.final,
       createdAt: c.createdAt,

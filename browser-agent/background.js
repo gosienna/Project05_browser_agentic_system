@@ -3,7 +3,7 @@ import { chatCompletions, ensureOffscreenDocument } from "./llm.js";
 import * as tools from "./tools.js";
 import { runSystemEditor } from "./system-editor-l2.js";
 import { runScriptEditor } from "./system-editor-l1.js";
-import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getSystem, saveConversation } from "./system-store.js";
+import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getEditableKinds, getSystem, saveConversation } from "./system-store.js";
 import { handleTabBridge } from "./tab-bridge.js";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -121,14 +121,14 @@ chrome.runtime.onConnect.addListener((port) => {
             persistConversation({
               systemId: msg.systemId,
               source: "editor",
-              kind: system.level === 1 ? system.editableKind || "ui" : null,
+              kinds: system.level === 1 ? getEditableKinds(system) : null,
               task: msg.task,
               messages,
               final,
             }),
         };
         if (system.level === 1) {
-          await runScriptEditor({ ...editorArgs, kind: system.editableKind || "ui" });
+          await runScriptEditor(editorArgs);
         } else {
           await runSystemEditor(editorArgs);
         }

@@ -46,6 +46,8 @@ async function handle(msg) {
     }
     case "engine.clearCache":
       return engine.clearCache();
+    case "engine.deleteModel":
+      return engine.deleteModel(msg.model || msg.request?.model);
     case "engine.models": {
       const task = msg.task || msg.request?.task;
       if (task === "*") return { models: engine.MODEL_REGISTRY };

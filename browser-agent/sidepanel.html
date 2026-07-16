@@ -32,18 +32,20 @@
 
     <main>
       <section id="tab-dialogue" class="tab-panel">
-        <div class="dialogue-model-row">
-          <label for="dialogue-model-select">Model</label>
-          <select id="dialogue-model-select" aria-label="Chat model"></select>
-        </div>
         <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
         <div id="dialogue-system-wrap" class="hidden">
           <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>
         </div>
         <div id="dialogue-chat" class="dialogue-chat"></div>
         <form id="dialogue-form">
+          <div id="dialogue-attachments" class="dialogue-attachments hidden"></div>
           <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
-          <button type="submit" id="dialogue-send-btn">Send</button>
+          <div class="dialogue-controls">
+            <select id="dialogue-model-select" aria-label="Chat model" title="Chat model"></select>
+            <input type="file" id="dialogue-image-input" accept="image/*" multiple class="hidden" />
+            <button type="button" id="dialogue-attach-btn" class="icon-btn hidden" title="Attach image" aria-label="Attach image">🖼</button>
+            <button type="submit" id="dialogue-send-btn">Send</button>
+          </div>
         </form>
       </section>
 
@@ -67,6 +69,20 @@
         </div>
         <div class="mode-label">Edit components (LLM)</div>
         <div id="editor-level-badge" class="level-badge" title="Fixed when the system was created"></div>
+        <div id="l1-config" class="hidden">
+          <button id="l1-config-toggle" type="button" class="secondary-btn">⚙ Level 1 access</button>
+          <div id="l1-config-wrap" class="hidden">
+            <div id="l1-kind-checks" class="l1-kind-checks"></div>
+            <label for="l1-prompt-input">Custom system prompt (persona only — tool rules always applied)</label>
+            <textarea id="l1-prompt-input" rows="4" placeholder="Leave blank to use the default level-1 editor persona…"></textarea>
+            <div class="l1-config-actions">
+              <button id="l1-config-save-btn" type="button" class="secondary-btn">Save</button>
+              <button id="l1-config-reset-btn" type="button" class="secondary-btn">Reset prompt to default</button>
+            </div>
+            <label>Full system prompt sent to the LLM</label>
+            <pre id="l1-prompt-preview" class="l1-prompt-preview"></pre>
+          </div>
+        </div>
         <div id="trace" class="trace"></div>
         <form id="editor-form">
           <textarea id="editor-input" placeholder="Ask to change this system… e.g. Make the curve red, or plot two curves at once" rows="2"></textarea>
@@ -130,6 +146,10 @@
             <label for="model-name">Model</label>
             <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
           </div>
+
+          <label for="max-steps-input">Max steps per run</label>
+          <input id="max-steps-input" type="number" min="1" max="100" step="1" placeholder="14" />
+          <p class="hint">Caps LLM/tool-call turns per automation or editor run (Level 1, Level 2, and browser automation). Default 14.</p>
 
           <button id="test-connection-btn" type="button">Test connection</button>
           <span id="test-connection-result"></span>

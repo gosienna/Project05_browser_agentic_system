@@ -3,11 +3,12 @@
 
 import { chat } from "./llm.js";
 import { extractJson } from "./agent.js";
+import { getMaxSteps } from "./agent-config.js";
 
-const MAX_STEPS = 14;
 const TOOL_RESULT_CHARS = 8000;
 
 export async function runEditorLoop({ systemPrompt, userIntro, tools, settings, onEvent, onComplete }) {
+  const maxSteps = getMaxSteps(settings);
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userIntro },
@@ -24,7 +25,7 @@ export async function runEditorLoop({ systemPrompt, userIntro, tools, settings, 
     return final;
   };
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 0; step < maxSteps; step++) {
     const reply = await chat(messages, settings);
     const parsed = extractJson(reply);
 

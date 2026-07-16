@@ -2,7 +2,7 @@
 // pipeline cache, run() for any supported task, and OpenAI-shaped chat for
 // text-generation. Intended to run inside ort-worker.js (Dedicated Worker).
 
-import { applyIndexedDbCache, clearModelCache, listCachedFiles } from "./model-cache.js";
+import { applyIndexedDbCache, clearModelCache, deleteModelFromCache, listCachedFiles } from "./model-cache.js";
 
 const VENDOR_DIR = "vendor/transformers/";
 // transformers.js ≥4 uses asyncify for WebGPU (exports webgpuInit).
@@ -108,7 +108,7 @@ async function loadTransformers() {
   return transformersModule;
 }
 
-/** @typedef {"text-generation"|"image-to-text"|"image-classification"|"automatic-speech-recognition"} EngineTask */
+/** @typedef {"text-generation"|"image-text-to-text"|"image-to-text"|"image-classification"|"automatic-speech-recognition"} EngineTask */
 /** @typedef {"llm"|"vision"|"audio"} Modality */
 
 /**
@@ -118,38 +118,99 @@ async function loadTransformers() {
  */
 export const MODEL_REGISTRY = [
   // LLM — ordered smallest → largest for OOM downshift
-  { id: "onnx-community/Llama-3.2-1B-Instruct-ONNX", label: "Llama 3.2 1B", approxSizeMB: 700, tier: "fast", task: "text-generation", modality: "llm" },
-  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1000, tier: "fast", task: "text-generation", modality: "llm" },
-  { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX", label: "Llama 3.2 3B", approxSizeMB: 1800, tier: "default", task: "text-generation", modality: "llm" },
-  { id: "onnx-community/gemma-4-E2B-it-ONNX", label: "Gemma 4 E2B", approxSizeMB: 2200, tier: "default", task: "text-generation", modality: "llm", loader: "gemma4" },
-  { id: "onnx-community/Phi-3.5-mini-instruct-onnx-web", label: "Phi 3.5 mini (3.8B)", approxSizeMB: 2200, tier: "max", task: "text-generation", modality: "llm" },
-  { id: "onnx-community/gemma-4-E4B-it-ONNX", label: "Gemma 4 E4B", approxSizeMB: 4200, tier: "max", task: "text-generation", modality: "llm", loader: "gemma4" },
+  // pipeline_tag matches Hugging Face model-card metadata (display + Hub taxonomy).
+  { id: "onnx-community/Llama-3.2-1B-Instruct-ONNX", label: "Llama 3.2 1B", approxSizeMB: 700, tier: "fast", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1000, tier: "fast", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX", label: "Llama 3.2 3B", approxSizeMB: 1800, tier: "default", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  {
+    id: "mistralai/Ministral-3-3B-Instruct-2512-ONNX",
+    label: "Ministral 3 3B Instruct (VLM)",
+    approxSizeMB: 2800,
+    tier: "default",
+    task: "image-text-to-text",
+    pipeline_tag: "image-text-to-text",
+    modality: "llm",
+    loader: "ministral",
+  },
+  {
+    id: "onnx-community/gemma-4-E2B-it-ONNX",
+    label: "Gemma 4 E2B (VLM)",
+    approxSizeMB: 2200,
+    tier: "default",
+    task: "image-text-to-text",
+    pipeline_tag: "any-to-any",
+    modality: "llm",
+    loader: "gemma4",
+  },
+  { id: "onnx-community/Phi-3.5-mini-instruct-onnx-web", label: "Phi 3.5 mini (3.8B)", approxSizeMB: 2200, tier: "max", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  {
+    id: "onnx-community/gemma-4-E4B-it-ONNX",
+    label: "Gemma 4 E4B (VLM)",
+    approxSizeMB: 4200,
+    tier: "max",
+    task: "image-text-to-text",
+    pipeline_tag: "any-to-any",
+    modality: "llm",
+    loader: "gemma4",
+  },
+  { id: "onnx-community/Qwen3-4B-Instruct-2507-ONNX", label: "Qwen 3 4B Instruct", approxSizeMB: 2600, tier: "max", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  { id: "onnx-community/Qwen3-4B-ONNX", label: "Qwen 3 4B", approxSizeMB: 2600, tier: "max", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  {
+    id: "onnx-community/MedGemma-27B-IT",
+    label: "MedGemma 27B IT (VLM)",
+    approxSizeMB: 54300,
+    tier: "max",
+    task: "image-text-to-text",
+    pipeline_tag: "image-text-to-text",
+    modality: "llm",
+    // Gemma 3 multimodal chat path (same as Ministral): AutoModelForImageTextToText + apply_chat_template.
+    loader: "ministral",
+  },
 
   // Captioning / OCR (image-to-text)
-  { id: "Xenova/vit-gpt2-image-captioning", label: "ViT-GPT2 captioning", approxSizeMB: 250, tier: "default", task: "image-to-text", modality: "vision" },
-  { id: "Xenova/trocr-small-printed", label: "TrOCR small (printed)", approxSizeMB: 60, tier: "fast", task: "image-to-text", modality: "vision" },
-  { id: "Xenova/trocr-small-handwritten", label: "TrOCR small (handwritten)", approxSizeMB: 60, tier: "fast", task: "image-to-text", modality: "vision" },
-  { id: "Xenova/trocr-base-printed", label: "TrOCR base (printed)", approxSizeMB: 330, tier: "max", task: "image-to-text", modality: "vision" },
-  { id: "Xenova/nougat-small", label: "Nougat small (docs→MD)", approxSizeMB: 500, tier: "max", task: "image-to-text", modality: "vision" },
+  { id: "Xenova/vit-gpt2-image-captioning", label: "ViT-GPT2 captioning", approxSizeMB: 250, tier: "default", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-small-printed", label: "TrOCR small (printed)", approxSizeMB: 60, tier: "fast", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-small-handwritten", label: "TrOCR small (handwritten)", approxSizeMB: 60, tier: "fast", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
+  { id: "Xenova/trocr-base-printed", label: "TrOCR base (printed)", approxSizeMB: 330, tier: "max", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
+  { id: "Xenova/nougat-small", label: "Nougat small (docs→MD)", approxSizeMB: 500, tier: "max", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
 
   // Image classification
-  { id: "Xenova/vit-base-patch16-224", label: "ViT base (ImageNet)", approxSizeMB: 90, tier: "default", task: "image-classification", modality: "vision" },
-  { id: "onnx-community/mobilenetv4_conv_small.e2400_r224_in1k", label: "MobileNetV4 small", approxSizeMB: 15, tier: "fast", task: "image-classification", modality: "vision" },
-  { id: "Xenova/mobilevit-small", label: "MobileViT small", approxSizeMB: 20, tier: "fast", task: "image-classification", modality: "vision" },
-  { id: "Xenova/resnet-50", label: "ResNet-50", approxSizeMB: 100, tier: "default", task: "image-classification", modality: "vision" },
-  { id: "Xenova/convnext-tiny-224", label: "ConvNeXt tiny", approxSizeMB: 110, tier: "default", task: "image-classification", modality: "vision" },
+  { id: "Xenova/vit-base-patch16-224", label: "ViT base (ImageNet)", approxSizeMB: 90, tier: "default", task: "image-classification", pipeline_tag: "image-classification", modality: "vision" },
+  { id: "onnx-community/mobilenetv4_conv_small.e2400_r224_in1k", label: "MobileNetV4 small", approxSizeMB: 15, tier: "fast", task: "image-classification", pipeline_tag: "image-classification", modality: "vision" },
+  { id: "Xenova/mobilevit-small", label: "MobileViT small", approxSizeMB: 20, tier: "fast", task: "image-classification", pipeline_tag: "image-classification", modality: "vision" },
+  { id: "Xenova/resnet-50", label: "ResNet-50", approxSizeMB: 100, tier: "default", task: "image-classification", pipeline_tag: "image-classification", modality: "vision" },
+  { id: "Xenova/convnext-tiny-224", label: "ConvNeXt tiny", approxSizeMB: 110, tier: "default", task: "image-classification", pipeline_tag: "image-classification", modality: "vision" },
 
   // Speech recognition
-  { id: "Xenova/whisper-tiny.en", label: "Whisper tiny.en", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
-  { id: "onnx-community/whisper-tiny.en", label: "Whisper tiny.en (onnx-community)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
-  { id: "Xenova/whisper-base.en", label: "Whisper base.en", approxSizeMB: 150, tier: "default", task: "automatic-speech-recognition", modality: "audio" },
-  { id: "Xenova/whisper-tiny", label: "Whisper tiny (multilingual)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
-  { id: "Xenova/whisper-small.en", label: "Whisper small.en", approxSizeMB: 500, tier: "max", task: "automatic-speech-recognition", modality: "audio" },
-  { id: "onnx-community/moonshine-tiny-ONNX", label: "Moonshine tiny", approxSizeMB: 50, tier: "fast", task: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-tiny.en", label: "Whisper tiny.en", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+  { id: "onnx-community/whisper-tiny.en", label: "Whisper tiny.en (onnx-community)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-base.en", label: "Whisper base.en", approxSizeMB: 150, tier: "default", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-tiny", label: "Whisper tiny (multilingual)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+  { id: "Xenova/whisper-small.en", label: "Whisper small.en", approxSizeMB: 500, tier: "max", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+  { id: "onnx-community/moonshine-tiny-ONNX", label: "Moonshine tiny", approxSizeMB: 50, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
 ];
 
+/** Hugging Face pipeline_tag display names (Hub model-card taxonomy). */
+export const PIPELINE_TAG_LABELS = {
+  "text-generation": "Text Generation",
+  "image-text-to-text": "Image-Text-to-Text",
+  "any-to-any": "Any-to-Any",
+  "image-to-text": "Image-to-Text",
+  "image-classification": "Image Classification",
+  "automatic-speech-recognition": "Automatic Speech Recognition",
+};
+
+export function pipelineTagLabel(tagOrEntry) {
+  const tag =
+    typeof tagOrEntry === "string"
+      ? tagOrEntry
+      : tagOrEntry?.pipeline_tag || tagOrEntry?.task || "text-generation";
+  return PIPELINE_TAG_LABELS[tag] || tag.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 const DEFAULT_TOP_P = 0.9;
 const TEXT_GENERATION = "text-generation";
+const IMAGE_TEXT_TO_TEXT = "image-text-to-text";
+const LLM_TASKS = [TEXT_GENERATION, IMAGE_TEXT_TO_TEXT];
 
 let device = null; // "webgpu" | "wasm", probed once and cached
 let dtype = null;
@@ -168,6 +229,18 @@ function registryEntry(modelId) {
 
 function isGemma4Model(modelId) {
   return registryEntry(modelId)?.loader === "gemma4" || /gemma-4/i.test(modelId || "");
+}
+
+function isMinistralModel(modelId) {
+  return registryEntry(modelId)?.loader === "ministral" || /ministral/i.test(modelId || "");
+}
+
+function isLlmTask(task) {
+  return LLM_TASKS.includes(task);
+}
+
+function llmRegistry() {
+  return MODEL_REGISTRY.filter((m) => m.modality === "llm");
 }
 
 function dtypeForModel(modelId, device) {
@@ -197,12 +270,73 @@ function sessionDeviceForModel(modelId, preferredDevice) {
   return preferredDevice;
 }
 
+/**
+ * Pull an image URL / data URL / RawImage-like value from an OpenAI- or HF-style content part.
+ * @returns {string|object|null}
+ */
+function extractImageSource(part) {
+  if (part == null) return null;
+  if (typeof part === "string") return part;
+  if (typeof part !== "object") return null;
+  if (part.type === "image_url") {
+    const u = part.image_url;
+    return typeof u === "string" ? u : u?.url ?? null;
+  }
+  if (part.type === "image") {
+    return part.image ?? part.url ?? part.source ?? null;
+  }
+  return null;
+}
+
+/**
+ * Normalize chat messages for VLM chat templates (Gemma 4, Ministral) and
+ * collect image sources. Template parts use `{ type: "image" }` placeholders;
+ * pixels are loaded separately and passed to the processor (Transformers.js API).
+ * @returns {{ messages: object[], imageSources: (string|object)[] }}
+ */
 function toGemmaMessages(messages) {
-  return (messages || []).map((m) => {
+  const imageSources = [];
+  const normalized = (messages || []).map((m) => {
     const role = m.role === "system" ? "system" : m.role === "assistant" ? "assistant" : "user";
-    if (Array.isArray(m.content)) return { role, content: m.content };
-    return { role, content: [{ type: "text", text: String(m.content ?? "") }] };
+    // Gemma's chat template applies `| trim` to the leading system message
+    // without an `is string` guard, so system content must stay a plain string.
+    if (role === "system") {
+      const text = Array.isArray(m.content)
+        ? m.content.map((p) => (typeof p === "string" ? p : String(p?.text ?? ""))).join("\n")
+        : String(m.content ?? "");
+      return { role, content: text };
+    }
+    if (!Array.isArray(m.content)) {
+      return { role, content: [{ type: "text", text: String(m.content ?? "") }] };
+    }
+    const content = [];
+    for (const part of m.content) {
+      if (part?.type === "image" || part?.type === "image_url") {
+        const src = extractImageSource(part);
+        if (src == null) {
+          throw new Error(
+            'Gemma 4 image parts need a source (e.g. { type: "image", image: url } or { type: "image_url", image_url: { url } }).'
+          );
+        }
+        content.push({ type: "image" });
+        imageSources.push(src);
+        continue;
+      }
+      if (part?.type === "audio") {
+        // Image multimodal path only for now — keep text if present, skip audio blobs.
+        if (part.text) content.push({ type: "text", text: String(part.text) });
+        continue;
+      }
+      if (part?.type === "text" || part?.text != null) {
+        content.push({ type: "text", text: String(part.text ?? "") });
+        continue;
+      }
+      content.push({ type: "text", text: String(part ?? "") });
+    }
+    if (content.length === 0) content.push({ type: "text", text: "" });
+    return { role, content };
   });
+  return { messages: normalized, imageSources };
 }
 
 export function defaultModelForTask(task) {
@@ -210,7 +344,7 @@ export function defaultModelForTask(task) {
 }
 
 export function modelsForTask(task) {
-  if (!task) return MODEL_REGISTRY.filter((m) => m.task === TEXT_GENERATION);
+  if (!task || task === TEXT_GENERATION) return llmRegistry();
   return MODEL_REGISTRY.filter((m) => m.task === task);
 }
 
@@ -222,7 +356,11 @@ function findLoadedForTask(task) {
 }
 
 function llmLoadedModelId() {
-  return findLoadedForTask(TEXT_GENERATION)?.modelId || null;
+  for (const task of LLM_TASKS) {
+    const loadedModel = findLoadedForTask(task)?.modelId;
+    if (loadedModel) return loadedModel;
+  }
+  return null;
 }
 
 async function probeDevice() {
@@ -282,6 +420,14 @@ export async function clearCache() {
   return status();
 }
 
+/** Unload one model (if loaded) and delete its cached weight files. */
+export async function deleteModel(modelId) {
+  if (!modelId) return { error: { message: "engine.deleteModel requires a model id", type: "engine_error", code: null } };
+  await unload({ model: modelId });
+  const removed = await deleteModelFromCache(modelId);
+  return { ...(await status()), removed };
+}
+
 async function disposeEntry(entry) {
   try {
     if (entry?.model?.dispose) await entry.model.dispose();
@@ -336,12 +482,13 @@ async function unloadOthersExcept(keepTask, keepModelId) {
 export async function loadModel(modelOrOpts) {
   const opts =
     typeof modelOrOpts === "string"
-      ? { model: modelOrOpts, task: TEXT_GENERATION }
+      ? { model: modelOrOpts }
       : modelOrOpts || {};
 
   const modelId = opts.model;
   if (!modelId) throw new Error("No model specified.");
 
+  // Registry task is authoritative (e.g. Gemma 4 → image-text-to-text).
   const task = opts.task || registryEntry(modelId)?.task || TEXT_GENERATION;
   const key = slotKey(task, modelId);
   if (loaded.has(key)) return status();
@@ -351,8 +498,16 @@ export async function loadModel(modelOrOpts) {
   if (sameTask && sameTask.modelId !== modelId) {
     await unload({ task });
   }
+  // Only one LLM pipeline at a time (text or vision-language).
+  if (isLlmTask(task)) {
+    for (const llmTask of LLM_TASKS) {
+      if (llmTask === task) continue;
+      await unload({ task: llmTask });
+    }
+  }
 
-  const { pipeline, AutoProcessor, Gemma4ForConditionalGeneration } = await loadTransformers();
+  const { pipeline, AutoProcessor, Gemma4ForConditionalGeneration, AutoModelForImageTextToText } =
+    await loadTransformers();
   const { device: preferred } = await probeDevice();
   // Keep WebGPU/asyncify runtime when available so other models stay on GPU;
   // individual sessions may still use CPU EP (e.g. q2f16 mobile).
@@ -374,7 +529,9 @@ export async function loadModel(modelOrOpts) {
 
   console.log(
     `[onnx] loading ${task} ${modelId} on ${sessionDevice} (${modelDtype})` +
-      `${isGemma4Model(modelId) ? " [gemma4]" : ""}${sessionDevice !== preferred ? ` (runtime=${preferred})` : ""}`
+      `${isGemma4Model(modelId) ? " [gemma4]" : ""}` +
+      `${isMinistralModel(modelId) ? " [ministral]" : ""}` +
+      `${sessionDevice !== preferred ? ` (runtime=${preferred})` : ""}`
   );
 
   let entry;
@@ -390,6 +547,17 @@ export async function loadModel(modelOrOpts) {
         progress_callback,
       });
       entry = { kind: "gemma4", model, processor, pipeline: null, task, modelId };
+    } else if (isMinistralModel(modelId)) {
+      if (!AutoModelForImageTextToText || !AutoProcessor) {
+        throw new Error("Ministral support missing — rebuild vendor/transformers (need @huggingface/transformers ≥ 4.2).");
+      }
+      const processor = await AutoProcessor.from_pretrained(modelId, { progress_callback });
+      const model = await AutoModelForImageTextToText.from_pretrained(modelId, {
+        device: sessionDevice,
+        dtype: modelDtype,
+        progress_callback,
+      });
+      entry = { kind: "ministral", model, processor, pipeline: null, task, modelId };
     } else {
       const pipelineOpts = {
         device: sessionDevice,
@@ -520,14 +688,57 @@ async function runInference(request) {
   }
 }
 
+async function invokeMinistral(entry, input, options) {
+  const { model, processor } = entry;
+  const { load_image } = await loadTransformers();
+  const rawMessages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
+  const { messages, imageSources } = toGemmaMessages(rawMessages);
+  const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
+
+  let images = null;
+  if (imageSources.length === 1) {
+    images = await load_image(imageSources[0]);
+  } else if (imageSources.length > 1) {
+    images = await Promise.all(imageSources.map((src) => load_image(src)));
+  }
+
+  const inputs = await processor(prompt, images, { add_special_tokens: false });
+  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const temperature = options.temperature ?? 0.2;
+  const outputs = await model.generate({
+    ...inputs,
+    max_new_tokens: maxNewTokens,
+    temperature,
+    do_sample: temperature > 0,
+    top_p: options.top_p ?? DEFAULT_TOP_P,
+  });
+  const promptLen = inputs.input_ids.dims.at(-1);
+  const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
+    skip_special_tokens: true,
+  });
+  return [{ generated_text: decoded?.[0] ?? "" }];
+}
+
 async function invokeGemma4(entry, input, options) {
   const { model, processor } = entry;
-  const messages = Array.isArray(input) ? toGemmaMessages(input) : toGemmaMessages([{ role: "user", content: String(input) }]);
+  const { load_image } = await loadTransformers();
+  const rawMessages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
+  const { messages, imageSources } = toGemmaMessages(rawMessages);
+
   const prompt = processor.apply_chat_template(messages, {
     enable_thinking: false,
     add_generation_prompt: true,
   });
-  const inputs = await processor(prompt, undefined, undefined, { add_special_tokens: false });
+
+  let images = null;
+  if (imageSources.length === 1) {
+    images = await load_image(imageSources[0]);
+  } else if (imageSources.length > 1) {
+    images = await Promise.all(imageSources.map((src) => load_image(src)));
+  }
+
+  // Transformers.js: processor(text, images?, audio?, opts) — pass null when unused.
+  const inputs = await processor(prompt, images, null, { add_special_tokens: false });
   const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
   const temperature = options.temperature ?? 0.2;
   const outputs = await model.generate({
@@ -545,14 +756,13 @@ async function invokeGemma4(entry, input, options) {
 }
 
 async function invokeEntry(entry, task, input, options) {
-  if (entry?.kind === "gemma4" || entry?.model) {
-    return invokeGemma4(entry, input, options);
-  }
+  if (entry?.kind === "gemma4") return invokeGemma4(entry, input, options);
+  if (entry?.kind === "ministral") return invokeMinistral(entry, input, options);
   return invokePipeline(entry.pipeline, task, input, options);
 }
 
 async function invokePipeline(pipe, task, input, options) {
-  if (task === TEXT_GENERATION) {
+  if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
     const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
     const temperature = options.temperature ?? 0.2;
     return pipe(input, {
@@ -575,7 +785,7 @@ async function invokePipeline(pipe, task, input, options) {
 }
 
 function normalizeOutput(task, raw, options) {
-  if (task === TEXT_GENERATION) {
+  if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
     const text = Array.isArray(raw) ? raw[0]?.generated_text ?? "" : raw?.generated_text ?? "";
     const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
     return { text: content };
@@ -606,8 +816,9 @@ async function runChatCompletions(request) {
   const modelId = request.model;
   if (!modelId) return errorResponse("No model specified.", "model_not_loaded");
 
+  const task = registryEntry(modelId)?.task || TEXT_GENERATION;
   const result = await runInference({
-    task: TEXT_GENERATION,
+    task,
     model: modelId,
     input: request.messages,
     options: {
@@ -631,13 +842,14 @@ async function handleLoadFailure(task, modelId, err) {
   const message = String(err?.message || err);
   console.error(`[onnx] failed to load ${task} ${modelId}:`, message);
   if (isOomError(message) && device === "webgpu") {
-    if (task === TEXT_GENERATION) {
+    if (isLlmTask(task)) {
       const smaller = nextSmallerModel(modelId);
       if (smaller) {
         console.warn(`[onnx] OOM loading ${modelId}, retrying once on smaller model ${smaller}`);
         await unload({ task });
         try {
-          await loadModel({ task, model: smaller });
+          const smallerTask = registryEntry(smaller)?.task || task;
+          await loadModel({ task: smallerTask, model: smaller });
           return errorResponse(
             `"${modelId}" ran out of GPU memory, so I loaded "${smaller}" instead. Retry your request.`,
             "oom"
@@ -697,7 +909,7 @@ function isOomError(message) {
 }
 
 function nextSmallerModel(modelId) {
-  const llm = modelsForTask(TEXT_GENERATION);
+  const llm = llmRegistry();
   const idx = llm.findIndex((m) => m.id === modelId);
   if (idx <= 0) return null;
   return llm[idx - 1].id;

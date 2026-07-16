@@ -3,7 +3,7 @@
 // watch what the LLM editor is modifying; a dot marks kinds changed since the
 // tab was last viewed.
 
-import { COMPONENT_KINDS, ensureSeeded, getComponent, getSystem, listComponents } from "./system-store.js";
+import { COMPONENT_KINDS, ensureSeeded, getComponent, getEditableKinds, getSystem, listComponents } from "./system-store.js";
 
 const params = new URLSearchParams(location.search);
 const systemId = params.get("id");
@@ -73,7 +73,7 @@ async function refresh() {
   nameEl.textContent = `${system.name} — components`;
   document.getElementById("system-level").textContent =
     system.level === 1
-      ? `Level 1 · LLM edits "${system.editableKind || "ui"}" only`
+      ? `Level 1 · LLM edits: ${getEditableKinds(system).join(", ")}`
       : "Level 2 · full LLM access";
 
   componentMeta = {};

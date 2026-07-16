@@ -188,3 +188,20 @@ export async function clearModelCache() {
   const db = await openDb();
   await idbReq(db.transaction(STORE, "readwrite").objectStore(STORE).clear());
 }
+
+/**
+ * Delete cached weight files for one model repo id. Cache keys are HF URLs
+ * (https://huggingface.co/<modelId>/resolve/...), so match on the id segment.
+ * @returns {Promise<number>} number of files removed
+ */
+export async function deleteModelFromCache(modelId) {
+  const db = await openDb();
+  const keys = await idbReq(db.transaction(STORE, "readonly").objectStore(STORE).getAllKeys());
+  const needle = `/${modelId}/`;
+  const doomed = (keys || []).filter((url) => String(url).includes(needle));
+  if (doomed.length) {
+    const store = db.transaction(STORE, "readwrite").objectStore(STORE);
+    for (const url of doomed) await idbReq(store.delete(url));
+  }
+  return doomed.length;
+}

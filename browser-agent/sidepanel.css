@@ -181,23 +181,94 @@ button:disabled { opacity: 0.5; cursor: default; }
 .hint { font-size: 12px; color: #666; margin: 0; }
 .secondary-btn { background: #fff; color: #2557d6; align-self: flex-start; }
 
-.dialogue-model-row {
+.dialogue-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
-.dialogue-model-row label {
-  font-size: 11px;
-  color: #666;
-  white-space: nowrap;
-}
-.dialogue-model-row select {
+.dialogue-controls select {
   flex: 1;
   min-width: 0;
   font-size: 12px;
 }
+.dialogue-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dialogue-attachment {
+  position: relative;
+}
+.dialogue-attachment img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #d7deee;
+}
+.dialogue-attachment .remove-attachment {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #d7deee;
+  background: #fff;
+  color: #444;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.dialogue-bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.dialogue-bubble-images img {
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 6px;
+  border: 1px solid #d7deee;
+}
 
 #dialogue-system-wrap textarea { width: 100%; }
+
+#l1-config-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #e0e4ee;
+  border-radius: 8px;
+  background: #f3f5fa;
+}
+#l1-config-wrap label { font-size: 11px; color: #666; }
+#l1-config-wrap textarea { width: 100%; }
+.l1-kind-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+}
+.l1-kind-checks label { display: flex; align-items: center; gap: 4px; color: #333; }
+.l1-config-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.l1-prompt-preview {
+  margin: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
+  padding: 8px;
+  color: #333;
+}
+.l1-prompt-fixed { color: #888; }
 
 .dialogue-chat { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .dialogue-bubble {
@@ -332,9 +403,22 @@ button:disabled { opacity: 0.5; cursor: default; }
   padding: 6px 8px;
 }
 .onnx-registry li.selected { border-color: #2557d6; }
+.onnx-registry .model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.onnx-registry .model-name { font-weight: 500; }
+.onnx-registry .model-meta { color: #666; font-size: 11px; }
 .onnx-registry .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; white-space: nowrap; }
 .onnx-registry .badge.downloaded { background: #dff4e6; color: #1c7c44; }
 .onnx-registry small { color: #666; }
+.onnx-registry .model-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.onnx-registry .model-actions button { padding: 4px 10px; font-size: 12px; }
+.onnx-registry button.danger { background: #fdeef4; color: #c2185b; border-color: #f3b8d0; }
+.onnx-registry button.danger:hover:not(:disabled) { background: #f9d8e6; }
 
 .progress-bar { height: 6px; background: #eee; border-radius: 999px; overflow: hidden; }
 #onnx-progress-fill { height: 100%; width: 0%; background: #2557d6; transition: width 0.2s; }
@@ -373,15 +457,24 @@ button:disabled { opacity: 0.5; cursor: default; }
   .dialogue-bubble.user { background: #2a2f3d; }
   .dialogue-raw-panel { background: #1f1f24; border-color: #3a3a42; }
   .secondary-btn { background: #26262c; }
-  .dialogue-model-row label { color: #aaa; }
+  .dialogue-attachment img, .dialogue-bubble-images img { border-color: #3a3a42; }
+  .dialogue-attachment .remove-attachment { background: #26262c; border-color: #3a3a42; color: #ccc; }
   .hint { color: #aaa; }
   .onboarding { background: #1b1b1f; }
   textarea, input, select { background: #26262c; color: #eee; border-color: #3a3a42; }
   .model-badge, .level-badge { background: #2a2f3d; color: #ccc; }
   #onnx-unload-btn, #test-connection-btn { background: #26262c; }
+  .onnx-registry .model-meta, .onnx-registry small { color: #999; }
+  .onnx-registry button.danger { background: #3a2531; color: #f48fb1; border-color: #5c3a4a; }
+  .onnx-registry button.danger:hover:not(:disabled) { background: #4a2e3d; }
   .history-item { background: #26262c; border-color: #3a3a42; }
   .history-item-main:hover { background: #2a2f3d; }
   .history-item-del { border-left-color: #3a3a42; }
   .history-item-meta, .history-empty { color: #999; }
   .transcript-content { background: #1f1f24; border-color: #3a3a42; }
+  #l1-config-wrap { background: #26262c; border-color: #3a3a42; }
+  #l1-config-wrap label { color: #aaa; }
+  .l1-kind-checks label { color: #eee; }
+  .l1-prompt-preview { background: #1f1f24; border-color: #3a3a42; color: #ddd; }
+  .l1-prompt-fixed { color: #888; }
 }

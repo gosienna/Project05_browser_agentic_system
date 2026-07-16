@@ -3,15 +3,20 @@
 import {
   BUILTIN_BROWSER_AGENT_ID,
   BUILTIN_CURVE_PLOTTER_ID,
+  COMPONENT_KINDS,
   clearConversations,
   createSystem,
   deleteConversation,
   deleteSystem,
   ensureSeeded,
   getConversation,
+  getEditableKinds,
   listConversations,
   listSystems,
+  updateSystemEditorConfig,
 } from "./system-store.js";
+import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
+import { DEFAULT_MAX_STEPS } from "./agent-config.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -24,7 +29,8 @@ let running = false;
 let editing = false;
 let lastKnownDevice = null;
 let dialogueSystemPrompt = "";
-let dialogueTurns = []; // {role: "user"|"assistant", content, raw?: {request, response}}
+let dialogueTurns = []; // {role: "user"|"assistant", content, images?: dataUrl[], raw?: {request, response}}
+let dialogueImages = []; // pending image attachments (data URLs) for the next message
 let dialogueSending = false;
 let systems = [];
 let currentSystemId = null;
@@ -40,6 +46,7 @@ async function init() {
   wireAgentForm();
   wireEditorForm();
   wireSystemsUi();
+  wireL1Config();
   wireDialogue();
   wireHistory();
 
@@ -154,6 +161,11 @@ function wireSettingsForm() {
   $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value }));
   $("#api-key").addEventListener("change", (e) => saveSettings({ apiKey: e.target.value }));
   $("#model-name").addEventListener("change", (e) => saveSettings({ model: e.target.value }));
+  $("#max-steps-input").addEventListener("change", (e) => {
+    const n = Math.min(100, Math.max(1, Math.floor(Number(e.target.value)) || DEFAULT_MAX_STEPS));
+    e.target.value = n;
+    saveSettings({ maxSteps: n });
+  });
   $("#onnx-unload-btn").addEventListener("click", async () => {
     await sendMessage({ type: "onnx.relay", engineType: "engine.unload" });
     await refreshOnnxSettings();
@@ -173,6 +185,7 @@ function applySettingsToForm() {
   $("#base-url").value = settings.baseUrl || "";
   $("#api-key").value = settings.apiKey || "";
   $("#model-name").value = settings.model || "";
+  $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
 
   const isOnnx = (settings.provider || "onnx") === "onnx";
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
@@ -221,6 +234,16 @@ async function refreshOnnxSettings() {
     }
   }
 
+  // Drop stored model picks that were removed from the registry — otherwise
+  // chat/agent runs keep requesting a dead HF repo (401/404) forever.
+  if (registry.length) {
+    const stale = {};
+    for (const key of ["onnxModel", "onnxCaptionModel", "onnxClassifyModel", "onnxAsrModel"]) {
+      if (settings[key] && !registry.some((m) => m.id === settings[key])) stale[key] = null;
+    }
+    if (Object.keys(stale).length) await saveSettings(stale);
+  }
+
   const loadedByTask = {};
   for (const entry of statusRes?.loaded || []) {
     loadedByTask[entry.task] = entry.model;
@@ -230,7 +253,7 @@ async function refreshOnnxSettings() {
     loadedByTask["text-generation"] = statusRes.loadedModel;
   }
 
-  renderRegistrySection("onnx-registry", "text-generation", "onnxModel", loadedByTask["text-generation"]);
+  renderRegistrySection("onnx-registry", "text-generation", "onnxModel", llmLoadedModel(loadedByTask), { modality: "llm" });
   renderRegistrySection("onnx-registry-caption", "image-to-text", "onnxCaptionModel", loadedByTask["image-to-text"]);
   renderRegistrySection("onnx-registry-classify", "image-classification", "onnxClassifyModel", loadedByTask["image-classification"]);
   renderRegistrySection("onnx-registry-asr", "automatic-speech-recognition", "onnxAsrModel", loadedByTask["automatic-speech-recognition"]);
@@ -242,11 +265,42 @@ function sizeLabel(mb) {
   return `~${mb} MB`;
 }
 
-function renderRegistrySection(listId, task, settingsKey, loadedModel) {
+/** HF Hub pipeline_tag → display label (mirrors engine.PIPELINE_TAG_LABELS). */
+const PIPELINE_TAG_LABELS = {
+  "text-generation": "Text Generation",
+  "image-text-to-text": "Image-Text-to-Text",
+  "any-to-any": "Any-to-Any",
+  "image-to-text": "Image-to-Text",
+  "image-classification": "Image Classification",
+  "automatic-speech-recognition": "Automatic Speech Recognition",
+};
+
+function pipelineTagLabel(entry) {
+  const tag = entry?.pipeline_tag || entry?.task || "text-generation";
+  return (
+    PIPELINE_TAG_LABELS[tag] ||
+    tag.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+  );
+}
+
+function modelMetaLabel(entry) {
+  if (!entry) return "";
+  return `${pipelineTagLabel(entry)} · ${sizeLabel(entry.approxSizeMB)}`;
+}
+
+function llmLoadedModel(loadedByTask) {
+  return loadedByTask["text-generation"] || loadedByTask["image-text-to-text"] || null;
+}
+
+function llmModels() {
+  return registry.filter((m) => m.modality === "llm");
+}
+
+function renderRegistrySection(listId, task, settingsKey, loadedModel, { modality } = {}) {
   const list = document.getElementById(listId);
   if (!list) return;
   list.innerHTML = "";
-  const models = registry.filter((m) => (m.task || "text-generation") === task);
+  const models = modality === "llm" ? llmModels() : registry.filter((m) => (m.task || "text-generation") === task);
   const selectedId = settings[settingsKey] || models.find((m) => m.tier === "default")?.id || models[0]?.id;
 
   for (const m of models) {
@@ -254,18 +308,47 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel) {
     li.className = m.id === selectedId ? "selected" : "";
     const isDownloaded = !!downloadedModels[m.id];
     li.innerHTML = `
-      <span>${m.label} <small>(${sizeLabel(m.approxSizeMB)})</small></span>
+      <span class="model-info">
+        <span class="model-name">${m.label}</span>
+        <small class="model-meta">${modelMetaLabel(m)}</small>
+      </span>
       <span class="badge ${isDownloaded ? "downloaded" : ""}">${isDownloaded ? "Downloaded" : "Not downloaded"}</span>
     `;
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
     const btn = document.createElement("button");
     btn.textContent = m.id === loadedModel ? "Loaded" : isDownloaded ? "Load" : "Download";
     btn.disabled = m.id === loadedModel;
     btn.addEventListener("click", async () => {
       await saveSettings({ [settingsKey]: m.id });
-      startDownload(m.id, task);
-      renderRegistrySection(listId, task, settingsKey, loadedModel);
+      startDownload(m.id, m.task || "text-generation");
+      renderRegistrySection(listId, task, settingsKey, loadedModel, { modality });
     });
-    li.appendChild(btn);
+    actions.appendChild(btn);
+    if (isDownloaded) {
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.className = "danger";
+      delBtn.title = "Delete this model's cached weights from IndexedDB";
+      delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete cached weights for ${m.label} (${modelMetaLabel(m)})? You'll need to re-download it to use it again.`)) return;
+        delBtn.disabled = true;
+        const res = await sendMessage({ type: "onnx.relay", engineType: "engine.deleteModel", model: m.id });
+        if (res?.error) {
+          delBtn.disabled = false;
+          alert(`Delete failed: ${res.error.message}`);
+          return;
+        }
+        const { onnxModels } = await chrome.storage.local.get("onnxModels");
+        const next = { ...(onnxModels || {}) };
+        delete next[m.id];
+        await chrome.storage.local.set({ onnxModels: next });
+        downloadedModels = next;
+        await refreshOnnxSettings();
+      });
+      actions.appendChild(delBtn);
+    }
+    li.appendChild(actions);
     list.appendChild(li);
   }
 }
@@ -345,19 +428,15 @@ function wireSystemsUi() {
     if (name == null) return;
     // The access level is fixed at creation and cannot be changed later.
     const levelAnswer = prompt(
-      "Editor access level for this system (cannot be changed later):\n1 = single script only\n2 = full system",
+      "Editor access level for this system (cannot be changed later):\n1 = restricted to chosen scripts\n2 = full system",
       "2"
     );
     if (levelAnswer == null) return;
     const level = Number(levelAnswer.trim()) === 1 ? 1 : 2;
-    let editableKind;
-    if (level === 1) {
-      const kindAnswer = prompt("Which script may the LLM edit? (agent, tools, html, css, ui)", "ui");
-      if (kindAnswer == null) return;
-      editableKind = kindAnswer.trim().toLowerCase();
-    }
+    // Level 1 starts scoped to "ui" only; use the "⚙ Level 1 access" panel
+    // afterwards to grant more scripts or set a custom persona prompt.
     try {
-      const system = await createSystem(name, { level, editableKind });
+      const system = await createSystem(name, { level, editableKinds: ["ui"] });
       currentSystemId = system.id;
       await chrome.storage.local.set({ currentSystemId });
       await refreshSystems();
@@ -381,6 +460,60 @@ function wireSystemsUi() {
       alert(err.message || String(err));
     }
   });
+}
+
+function wireL1Config() {
+  const checksEl = $("#l1-kind-checks");
+  checksEl.innerHTML = "";
+  for (const kind of COMPONENT_KINDS) {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "l1-kind-check";
+    cb.value = kind;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(` ${kind}`));
+    checksEl.appendChild(label);
+  }
+  $("#l1-config-toggle").addEventListener("click", () => {
+    $("#l1-config-wrap").classList.toggle("hidden");
+  });
+  $("#l1-prompt-input").addEventListener("input", renderL1PromptPreview);
+  renderL1PromptPreview();
+  $("#l1-config-save-btn").addEventListener("click", async () => {
+    if (!currentSystemId) return;
+    const editableKinds = Array.from(document.querySelectorAll(".l1-kind-check"))
+      .filter((cb) => cb.checked)
+      .map((cb) => cb.value);
+    if (editableKinds.length === 0) {
+      alert("Select at least one component.");
+      return;
+    }
+    const systemPrompt = $("#l1-prompt-input").value;
+    try {
+      await updateSystemEditorConfig(currentSystemId, { editableKinds, systemPrompt });
+      await refreshSystems();
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
+  $("#l1-config-reset-btn").addEventListener("click", async () => {
+    if (!currentSystemId) return;
+    $("#l1-prompt-input").value = "";
+    try {
+      await updateSystemEditorConfig(currentSystemId, { systemPrompt: "" });
+      await refreshSystems();
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
+}
+
+function renderL1PromptPreview() {
+  const persona = $("#l1-prompt-input").value.trim() || L1_DEFAULT_PERSONA;
+  $("#l1-prompt-preview").innerHTML =
+    `${escapeHtml(persona)}\n\n` +
+    `<span class="l1-prompt-fixed">— always appended, not editable —\n${escapeHtml(L1_PROTOCOL)}</span>`;
 }
 
 async function refreshSystems() {
@@ -412,8 +545,18 @@ function applyCurrentSystem() {
   $("#editor-level-badge").textContent = !system
     ? ""
     : system.level === 1
-      ? `Level 1 — LLM may edit only the "${system.editableKind || "ui"}" script`
+      ? `Level 1 — LLM may edit: ${getEditableKinds(system).join(", ")}`
       : "Level 2 — LLM has full control over all components";
+
+  $("#l1-config").classList.toggle("hidden", !system || system.level !== 1);
+  if (system && system.level === 1) {
+    const kinds = getEditableKinds(system);
+    document.querySelectorAll(".l1-kind-check").forEach((cb) => {
+      cb.checked = kinds.includes(cb.value);
+    });
+    $("#l1-prompt-input").value = system.systemPrompt || "";
+    renderL1PromptPreview();
+  }
 
   const open = $("#system-open-link");
   const compsLink = $("#system-components-link");
@@ -496,7 +639,7 @@ function runEditorTask(task) {
   addTraceEvent(
     "event",
     system?.level === 1
-      ? `Edit "${system.editableKind || "ui"}" script (level 1): ${task}`
+      ? `Edit [${getEditableKinds(system).join(", ")}] (level 1): ${task}`
       : `Edit system (level 2): ${task}`
   );
 
@@ -587,7 +730,8 @@ async function refreshHistory() {
     const main = document.createElement("button");
     main.type = "button";
     main.className = "history-item-main";
-    const tag = item.source === "automation" ? "Automation" : item.kind ? `Edit · ${item.kind}` : "Edit";
+    const tag =
+      item.source === "automation" ? "Automation" : item.kinds?.length ? `Edit · ${item.kinds.join(", ")}` : "Edit";
     main.innerHTML = `
       <span class="history-item-task">${escapeHtml(item.task || "(no task)")}</span>
       <span class="history-item-meta">${tag} · ${formatTime(item.createdAt)} · ${item.messageCount} msgs</span>
@@ -660,10 +804,25 @@ function wireDialogue() {
   $("#dialogue-system-input").addEventListener("input", (e) => {
     dialogueSystemPrompt = e.target.value;
   });
-  $("#dialogue-model-select").addEventListener("change", onDialogueModelChange);
+  $("#dialogue-model-select").addEventListener("change", async (e) => {
+    await onDialogueModelChange(e);
+    updateDialogueAttachUI();
+  });
   $("#dialogue-form").addEventListener("submit", (e) => {
     e.preventDefault();
     sendDialogue();
+  });
+  // Enter sends; Shift+Enter inserts a newline. Skip while composing (IME).
+  $("#dialogue-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      sendDialogue();
+    }
+  });
+  $("#dialogue-attach-btn").addEventListener("click", () => $("#dialogue-image-input").click());
+  $("#dialogue-image-input").addEventListener("change", async (e) => {
+    await addDialogueImages(e.target.files);
+    e.target.value = ""; // allow re-picking the same file
   });
   renderDialogue();
   refreshDialogueModelSelect();
@@ -701,12 +860,10 @@ async function refreshDialogueModelSelect() {
         // engine may not be started yet
       }
     }
-    options = registry
-      .filter((m) => (m.task || "text-generation") === "text-generation")
-      .map((m) => ({ id: m.id, label: `${m.label} (${sizeLabel(m.approxSizeMB)})` }));
+    options = llmModels().map((m) => ({ id: m.id, label: `${m.label} (${modelMetaLabel(m)})` }));
     selected =
       settings.onnxModel ||
-      registry.find((m) => (m.task || "text-generation") === "text-generation" && m.tier === "default")?.id ||
+      llmModels().find((m) => m.tier === "default")?.id ||
       options[0]?.id ||
       "";
   } else if (provider === "ollama") {
@@ -732,6 +889,7 @@ async function refreshDialogueModelSelect() {
           : "Set model in Settings";
     select.appendChild(opt);
     select.disabled = true;
+    updateDialogueAttachUI();
     return;
   }
 
@@ -750,6 +908,7 @@ async function refreshDialogueModelSelect() {
   if (prev && options.some((o) => o.id === prev) && document.activeElement === select) {
     select.value = prev;
   }
+  updateDialogueAttachUI();
 }
 
 async function onDialogueModelChange(e) {
@@ -767,7 +926,8 @@ async function onDialogueModelChange(e) {
       }
     }
     await saveSettings({ onnxModel: modelId });
-    startDownload(modelId, "text-generation");
+    const entry = llmModels().find((m) => m.id === modelId);
+    startDownload(modelId, entry?.task || "text-generation");
   } else {
     await saveSettings({ model: modelId });
     const modelInput = $("#model-name");
@@ -779,10 +939,88 @@ async function onDialogueModelChange(e) {
 function confirmOnnxDownload(modelId) {
   const entry = registry.find((m) => m.id === modelId);
   const label = entry?.label || modelId.split("/").pop();
-  const size = entry ? sizeLabel(entry.approxSizeMB) : "unknown size";
+  const meta = entry ? modelMetaLabel(entry) : "unknown size";
   return confirm(
-    `"${label}" is not downloaded yet (${size}).\n\nDownload it now? This uses the network and may take a few minutes.`
+    `"${label}" is not downloaded yet (${meta}).\n\nDownload it now? This uses the network and may take a few minutes.`
   );
+}
+
+/** Whether the current dialogue model can take image input. */
+function dialogueModelSupportsImages() {
+  const provider = settings.provider || "onnx";
+  if (provider === "onnx") {
+    const modelId = $("#dialogue-model-select")?.value || settings.onnxModel || "";
+    return registry.find((m) => m.id === modelId)?.task === "image-text-to-text";
+  }
+  // OpenAI-shaped providers pass content parts through untouched; the
+  // Anthropic converter doesn't translate image parts, so hide there.
+  return provider !== "anthropic";
+}
+
+function updateDialogueAttachUI() {
+  const btn = $("#dialogue-attach-btn");
+  if (!btn) return;
+  const supported = dialogueModelSupportsImages();
+  btn.classList.toggle("hidden", !supported);
+  if (!supported && dialogueImages.length > 0) {
+    dialogueImages = [];
+    renderDialogueAttachments();
+  }
+}
+
+async function addDialogueImages(fileList) {
+  const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+  for (const file of files) {
+    dialogueImages.push(await fileToDataUrl(file));
+  }
+  renderDialogueAttachments();
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderDialogueAttachments() {
+  const wrap = $("#dialogue-attachments");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  wrap.classList.toggle("hidden", dialogueImages.length === 0);
+  dialogueImages.forEach((url, i) => {
+    const item = document.createElement("div");
+    item.className = "dialogue-attachment";
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = `attachment ${i + 1}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove-attachment";
+    remove.title = "Remove image";
+    remove.textContent = "✕";
+    remove.addEventListener("click", () => {
+      dialogueImages.splice(i, 1);
+      renderDialogueAttachments();
+    });
+    item.appendChild(img);
+    item.appendChild(remove);
+    wrap.appendChild(item);
+  });
+}
+
+/** OpenAI-shaped message for a stored turn (image parts + text part, or plain string). */
+function turnToMessage(t) {
+  if (!t.images?.length) return { role: t.role, content: t.content };
+  return {
+    role: t.role,
+    content: [
+      ...t.images.map((url) => ({ type: "image_url", image_url: { url } })),
+      ...(t.content ? [{ type: "text", text: t.content }] : []),
+    ],
+  };
 }
 
 function renderDialogue() {
@@ -791,7 +1029,22 @@ function renderDialogue() {
   for (const turn of dialogueTurns) {
     const bubble = document.createElement("div");
     bubble.className = `dialogue-bubble ${turn.role}`;
-    bubble.textContent = turn.content;
+    if (turn.images?.length) {
+      const imgs = document.createElement("div");
+      imgs.className = "dialogue-bubble-images";
+      for (const url of turn.images) {
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = "attached image";
+        imgs.appendChild(img);
+      }
+      bubble.appendChild(imgs);
+    }
+    if (turn.content) {
+      const text = document.createElement("div");
+      text.textContent = turn.content;
+      bubble.appendChild(text);
+    }
 
     if (turn.raw) {
       const toggle = document.createElement("button");
@@ -818,21 +1071,26 @@ async function sendDialogue() {
   if (dialogueSending) return;
   const input = $("#dialogue-input");
   const text = input.value.trim();
-  if (!text) return;
+  const images = dialogueImages.slice();
+  if (!text && images.length === 0) return;
 
   const provider = settings.provider || "onnx";
   if (provider === "onnx" && settings.onnxModel && !downloadedModels[settings.onnxModel]) {
     if (!confirmOnnxDownload(settings.onnxModel)) return;
   }
 
+  const userTurn = { role: "user", content: text, images };
   const requestMessages = [
     ...(dialogueSystemPrompt.trim() ? [{ role: "system", content: dialogueSystemPrompt }] : []),
-    ...dialogueTurns.map((t) => ({ role: t.role, content: t.content })),
-    { role: "user", content: text },
+    ...dialogueTurns.map(turnToMessage),
+    turnToMessage(userTurn),
   ];
 
-  dialogueTurns.push({ role: "user", content: text, raw: { request: requestMessages } });
+  userTurn.raw = { request: requestMessages };
+  dialogueTurns.push(userTurn);
   input.value = "";
+  dialogueImages = [];
+  renderDialogueAttachments();
   renderDialogue();
 
   dialogueSending = true;
