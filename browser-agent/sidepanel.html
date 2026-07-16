@@ -10,7 +10,6 @@
       <div class="tabs">
         <button class="tab-btn" data-tab="dialogue">Dialogue</button>
         <button class="tab-btn active" data-tab="agent">Agent</button>
-        <button class="tab-btn" data-tab="trackers">Trackers</button>
       </div>
       <button id="settings-icon-btn" type="button" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
     </header>
@@ -49,23 +48,38 @@
       </section>
 
       <section id="tab-agent" class="tab-panel active">
+        <div class="system-row">
+          <label class="system-select-label" for="system-select">System</label>
+          <select id="system-select" aria-label="Agent system"></select>
+          <button id="system-add-btn" type="button" class="icon-btn" title="Create system" aria-label="Create system">+</button>
+          <button id="system-delete-btn" type="button" class="icon-btn" title="Delete system" aria-label="Delete system">🗑</button>
+          <a id="system-open-link" class="system-open-link" href="#" target="_blank" rel="noopener">Open full page</a>
+          <a id="system-components-link" class="system-open-link" href="#" target="_blank" rel="noopener">Components</a>
+        </div>
         <div id="model-badge" class="model-badge"></div>
+        <iframe id="system-home-frame" class="system-home-frame" title="System home"></iframe>
+        <div id="browser-agent-run" class="browser-agent-run hidden">
+          <div class="mode-label">Run automation</div>
+          <form id="agent-form">
+            <textarea id="task-input" placeholder="What should the browser agent do? e.g. Summarize this page in 5 bullets" rows="2"></textarea>
+            <button type="submit" id="run-btn">Run</button>
+          </form>
+        </div>
+        <div class="mode-label">Edit components (LLM)</div>
+        <div id="editor-level-badge" class="level-badge" title="Fixed when the system was created"></div>
         <div id="trace" class="trace"></div>
-        <form id="agent-form">
-          <textarea id="task-input" placeholder="What should the agent do? e.g. Summarize this page in 5 bullets" rows="3"></textarea>
-          <button type="submit" id="run-btn">Run</button>
+        <form id="editor-form">
+          <textarea id="editor-input" placeholder="Ask to change this system… e.g. Make the curve red, or plot two curves at once" rows="2"></textarea>
+          <button type="submit" id="editor-run-btn">Edit</button>
         </form>
+
+        <div class="history-header">
+          <span class="mode-label">Conversation history</span>
+          <button id="history-clear-btn" type="button" class="secondary-btn" title="Delete all stored runs for this system">Clear</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
       </section>
 
-      <section id="tab-trackers" class="tab-panel">
-        <ul id="tracker-list"></ul>
-        <form id="tracker-form">
-          <input id="tracker-label" placeholder="Label (e.g. Price watch)" required />
-          <textarea id="tracker-prompt" placeholder="What should be checked each run?" rows="2" required></textarea>
-          <label>Every <input id="tracker-interval" type="number" min="1" value="60" style="width:4em" /> minutes</label>
-          <button type="submit">Add tracker</button>
-        </form>
-      </section>
     </main>
 
     <div id="settings-modal" class="modal-overlay hidden">
@@ -120,6 +134,16 @@
           <button id="test-connection-btn" type="button">Test connection</button>
           <span id="test-connection-result"></span>
         </div>
+      </div>
+    </div>
+
+    <div id="history-modal" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Conversation transcript">
+        <div class="modal-header">
+          <h2 id="history-modal-title">Transcript</h2>
+          <button id="history-modal-close-btn" type="button" class="icon-btn" aria-label="Close">✕</button>
+        </div>
+        <div id="history-modal-body" class="modal-body history-transcript"></div>
       </div>
     </div>
 

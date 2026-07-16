@@ -15,8 +15,6 @@
     "scripting",
     "activeTab",
     "sidePanel",
-    "alarms",
-    "notifications",
     "offscreen"
   ],
   "host_permissions": ["<all_urls>"],
@@ -37,6 +35,9 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "sandbox": {
+    "pages": ["sandbox.html"]
   },
   "cross_origin_embedder_policy": {
     "value": "credentialless"

@@ -98,3 +98,13 @@ Slices a string to `max` characters and appends `"\n...[truncated]"` if it was c
 | **Local multimodal (ONNX)** | `describe_image`, `classify_image`, `transcribe_audio` | Offscreen Transformers.js via `engine.run`. Models are picked in Settings (`onnxCaptionModel`, `onnxClassifyModel`, `onnxAsrModel`) from the curated Xenova/onnx-community registry. |
 
 All tools requiring `tabId` validate it via `requireTabId()` before running, so a missing tab produces a clear error the LLM can react to rather than a silent failure.
+
+---
+
+## Sandbox `api` (custom agent systems)
+
+Home UI / tools JS for custom systems runs in [`sandbox.html`](../browser-agent/sandbox.html) and cannot call `chrome.*` directly. The host injects an `api` object bridged through [`tab-bridge.js`](../browser-agent/tab-bridge.js):
+
+`listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`
+
+These reuse the same privileged paths as above and accept any open `tabId` (active or background), except `captureTab` which requires a visible tab.

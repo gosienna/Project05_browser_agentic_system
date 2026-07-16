@@ -437,7 +437,7 @@ function errorResponse(message, type) {
   return { error: { message, type, code: null } };
 }
 
-/** FIFO-serialize concurrent requests (trackers + chat + media tools may collide). */
+/** FIFO-serialize concurrent requests (chat + media tools may collide). */
 function enqueue(fn) {
   const run = queue.then(fn, fn);
   queue = run.then(

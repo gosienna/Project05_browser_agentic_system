@@ -26,7 +26,7 @@ export async function chatCompletions(request, settings) {
   }
 }
 
-/** Back-compat convenience wrapper used by agent.js / trackers. */
+/** Back-compat convenience wrapper used by agent.js and the system editors. */
 export async function chat(messages, settings) {
   const request = {
     model: settings?.model,

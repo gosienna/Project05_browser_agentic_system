@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>System Components</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1b1b1f;
+        background: #fafafa;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: #fff;
+        border-bottom: 1px solid #ddd;
+      }
+      h1 { margin: 0; font-size: 15px; flex: 1; }
+      .level-badge {
+        font-size: 11px;
+        color: #666;
+        background: #eef1f8;
+        border-radius: 4px;
+        padding: 4px 8px;
+        white-space: nowrap;
+      }
+      #refresh-btn {
+        font: inherit;
+        padding: 5px 12px;
+        border-radius: 6px;
+        border: 1px solid #2557d6;
+        background: #fff;
+        color: #2557d6;
+        cursor: pointer;
+      }
+      .kind-tabs {
+        display: flex;
+        background: #fff;
+        border-bottom: 1px solid #ddd;
+      }
+      .kind-tab {
+        flex: 1;
+        padding: 9px 0;
+        border: none;
+        background: none;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 600;
+        color: #666;
+        position: relative;
+      }
+      .kind-tab.active { color: #2557d6; box-shadow: inset 0 -2px 0 #2557d6; }
+      .kind-tab .bytes { display: block; font-weight: 400; font-size: 10px; color: #999; }
+      .kind-tab .dot {
+        position: absolute;
+        top: 6px;
+        right: 10px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #d68a25;
+      }
+      .meta {
+        padding: 6px 14px;
+        font-size: 11px;
+        color: #666;
+        background: #f3f5fa;
+        border-bottom: 1px solid #e0e4ee;
+      }
+      .meta.error { color: #a02525; }
+      #content {
+        flex: 1;
+        margin: 0;
+        padding: 14px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { background: #1b1b1f; color: #eee; }
+        header, .kind-tabs, #content { background: #26262c; border-color: #3a3a42; }
+        #refresh-btn { background: #26262c; }
+        .meta { background: #2a2f3d; border-color: #3a3a42; color: #aaa; }
+        .level-badge { background: #2a2f3d; color: #ccc; }
+        .kind-tab .bytes { color: #777; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 id="system-name">Components</h1>
+      <span id="system-level" class="level-badge"></span>
+      <button id="refresh-btn" type="button">Refresh</button>
+    </header>
+    <nav id="kind-tabs" class="kind-tabs" aria-label="Components"></nav>
+    <div id="meta" class="meta">Loading…</div>
+    <pre id="content"></pre>
+    <script src="system-components.js" type="module"></script>
+  </body>
+</html>

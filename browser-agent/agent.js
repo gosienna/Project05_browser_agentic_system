@@ -30,26 +30,38 @@ const DEFAULT_READ_PAGE_CHARS = 14000;
 const DEFAULT_FETCH_URL_CHARS = 12000;
 const TOOL_RESULT_CHARS_IN_TRANSCRIPT = 8000;
 
-export async function runAgent({ task, settings, tools, tabId, onEvent }) {
+export async function runAgent({ task, settings, tools, tabId, onEvent, onComplete }) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `Task: ${task}\nActive tab id: ${tabId ?? "unknown"}` },
   ];
+
+  const finish = async (final) => {
+    if (typeof onComplete === "function") {
+      try {
+        await onComplete({ messages, final });
+      } catch (err) {
+        console.error("[agent] onComplete failed", err);
+      }
+    }
+    return final;
+  };
 
   for (let step = 0; step < MAX_STEPS; step++) {
     const reply = await chat(messages, settings);
     const parsed = extractJson(reply);
 
     if (!parsed) {
+      messages.push({ role: "assistant", content: reply });
       onEvent({ type: "final", content: reply });
-      return reply;
+      return finish(reply);
     }
 
     messages.push({ role: "assistant", content: reply });
 
     if (parsed.final !== undefined) {
       onEvent({ type: "final", content: parsed.final });
-      return parsed.final;
+      return finish(parsed.final);
     }
 
     if (!parsed.tool) {
@@ -73,7 +85,7 @@ export async function runAgent({ task, settings, tools, tabId, onEvent }) {
 
   const fallback = "I reached the step limit before finishing. Here is what I found so far.";
   onEvent({ type: "final", content: fallback });
-  return fallback;
+  return finish(fallback);
 }
 
 async function runTool(tools, name, args, ctx) {

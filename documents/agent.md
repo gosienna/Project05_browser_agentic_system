@@ -6,6 +6,38 @@
 
 ---
 
+## Custom agent systems
+
+The Agent tab is a multi-system workspace. Each **agent system** is stored in IndexedDB (`agent-systems`) via [`system-store.js`](../browser-agent/system-store.js) with components:
+
+| Kind | Role |
+|------|------|
+| `agent` | System prompt / policy text |
+| `tools` | JS that assigns `self.__agentTools = { … }` |
+| `html` / `css` / `ui` | Home page markup, styles, and script |
+
+**Built-ins (seeded once):**
+
+- **Browser Agent** — classic tab automation; Run automation uses `runAgent()` + [`tools.js`](../browser-agent/tools.js).
+- **Curve Plotter** — demo home UI (cartesian plot of `y = x^2`) meant to be edited via the LLM.
+
+**Create:** `+` in the Agent tab → empty home stub + starter components.
+
+**Home runtime:** [`system-host.html`](../browser-agent/system-host.html) embeds sandboxed [`sandbox.html`](../browser-agent/sandbox.html) (relaxed CSP) so LLM/user JS can run. The host loads components from IndexedDB and `postMessage`s them into the sandbox.
+
+**Tab access from sandbox:** the sandbox cannot call `chrome.*`. It uses an injected `api` (`listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`) bridged through the host → [`tab-bridge.js`](../browser-agent/tab-bridge.js) in the service worker. Any open tab (active or not) can be targeted by `tabId`.
+
+**Edit components (LLM):** [`system-editor-l2.js`](../browser-agent/system-editor-l2.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel (a restricted single-script variant lives in [`system-editor-l1.js`](../browser-agent/system-editor-l1.js)). Same `chat()` providers as the browser agent (ONNX / Ollama / API).
+
+```
+Side panel Agent tab
+  ├─ system select / + / home iframe (system-host → sandbox)
+  ├─ Edit components → port "system-editor" → system-editor-l2.js / -l1.js → system-store
+  └─ Run automation (Browser Agent only) → port "agent" → agent.js → tools.js
+```
+
+---
+
 ## Key Components
 
 ### 1. System Prompt (Lines 5-23)

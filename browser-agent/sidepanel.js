@@ -1,4 +1,17 @@
-// Side panel UI: Agent chat, Trackers, Settings (incl. the ONNX model picker).
+// Side panel UI: Agent systems and Settings (incl. the ONNX model picker).
+
+import {
+  BUILTIN_BROWSER_AGENT_ID,
+  BUILTIN_CURVE_PLOTTER_ID,
+  clearConversations,
+  createSystem,
+  deleteConversation,
+  deleteSystem,
+  ensureSeeded,
+  getConversation,
+  listConversations,
+  listSystems,
+} from "./system-store.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -6,11 +19,15 @@ let settings = {};
 let registry = [];
 let downloadedModels = {};
 let agentPort = null;
+let editorPort = null;
 let running = false;
+let editing = false;
 let lastKnownDevice = null;
 let dialogueSystemPrompt = "";
 let dialogueTurns = []; // {role: "user"|"assistant", content, raw?: {request, response}}
 let dialogueSending = false;
+let systems = [];
+let currentSystemId = null;
 
 init();
 
@@ -21,11 +38,19 @@ async function init() {
   wireSettingsForm();
   wireSettingsModal();
   wireAgentForm();
-  wireTrackers();
+  wireEditorForm();
+  wireSystemsUi();
   wireDialogue();
+  wireHistory();
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.target === "onnx-progress") onProgress(msg);
+    if (msg?.type === "system.reload" && msg.systemId === currentSystemId) {
+      reloadHomeFrame();
+    }
+    if (msg?.type === "system.conversation" && msg.systemId === currentSystemId) {
+      refreshHistory();
+    }
   });
 
   if (!settings || Object.keys(settings).length === 0) {
@@ -36,7 +61,7 @@ async function init() {
   }
 
   renderModelBadge();
-  refreshTrackerList();
+  await refreshSystems();
 }
 
 function sendMessage(msg) {
@@ -307,23 +332,143 @@ function renderModelBadge() {
   document.querySelectorAll(".model-badge").forEach((el) => (el.textContent = text));
 }
 
-// --- Agent tab --------------------------------------------------------------
+// --- Agent tab (systems + automation + component editor) --------------------
+
+function wireSystemsUi() {
+  $("#system-select").addEventListener("change", async (e) => {
+    currentSystemId = e.target.value;
+    await chrome.storage.local.set({ currentSystemId });
+    applyCurrentSystem();
+  });
+  $("#system-add-btn").addEventListener("click", async () => {
+    const name = prompt("Name for the new agent system:", "My system");
+    if (name == null) return;
+    // The access level is fixed at creation and cannot be changed later.
+    const levelAnswer = prompt(
+      "Editor access level for this system (cannot be changed later):\n1 = single script only\n2 = full system",
+      "2"
+    );
+    if (levelAnswer == null) return;
+    const level = Number(levelAnswer.trim()) === 1 ? 1 : 2;
+    let editableKind;
+    if (level === 1) {
+      const kindAnswer = prompt("Which script may the LLM edit? (agent, tools, html, css, ui)", "ui");
+      if (kindAnswer == null) return;
+      editableKind = kindAnswer.trim().toLowerCase();
+    }
+    try {
+      const system = await createSystem(name, { level, editableKind });
+      currentSystemId = system.id;
+      await chrome.storage.local.set({ currentSystemId });
+      await refreshSystems();
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
+  $("#system-delete-btn").addEventListener("click", async () => {
+    const system = systems.find((s) => s.id === currentSystemId);
+    if (!system || system.isBuiltin) {
+      alert("Built-in systems cannot be deleted.");
+      return;
+    }
+    if (!confirm(`Delete system "${system.name}"?`)) return;
+    try {
+      await deleteSystem(currentSystemId);
+      currentSystemId = BUILTIN_CURVE_PLOTTER_ID;
+      await chrome.storage.local.set({ currentSystemId });
+      await refreshSystems();
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  });
+}
+
+async function refreshSystems() {
+  await ensureSeeded();
+  systems = await listSystems();
+  const { currentSystemId: stored } = await chrome.storage.local.get("currentSystemId");
+  currentSystemId =
+    stored && systems.some((s) => s.id === stored)
+      ? stored
+      : systems.find((s) => s.id === BUILTIN_CURVE_PLOTTER_ID)?.id || systems[0]?.id || null;
+
+  const select = $("#system-select");
+  select.innerHTML = "";
+  for (const s of systems) {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = s.isBuiltin ? `${s.name}` : s.name;
+    select.appendChild(opt);
+  }
+  if (currentSystemId) select.value = currentSystemId;
+  applyCurrentSystem();
+}
+
+function applyCurrentSystem() {
+  const system = systems.find((s) => s.id === currentSystemId);
+  const isBrowser = currentSystemId === BUILTIN_BROWSER_AGENT_ID;
+  $("#browser-agent-run").classList.toggle("hidden", !isBrowser);
+  $("#system-delete-btn").disabled = !system || !!system.isBuiltin;
+  $("#editor-level-badge").textContent = !system
+    ? ""
+    : system.level === 1
+      ? `Level 1 — LLM may edit only the "${system.editableKind || "ui"}" script`
+      : "Level 2 — LLM has full control over all components";
+
+  const open = $("#system-open-link");
+  const compsLink = $("#system-components-link");
+  if (currentSystemId) {
+    const url = chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(currentSystemId)}`);
+    open.href = url;
+    open.classList.remove("hidden");
+    compsLink.href = chrome.runtime.getURL(`system-components.html?id=${encodeURIComponent(currentSystemId)}`);
+    compsLink.classList.remove("hidden");
+  } else {
+    open.removeAttribute("href");
+    open.classList.add("hidden");
+    compsLink.removeAttribute("href");
+    compsLink.classList.add("hidden");
+  }
+  reloadHomeFrame();
+  refreshHistory();
+}
+
+function reloadHomeFrame() {
+  const frame = $("#system-home-frame");
+  if (!currentSystemId) {
+    frame.removeAttribute("src");
+    return;
+  }
+  const url = chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(currentSystemId)}`);
+  // Bust cache so component edits show up immediately
+  frame.src = `${url}&t=${Date.now()}`;
+}
 
 function wireAgentForm() {
   $("#agent-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const task = $("#task-input").value.trim();
-    if (!task || running) return;
+    if (!task || running || editing) return;
     runAgentTask(task);
+  });
+}
+
+function wireEditorForm() {
+  $("#editor-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const task = $("#editor-input").value.trim();
+    if (!task || editing || running || !currentSystemId) return;
+    runEditorTask(task);
   });
 }
 
 function runAgentTask(task) {
   running = true;
   $("#run-btn").disabled = true;
+  $("#editor-run-btn").disabled = true;
   const trace = $("#trace");
   trace.innerHTML = "";
-  addTraceEvent("event", `Task: ${task}`);
+  addTraceEvent("event", `Automation: ${task}`);
 
   agentPort = chrome.runtime.connect({ name: "agent" });
   agentPort.onMessage.addListener((event) => {
@@ -341,11 +486,51 @@ function runAgentTask(task) {
   agentPort.postMessage({ type: "run", task });
 }
 
+function runEditorTask(task) {
+  editing = true;
+  $("#editor-run-btn").disabled = true;
+  $("#run-btn").disabled = true;
+  const system = systems.find((s) => s.id === currentSystemId);
+  const trace = $("#trace");
+  trace.innerHTML = "";
+  addTraceEvent(
+    "event",
+    system?.level === 1
+      ? `Edit "${system.editableKind || "ui"}" script (level 1): ${task}`
+      : `Edit system (level 2): ${task}`
+  );
+
+  editorPort = chrome.runtime.connect({ name: "system-editor" });
+  editorPort.onMessage.addListener((event) => {
+    if (event.type === "thinking") addTraceEvent("thinking", event.content);
+    else if (event.type === "tool_start") addTraceEvent("tool", `→ ${event.tool}(${JSON.stringify(event.args)})`);
+    else if (event.type === "tool_end") addTraceEvent("tool", `← ${event.tool}: ${truncateForDisplay(event.result)}`);
+    else if (event.type === "final") addTraceEvent("final", event.content);
+    else if (event.type === "error") {
+      addTraceEvent("error", event.message);
+      finishEdit();
+    } else if (event.type === "done") {
+      finishEdit();
+      reloadHomeFrame();
+    }
+  });
+  editorPort.postMessage({ type: "run", task, systemId: currentSystemId });
+}
+
 function finishRun() {
   running = false;
   $("#run-btn").disabled = false;
+  $("#editor-run-btn").disabled = editing;
   agentPort?.disconnect();
   agentPort = null;
+}
+
+function finishEdit() {
+  editing = false;
+  $("#editor-run-btn").disabled = false;
+  $("#run-btn").disabled = running;
+  editorPort?.disconnect();
+  editorPort = null;
 }
 
 function addTraceEvent(cls, text) {
@@ -359,6 +544,111 @@ function addTraceEvent(cls, text) {
 function truncateForDisplay(value) {
   const str = typeof value === "string" ? value : JSON.stringify(value);
   return str.length > 400 ? str.slice(0, 400) + "…" : str;
+}
+
+// --- Conversation history (per-system LLM transcripts) ----------------------
+
+function wireHistory() {
+  $("#history-clear-btn").addEventListener("click", async () => {
+    if (!currentSystemId) return;
+    const system = systems.find((s) => s.id === currentSystemId);
+    if (!confirm(`Delete all stored conversations for "${system?.name || "this system"}"?`)) return;
+    await clearConversations(currentSystemId);
+    await refreshHistory();
+  });
+  $("#history-modal-close-btn").addEventListener("click", closeTranscript);
+  $("#history-modal").addEventListener("click", (e) => {
+    if (e.target.id === "history-modal") closeTranscript();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#history-modal").classList.contains("hidden")) closeTranscript();
+  });
+}
+
+async function refreshHistory() {
+  const list = $("#history-list");
+  if (!list || !currentSystemId) return;
+  const items = await listConversations(currentSystemId);
+  list.innerHTML = "";
+  $("#history-clear-btn").disabled = items.length === 0;
+
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = "No runs stored yet. Automation and editor runs are saved here.";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "history-item";
+
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "history-item-main";
+    const tag = item.source === "automation" ? "Automation" : item.kind ? `Edit · ${item.kind}` : "Edit";
+    main.innerHTML = `
+      <span class="history-item-task">${escapeHtml(item.task || "(no task)")}</span>
+      <span class="history-item-meta">${tag} · ${formatTime(item.createdAt)} · ${item.messageCount} msgs</span>
+    `;
+    main.addEventListener("click", () => openTranscript(item.id));
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "history-item-del icon-btn";
+    del.title = "Delete this run";
+    del.textContent = "🗑";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await deleteConversation(item.id);
+      await refreshHistory();
+    });
+
+    row.appendChild(main);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function openTranscript(id) {
+  const conv = await getConversation(id);
+  if (!conv) return;
+  const body = $("#history-modal-body");
+  body.innerHTML = "";
+  $("#history-modal-title").textContent = conv.task ? truncateForDisplay(conv.task) : "Transcript";
+
+  for (const m of conv.messages || []) {
+    const block = document.createElement("div");
+    block.className = `transcript-msg role-${m.role || "unknown"}`;
+    const label = document.createElement("div");
+    label.className = "transcript-role";
+    label.textContent = m.role || "unknown";
+    const content = document.createElement("pre");
+    content.className = "transcript-content";
+    content.textContent = typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
+    block.appendChild(label);
+    block.appendChild(content);
+    body.appendChild(block);
+  }
+
+  $("#history-modal").classList.remove("hidden");
+}
+
+function closeTranscript() {
+  $("#history-modal").classList.add("hidden");
+}
+
+function formatTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
 }
 
 // --- Dialogue (raw LLM I/O, back-and-forth chat with expandable raw panel) -
@@ -564,38 +854,3 @@ async function sendDialogue() {
   }
 }
 
-// --- Trackers -----------------------------------------------------------
-
-function wireTrackers() {
-  $("#tracker-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const tracker = {
-      label: $("#tracker-label").value.trim(),
-      prompt: $("#tracker-prompt").value.trim(),
-      intervalMinutes: Number($("#tracker-interval").value) || 60,
-    };
-    if (!tracker.label || !tracker.prompt) return;
-    await sendMessage({ type: "tracker.create", tracker });
-    e.target.reset();
-    $("#tracker-interval").value = 60;
-    refreshTrackerList();
-  });
-}
-
-async function refreshTrackerList() {
-  const trackers = (await sendMessage({ type: "tracker.list" })) || [];
-  const list = $("#tracker-list");
-  list.innerHTML = "";
-  for (const t of trackers) {
-    const li = document.createElement("li");
-    li.innerHTML = `<span><strong>${t.label}</strong> — every ${t.intervalMinutes}m</span>`;
-    const del = document.createElement("button");
-    del.textContent = "Delete";
-    del.addEventListener("click", async () => {
-      await sendMessage({ type: "tracker.delete", id: t.id });
-      refreshTrackerList();
-    });
-    li.appendChild(del);
-    list.appendChild(li);
-  }
-}
