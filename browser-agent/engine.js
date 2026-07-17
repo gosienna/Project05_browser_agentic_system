@@ -155,17 +155,6 @@ export const MODEL_REGISTRY = [
   },
   { id: "onnx-community/Qwen3-4B-Instruct-2507-ONNX", label: "Qwen 3 4B Instruct", approxSizeMB: 2600, tier: "max", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
   { id: "onnx-community/Qwen3-4B-ONNX", label: "Qwen 3 4B", approxSizeMB: 2600, tier: "max", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
-  {
-    id: "onnx-community/MedGemma-27B-IT",
-    label: "MedGemma 27B IT (VLM)",
-    approxSizeMB: 54300,
-    tier: "max",
-    task: "image-text-to-text",
-    pipeline_tag: "image-text-to-text",
-    modality: "llm",
-    // Gemma 3 multimodal chat path (same as Ministral): AutoModelForImageTextToText + apply_chat_template.
-    loader: "ministral",
-  },
 
   // Captioning / OCR (image-to-text)
   { id: "Xenova/vit-gpt2-image-captioning", label: "ViT-GPT2 captioning", approxSizeMB: 250, tier: "default", task: "image-to-text", pipeline_tag: "image-to-text", modality: "vision" },
