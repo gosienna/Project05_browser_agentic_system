@@ -7,16 +7,28 @@ import {
   clearConversations,
   createSystem,
   deleteConversation,
+  deleteDialogueSession,
   deleteSystem,
   ensureSeeded,
   getConversation,
+  getDialogueSession,
   getEditableKinds,
   listConversations,
+  listDialogueSessions,
   listSystems,
+  putDialogueSession,
   updateSystemEditorConfig,
 } from "./system-store.js";
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import { DEFAULT_MAX_STEPS } from "./agent-config.js";
+import {
+  PARAM_TYPES,
+  draftsToOpenAiTools,
+  draftsToToolsJson,
+  emptyParamDraft,
+  emptyToolDraft,
+  openAiToolsToDrafts,
+} from "./dialogue-tools.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -29,9 +41,11 @@ let running = false;
 let editing = false;
 let lastKnownDevice = null;
 let dialogueSystemPrompt = "";
-let dialogueTurns = []; // {role: "user"|"assistant", content, images?: dataUrl[], raw?: {request, response}}
+let dialogueToolDrafts = []; // form state: [{ name, description, parameters: [{ name, type, description, required, enumValues }] }]
+let dialogueTurns = []; // {role, content, images?, raw?: {request?, response?, prompt?}}
 let dialogueImages = []; // pending image attachments (data URLs) for the next message
 let dialogueSending = false;
+let dialogueSessionId = null; // IndexedDB session id; null = unsaved new chat
 let systems = [];
 let currentSystemId = null;
 
@@ -82,7 +96,10 @@ function wireTabs() {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
       document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
-      if (btn.dataset.tab === "dialogue") refreshDialogueModelSelect();
+      if (btn.dataset.tab === "dialogue") {
+        refreshDialogueModelSelect();
+        refreshDialogueSessionsList();
+      }
     });
   });
 }
@@ -798,11 +815,25 @@ function escapeHtml(str) {
 // --- Dialogue (raw LLM I/O, back-and-forth chat with expandable raw panel) -
 
 function wireDialogue() {
+  $("#dialogue-sessions-toggle").addEventListener("click", () => {
+    const panel = $("#dialogue-sessions-panel");
+    const collapsed = panel.classList.toggle("collapsed");
+    $("#dialogue-sessions-toggle").setAttribute("aria-expanded", String(!collapsed));
+    if (!collapsed) refreshDialogueSessionsList();
+  });
+  $("#dialogue-new-btn").addEventListener("click", () => startNewDialogueSession());
   $("#dialogue-system-toggle").addEventListener("click", () => {
     $("#dialogue-system-wrap").classList.toggle("hidden");
   });
   $("#dialogue-system-input").addEventListener("input", (e) => {
     dialogueSystemPrompt = e.target.value;
+  });
+  $("#dialogue-tools-toggle").addEventListener("click", () => {
+    $("#dialogue-tools-wrap").classList.toggle("hidden");
+  });
+  $("#dialogue-tools-add-btn").addEventListener("click", () => {
+    dialogueToolDrafts.push(emptyToolDraft());
+    renderDialogueToolsForm();
   });
   $("#dialogue-model-select").addEventListener("change", async (e) => {
     await onDialogueModelChange(e);
@@ -825,7 +856,312 @@ function wireDialogue() {
     e.target.value = ""; // allow re-picking the same file
   });
   renderDialogue();
+  renderDialogueToolsForm();
   refreshDialogueModelSelect();
+  refreshDialogueSessionsList();
+}
+
+async function refreshDialogueSessionsList() {
+  const list = $("#dialogue-sessions-list");
+  if (!list) return;
+  let items = [];
+  try {
+    items = await listDialogueSessions();
+  } catch (err) {
+    console.error("[dialogue] list sessions failed", err);
+  }
+  list.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "dialogue-sessions-empty";
+    empty.textContent = "No saved chats yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "dialogue-session-item" + (item.id === dialogueSessionId ? " active" : "");
+
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "dialogue-session-main";
+    main.title = item.title;
+    const imgHint = item.hasImages ? " · 🖼" : "";
+    main.innerHTML =
+      `<span class="dialogue-session-title">${escapeHtml(item.title)}</span>` +
+      `<span class="dialogue-session-meta">${formatTime(item.updatedAt)} · ${item.turnCount} msgs${imgHint}</span>`;
+    main.addEventListener("click", () => openDialogueSession(item.id));
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "dialogue-session-del";
+    del.title = "Delete session";
+    del.setAttribute("aria-label", "Delete session");
+    del.textContent = "✕";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteDialogueSessionUi(item.id, item.title);
+    });
+
+    row.appendChild(main);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function persistDialogueSession() {
+  if (!dialogueTurns.length) return null;
+  try {
+    const record = await putDialogueSession({
+      id: dialogueSessionId,
+      systemPrompt: dialogueSystemPrompt,
+      toolsJson: draftsToToolsJson(dialogueToolDrafts) || "",
+      turns: dialogueTurns,
+    });
+    dialogueSessionId = record.id;
+    await refreshDialogueSessionsList();
+    return record;
+  } catch (err) {
+    console.error("[dialogue] save session failed", err);
+    return null;
+  }
+}
+
+async function openDialogueSession(id) {
+  if (dialogueSending) return;
+  try {
+    const session = await getDialogueSession(id);
+    if (!session) return;
+    dialogueSessionId = session.id;
+    dialogueSystemPrompt = session.systemPrompt || "";
+    dialogueToolDrafts = openAiToolsToDrafts(session.toolsJson || "");
+    dialogueTurns = Array.isArray(session.turns) ? session.turns : [];
+    dialogueImages = [];
+    $("#dialogue-system-input").value = dialogueSystemPrompt;
+    clearDialogueToolsError();
+    renderDialogueToolsForm();
+    renderDialogueAttachments();
+    renderDialogue();
+    await refreshDialogueSessionsList();
+  } catch (err) {
+    console.error("[dialogue] open session failed", err);
+  }
+}
+
+function startNewDialogueSession() {
+  if (dialogueSending) return;
+  dialogueSessionId = null;
+  dialogueSystemPrompt = "";
+  dialogueToolDrafts = [];
+  dialogueTurns = [];
+  dialogueImages = [];
+  $("#dialogue-system-input").value = "";
+  clearDialogueToolsError();
+  renderDialogueToolsForm();
+  renderDialogueAttachments();
+  renderDialogue();
+  refreshDialogueSessionsList();
+}
+
+async function deleteDialogueSessionUi(id, title) {
+  if (dialogueSending) return;
+  if (!confirm(`Delete chat "${title || "this session"}"?`)) return;
+  try {
+    await deleteDialogueSession(id);
+    if (dialogueSessionId === id) startNewDialogueSession();
+    else await refreshDialogueSessionsList();
+  } catch (err) {
+    console.error("[dialogue] delete session failed", err);
+  }
+}
+
+function clearDialogueToolsError() {
+  const el = $("#dialogue-tools-error");
+  if (!el) return;
+  el.textContent = "";
+  el.classList.add("hidden");
+}
+
+/** Build OpenAI-shaped tools from the form; null if invalid. */
+function syncDialogueToolsFromUi() {
+  const { tools, error } = draftsToOpenAiTools(dialogueToolDrafts);
+  const el = $("#dialogue-tools-error");
+  if (error) {
+    if (el) {
+      el.textContent = error;
+      el.classList.remove("hidden");
+    }
+    return null;
+  }
+  clearDialogueToolsError();
+  return tools;
+}
+
+function renderDialogueToolsForm() {
+  const list = $("#dialogue-tools-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  if (!dialogueToolDrafts.length) {
+    const empty = document.createElement("div");
+    empty.className = "dialogue-tools-empty";
+    empty.textContent = "No tools yet. Click “+ Add tool” to define one.";
+    list.appendChild(empty);
+    return;
+  }
+
+  dialogueToolDrafts.forEach((tool, ti) => {
+    const card = document.createElement("div");
+    card.className = "dialogue-tool-card";
+
+    const header = document.createElement("div");
+    header.className = "dialogue-tool-card-header";
+    const title = document.createElement("span");
+    title.className = "dialogue-tool-card-title";
+    title.textContent = `Tool ${ti + 1}`;
+    const removeTool = document.createElement("button");
+    removeTool.type = "button";
+    removeTool.className = "icon-btn";
+    removeTool.title = "Remove tool";
+    removeTool.textContent = "✕";
+    removeTool.addEventListener("click", () => {
+      dialogueToolDrafts.splice(ti, 1);
+      clearDialogueToolsError();
+      renderDialogueToolsForm();
+    });
+    header.appendChild(title);
+    header.appendChild(removeTool);
+
+    const fields = document.createElement("div");
+    fields.className = "dialogue-tool-fields";
+
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "full";
+    nameLabel.innerHTML = `Name<input type="text" data-field="name" placeholder="get_weather" autocomplete="off" />`;
+    nameLabel.querySelector("input").value = tool.name || "";
+    nameLabel.querySelector("input").addEventListener("input", (e) => {
+      dialogueToolDrafts[ti].name = e.target.value;
+      clearDialogueToolsError();
+    });
+
+    const descLabel = document.createElement("label");
+    descLabel.className = "full";
+    descLabel.innerHTML = `Description<textarea rows="2" data-field="description" placeholder="Get the current weather for a location."></textarea>`;
+    descLabel.querySelector("textarea").value = tool.description || "";
+    descLabel.querySelector("textarea").addEventListener("input", (e) => {
+      dialogueToolDrafts[ti].description = e.target.value;
+      clearDialogueToolsError();
+    });
+
+    fields.appendChild(nameLabel);
+    fields.appendChild(descLabel);
+
+    const paramsWrap = document.createElement("div");
+    paramsWrap.className = "dialogue-tool-params";
+    const paramsLabel = document.createElement("div");
+    paramsLabel.className = "dialogue-tool-params-label";
+    const paramsTitle = document.createElement("span");
+    paramsTitle.textContent = `Parameters (${(tool.parameters || []).length})`;
+    const addParam = document.createElement("button");
+    addParam.type = "button";
+    addParam.className = "secondary-btn dialogue-tool-add-param";
+    addParam.textContent = "+ Add parameter";
+    addParam.addEventListener("click", () => {
+      if (!dialogueToolDrafts[ti].parameters) dialogueToolDrafts[ti].parameters = [];
+      dialogueToolDrafts[ti].parameters.push(emptyParamDraft());
+      renderDialogueToolsForm();
+    });
+    paramsLabel.appendChild(paramsTitle);
+    paramsLabel.appendChild(addParam);
+    paramsWrap.appendChild(paramsLabel);
+
+    (tool.parameters || []).forEach((param, pi) => {
+      const row = document.createElement("div");
+      row.className = "dialogue-tool-param";
+      const rowTitle = document.createElement("div");
+      rowTitle.className = "dialogue-tool-param-title param-span-2";
+      rowTitle.textContent = `Parameter ${pi + 1}`;
+
+      const nameIn = document.createElement("input");
+      nameIn.type = "text";
+      nameIn.placeholder = "name";
+      nameIn.value = param.name || "";
+      nameIn.addEventListener("input", (e) => {
+        dialogueToolDrafts[ti].parameters[pi].name = e.target.value;
+        clearDialogueToolsError();
+      });
+
+      const typeSel = document.createElement("select");
+      for (const t of PARAM_TYPES) {
+        const opt = document.createElement("option");
+        opt.value = t;
+        opt.textContent = t;
+        if ((param.type || "string") === t) opt.selected = true;
+        typeSel.appendChild(opt);
+      }
+      typeSel.addEventListener("change", (e) => {
+        dialogueToolDrafts[ti].parameters[pi].type = e.target.value;
+      });
+
+      const descIn = document.createElement("input");
+      descIn.type = "text";
+      descIn.className = "param-span-2";
+      descIn.placeholder = "description";
+      descIn.title = "Parameter description";
+      descIn.value = param.description || "";
+      descIn.addEventListener("input", (e) => {
+        dialogueToolDrafts[ti].parameters[pi].description = e.target.value;
+      });
+
+      const enumIn = document.createElement("input");
+      enumIn.type = "text";
+      enumIn.className = "param-span-2";
+      enumIn.placeholder = "enum values (optional, comma-separated)";
+      enumIn.value = param.enumValues || "";
+      enumIn.title = "Optional enum values, comma-separated";
+      enumIn.addEventListener("input", (e) => {
+        dialogueToolDrafts[ti].parameters[pi].enumValues = e.target.value;
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "param-actions";
+      const reqLabel = document.createElement("label");
+      reqLabel.className = "dialogue-tool-param-req";
+      const req = document.createElement("input");
+      req.type = "checkbox";
+      req.checked = !!param.required;
+      req.addEventListener("change", (e) => {
+        dialogueToolDrafts[ti].parameters[pi].required = e.target.checked;
+      });
+      reqLabel.appendChild(req);
+      reqLabel.appendChild(document.createTextNode("Required"));
+
+      const removeParam = document.createElement("button");
+      removeParam.type = "button";
+      removeParam.className = "icon-btn";
+      removeParam.title = "Remove parameter";
+      removeParam.textContent = "✕";
+      removeParam.addEventListener("click", () => {
+        dialogueToolDrafts[ti].parameters.splice(pi, 1);
+        renderDialogueToolsForm();
+      });
+      actions.appendChild(reqLabel);
+      actions.appendChild(removeParam);
+
+      row.appendChild(rowTitle);
+      row.appendChild(nameIn);
+      row.appendChild(typeSel);
+      row.appendChild(descIn);
+      row.appendChild(enumIn);
+      row.appendChild(actions);
+      paramsWrap.appendChild(row);
+    });
+
+    card.appendChild(header);
+    card.appendChild(fields);
+    card.appendChild(paramsWrap);
+    list.appendChild(card);
+  });
 }
 
 async function listOllamaModels() {
@@ -1046,25 +1382,82 @@ function renderDialogue() {
       bubble.appendChild(text);
     }
 
-    if (turn.raw) {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "dialogue-raw-toggle";
-      toggle.textContent = "Show raw";
-      const panel = document.createElement("pre");
-      panel.className = "dialogue-raw-panel hidden";
-      panel.textContent = JSON.stringify(turn.raw, null, 2);
-      toggle.addEventListener("click", () => {
-        panel.classList.toggle("hidden");
-        toggle.textContent = panel.classList.contains("hidden") ? "Show raw" : "Hide raw";
-      });
-      bubble.appendChild(toggle);
-      bubble.appendChild(panel);
-    }
+    if (turn.raw) appendDialogueRawPanel(bubble, turn.raw);
 
     chat.appendChild(bubble);
   }
   chat.scrollTop = chat.scrollHeight;
+}
+
+/** Expandable raw I/O panel with JSON vs chat-template Prompt modes. */
+function appendDialogueRawPanel(bubble, raw) {
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "dialogue-raw-toggle";
+  toggle.textContent = "Show raw";
+
+  const wrap = document.createElement("div");
+  wrap.className = "dialogue-raw-wrap hidden";
+
+  const modes = document.createElement("div");
+  modes.className = "dialogue-raw-modes";
+  const jsonBtn = document.createElement("button");
+  jsonBtn.type = "button";
+  jsonBtn.className = "dialogue-raw-mode active";
+  jsonBtn.textContent = "JSON";
+  const promptBtn = document.createElement("button");
+  promptBtn.type = "button";
+  promptBtn.className = "dialogue-raw-mode";
+  promptBtn.textContent = "Prompt";
+  modes.appendChild(jsonBtn);
+  modes.appendChild(promptBtn);
+
+  const panel = document.createElement("pre");
+  panel.className = "dialogue-raw-panel";
+
+  let mode = "json";
+  const renderPanel = () => {
+    if (mode === "prompt") {
+      // Processed chat-template string built inside the local engine (not the JSON messages).
+      panel.textContent =
+        typeof raw.prompt === "string" && raw.prompt.length > 0
+          ? raw.prompt
+          : "(No processed prompt for this turn. Local ONNX fills this after a reply; API providers send JSON only.)";
+    } else {
+      // Original JSON input (messages ± tools) or assistant response — never the processed prompt.
+      if (raw.request !== undefined) {
+        const payload =
+          raw.tools?.length > 0 ? { messages: raw.request, tools: raw.tools } : raw.request;
+        panel.textContent = JSON.stringify(payload, null, 2);
+      } else if (raw.response !== undefined) {
+        panel.textContent = JSON.stringify(raw.response, null, 2);
+      } else {
+        const { prompt: _prompt, tools: _tools, ...rest } = raw;
+        panel.textContent = JSON.stringify(rest, null, 2);
+      }
+    }
+    jsonBtn.classList.toggle("active", mode === "json");
+    promptBtn.classList.toggle("active", mode === "prompt");
+  };
+  renderPanel();
+
+  jsonBtn.addEventListener("click", () => {
+    mode = "json";
+    renderPanel();
+  });
+  promptBtn.addEventListener("click", () => {
+    mode = "prompt";
+    renderPanel();
+  });
+  toggle.addEventListener("click", () => {
+    wrap.classList.toggle("hidden");
+    toggle.textContent = wrap.classList.contains("hidden") ? "Show raw" : "Hide raw";
+  });
+
+  wrap.appendChild(modes);
+  wrap.appendChild(panel);
+  bubble.appendChild(toggle);
+  bubble.appendChild(wrap);
 }
 
 async function sendDialogue() {
@@ -1073,6 +1466,12 @@ async function sendDialogue() {
   const text = input.value.trim();
   const images = dialogueImages.slice();
   if (!text && images.length === 0) return;
+
+  const tools = syncDialogueToolsFromUi();
+  if (tools === null) {
+    $("#dialogue-tools-wrap").classList.remove("hidden");
+    return;
+  }
 
   const provider = settings.provider || "onnx";
   if (provider === "onnx" && settings.onnxModel && !downloadedModels[settings.onnxModel]) {
@@ -1086,7 +1485,10 @@ async function sendDialogue() {
     turnToMessage(userTurn),
   ];
 
-  userTurn.raw = { request: requestMessages };
+  userTurn.raw = {
+    request: requestMessages,
+    ...(tools.length ? { tools } : {}),
+  };
   dialogueTurns.push(userTurn);
   input.value = "";
   dialogueImages = [];
@@ -1099,13 +1501,27 @@ async function sendDialogue() {
   btn.textContent = "Sending…";
 
   try {
-    const res = await sendMessage({ type: "dialogue.send", messages: requestMessages });
+    const res = await sendMessage({
+      type: "dialogue.send",
+      messages: requestMessages,
+      ...(tools.length ? { tools } : {}),
+    });
     const replyText = res?.choices?.[0]?.message?.content ?? (res?.error ? `✗ ${res.error.message}` : "(empty response)");
-    dialogueTurns.push({ role: "assistant", content: replyText, raw: { response: res } });
+    const prompt = typeof res?.prompt === "string" ? res.prompt : null;
+    if (prompt != null) userTurn.raw.prompt = prompt;
+    // Keep prompt on the assistant turn too; strip from nested response to avoid duplicating a huge string in JSON mode.
+    const responseForRaw = res && typeof res === "object" ? { ...res } : res;
+    if (responseForRaw && "prompt" in responseForRaw) delete responseForRaw.prompt;
+    dialogueTurns.push({
+      role: "assistant",
+      content: replyText,
+      raw: { response: responseForRaw, ...(prompt != null ? { prompt } : {}) },
+    });
   } catch (err) {
     dialogueTurns.push({ role: "assistant", content: `✗ ${err.message}` });
   } finally {
     renderDialogue();
+    await persistDialogueSession();
     dialogueSending = false;
     btn.disabled = false;
     btn.textContent = "Send";

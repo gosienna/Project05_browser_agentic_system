@@ -3,10 +3,11 @@
 import { CURVE_UI_SOURCE } from "./seeds/curve-ui.js";
 
 const DB_NAME = "agent-systems";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const SYSTEMS = "systems";
 const COMPONENTS = "components";
 const CONVERSATIONS = "conversations";
+const DIALOGUE_SESSIONS = "dialogueSessions";
 
 export const COMPONENT_KINDS = ["agent", "tools", "html", "css", "ui"];
 
@@ -55,6 +56,11 @@ function openDb() {
         // one system (grouped via the bySystem index for per-system history).
         const store = db.createObjectStore(CONVERSATIONS, { keyPath: "id" });
         store.createIndex("bySystem", "systemId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(DIALOGUE_SESSIONS)) {
+        // Mutable Dialogue-tab chats (turns + image data URLs), not tied to a system.
+        const store = db.createObjectStore(DIALOGUE_SESSIONS, { keyPath: "id" });
+        store.createIndex("byUpdatedAt", "updatedAt", { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -325,6 +331,75 @@ export async function clearConversations(systemId) {
   for (const c of all || []) tx.objectStore(CONVERSATIONS).delete(c.id);
   await txDone(tx);
   return (all || []).length;
+}
+
+// --- Dialogue sessions (Dialogue tab chats, including image data URLs) -------
+
+function dialogueSessionTitle(turns) {
+  const firstUser = (turns || []).find((t) => t.role === "user");
+  if (!firstUser) return "(empty)";
+  const text = String(firstUser.content || "").trim();
+  if (text) return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+  if (firstUser.images?.length) return "(image)";
+  return "(empty)";
+}
+
+/**
+ * Create or update a Dialogue session. Pass `{ id }` to update; omit to create.
+ * `turns` may include `images` as data URLs.
+ */
+export async function putDialogueSession({ id = null, systemPrompt = "", toolsJson = "", turns = [] } = {}) {
+  await ensureSeeded();
+  const now = Date.now();
+  const existing = id ? await getDialogueSession(id) : null;
+  const record = {
+    id: existing?.id || id || `dlg_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    title: dialogueSessionTitle(turns),
+    systemPrompt: String(systemPrompt || ""),
+    toolsJson: String(toolsJson || ""),
+    turns: Array.isArray(turns) ? turns : [],
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  const db = await openDb();
+  const tx = db.transaction(DIALOGUE_SESSIONS, "readwrite");
+  tx.objectStore(DIALOGUE_SESSIONS).put(record);
+  await txDone(tx);
+  return record;
+}
+
+/** Lightweight metadata for every Dialogue session, newest first. */
+export async function listDialogueSessions() {
+  await ensureSeeded();
+  const db = await openDb();
+  const all = await reqToPromise(db.transaction(DIALOGUE_SESSIONS, "readonly").objectStore(DIALOGUE_SESSIONS).getAll());
+  return (all || [])
+    .map((s) => ({
+      id: s.id,
+      title: s.title || "(empty)",
+      updatedAt: s.updatedAt || s.createdAt || 0,
+      createdAt: s.createdAt || 0,
+      turnCount: (s.turns || []).length,
+      hasImages: (s.turns || []).some((t) => t.images?.length > 0),
+    }))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+/** Full session (turns + images + system prompt). */
+export async function getDialogueSession(id) {
+  await ensureSeeded();
+  if (!id) return null;
+  const db = await openDb();
+  return reqToPromise(db.transaction(DIALOGUE_SESSIONS, "readonly").objectStore(DIALOGUE_SESSIONS).get(id));
+}
+
+export async function deleteDialogueSession(id) {
+  if (!id) return false;
+  const db = await openDb();
+  const tx = db.transaction(DIALOGUE_SESSIONS, "readwrite");
+  tx.objectStore(DIALOGUE_SESSIONS).delete(id);
+  await txDone(tx);
+  return true;
 }
 
 function defaultComponents(systemId) {

@@ -682,7 +682,9 @@ async function invokeMinistral(entry, input, options) {
   const { load_image } = await loadTransformers();
   const rawMessages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
   const { messages, imageSources } = toGemmaMessages(rawMessages);
-  const prompt = processor.apply_chat_template(messages, { add_generation_prompt: true });
+  const templateOpts = { add_generation_prompt: true };
+  if (options?.tools?.length) templateOpts.tools = options.tools;
+  const prompt = processor.apply_chat_template(messages, templateOpts);
 
   let images = null;
   if (imageSources.length === 1) {
@@ -705,7 +707,7 @@ async function invokeMinistral(entry, input, options) {
   const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
     skip_special_tokens: true,
   });
-  return [{ generated_text: decoded?.[0] ?? "" }];
+  return [{ generated_text: decoded?.[0] ?? "", prompt }];
 }
 
 async function invokeGemma4(entry, input, options) {
@@ -714,10 +716,12 @@ async function invokeGemma4(entry, input, options) {
   const rawMessages = Array.isArray(input) ? input : [{ role: "user", content: String(input) }];
   const { messages, imageSources } = toGemmaMessages(rawMessages);
 
-  const prompt = processor.apply_chat_template(messages, {
+  const templateOpts = {
     enable_thinking: false,
     add_generation_prompt: true,
-  });
+  };
+  if (options?.tools?.length) templateOpts.tools = options.tools;
+  const prompt = processor.apply_chat_template(messages, templateOpts);
 
   let images = null;
   if (imageSources.length === 1) {
@@ -741,7 +745,7 @@ async function invokeGemma4(entry, input, options) {
   const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
     skip_special_tokens: true,
   });
-  return [{ generated_text: decoded?.[0] ?? "" }];
+  return [{ generated_text: decoded?.[0] ?? "", prompt }];
 }
 
 async function invokeEntry(entry, task, input, options) {
@@ -750,17 +754,50 @@ async function invokeEntry(entry, task, input, options) {
   return invokePipeline(entry.pipeline, task, input, options);
 }
 
+/** Render the chat-template string the tokenizer would feed the model (for Dialogue raw view). */
+function renderChatPrompt(pipe, input, tools) {
+  try {
+    const tokenizer = pipe?.tokenizer;
+    if (tokenizer?.apply_chat_template && Array.isArray(input)) {
+      const opts = { tokenize: false, add_generation_prompt: true };
+      if (tools?.length) opts.tools = tools;
+      return tokenizer.apply_chat_template(input, opts);
+    }
+  } catch (err) {
+    console.warn("[onnx] could not render chat prompt:", err);
+  }
+  return typeof input === "string" ? input : null;
+}
+
 async function invokePipeline(pipe, task, input, options) {
   if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
     const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
     const temperature = options.temperature ?? 0.2;
-    return pipe(input, {
-      max_new_tokens: maxNewTokens,
-      temperature,
-      do_sample: temperature > 0,
-      top_p: options.top_p ?? DEFAULT_TOP_P,
-      return_full_text: false,
-    });
+    const tools = options?.tools?.length ? options.tools : undefined;
+    const prompt = renderChatPrompt(pipe, input, tools);
+    // Prefer chat-template path when tools are present so declarations are injected.
+    let raw;
+    if (tools && pipe?.tokenizer?.apply_chat_template && Array.isArray(input) && typeof prompt === "string") {
+      raw = await pipe(prompt, {
+        max_new_tokens: maxNewTokens,
+        temperature,
+        do_sample: temperature > 0,
+        top_p: options.top_p ?? DEFAULT_TOP_P,
+        return_full_text: false,
+      });
+    } else {
+      raw = await pipe(input, {
+        max_new_tokens: maxNewTokens,
+        temperature,
+        do_sample: temperature > 0,
+        top_p: options.top_p ?? DEFAULT_TOP_P,
+        return_full_text: false,
+      });
+    }
+    if (prompt != null && Array.isArray(raw) && raw[0] && typeof raw[0] === "object") {
+      raw[0].prompt = prompt;
+    }
+    return raw;
   }
   if (task === "image-classification") {
     const topk = options.topK ?? options.topk ?? 5;
@@ -775,9 +812,10 @@ async function invokePipeline(pipe, task, input, options) {
 
 function normalizeOutput(task, raw, options) {
   if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
-    const text = Array.isArray(raw) ? raw[0]?.generated_text ?? "" : raw?.generated_text ?? "";
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const text = first?.generated_text ?? "";
     const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
-    return { text: content };
+    return { text: content, prompt: typeof first?.prompt === "string" ? first.prompt : null };
   }
   if (task === "image-to-text") {
     const first = Array.isArray(raw) ? raw[0] : raw;
@@ -813,6 +851,7 @@ async function runChatCompletions(request) {
     options: {
       max_new_tokens: request.max_tokens ?? 512,
       temperature: request.temperature ?? 0.2,
+      ...(Array.isArray(request.tools) && request.tools.length ? { tools: request.tools } : {}),
     },
   });
 
@@ -820,11 +859,14 @@ async function runChatCompletions(request) {
 
   const content = result.output?.text ?? "";
   const finishReason = content.length > 0 ? "stop" : "length";
-  return toResponse(result.model, content, finishReason, {
+  const response = toResponse(result.model, content, finishReason, {
     prompt_tokens: 0,
     completion_tokens: 0,
     total_tokens: 0,
   });
+  // Chat-template string actually tokenized for the local model (Dialogue "Prompt" raw mode).
+  if (typeof result.output?.prompt === "string") response.prompt = result.output.prompt;
+  return response;
 }
 
 async function handleLoadFailure(task, modelId, err) {

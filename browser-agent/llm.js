@@ -1,11 +1,13 @@
 // Internal protocol: every provider is consumed through the OpenAI
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
+import { toAnthropicTools } from "./dialogue-tools.js";
+
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
 
 /**
- * @param {{model?:string, messages:Array<{role:string,content:string}>, temperature?:number, max_tokens?:number, stream?:boolean}} request
+ * @param {{model?:string, messages:Array<{role:string,content:string}>, tools?:object[], temperature?:number, max_tokens?:number, stream?:boolean}} request
  * @param {object} settings
  * @returns {Promise<object>} OpenAI-shaped chat.completion (or {error} on failure)
  */
@@ -184,6 +186,8 @@ async function anthropicChatCompletions(request, settings) {
   const messages = request.messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+  const tools =
+    Array.isArray(request.tools) && request.tools.length ? toAnthropicTools(request.tools) : undefined;
 
   try {
     const res = await fetch(`${baseUrl}/v1/messages`, {
@@ -197,6 +201,7 @@ async function anthropicChatCompletions(request, settings) {
         model: request.model || settings.model || "claude-sonnet-5",
         system: system || undefined,
         messages,
+        ...(tools ? { tools } : {}),
         max_tokens: request.max_tokens ?? 1024,
         temperature: request.temperature,
       }),

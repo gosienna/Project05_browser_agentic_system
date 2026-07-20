@@ -188,10 +188,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getSettings()
       .then((settings) => {
         const model = settings.provider === "onnx" ? settings.onnxModel : settings.model;
+        const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return chatCompletions(
           {
             model,
             messages: msg.messages,
+            ...(tools ? { tools } : {}),
             temperature: settings.temperature ?? 0.2,
             max_tokens: settings.maxTokens ?? 1024,
           },

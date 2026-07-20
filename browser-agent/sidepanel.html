@@ -32,21 +32,42 @@
 
     <main>
       <section id="tab-dialogue" class="tab-panel">
-        <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
-        <div id="dialogue-system-wrap" class="hidden">
-          <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>
+        <div class="dialogue-toolbar">
+          <button id="dialogue-sessions-toggle" type="button" class="secondary-btn" aria-expanded="false">Sessions</button>
+          <button id="dialogue-new-btn" type="button" class="secondary-btn">New chat</button>
         </div>
-        <div id="dialogue-chat" class="dialogue-chat"></div>
-        <form id="dialogue-form">
-          <div id="dialogue-attachments" class="dialogue-attachments hidden"></div>
-          <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
-          <div class="dialogue-controls">
-            <select id="dialogue-model-select" aria-label="Chat model" title="Chat model"></select>
-            <input type="file" id="dialogue-image-input" accept="image/*" multiple class="hidden" />
-            <button type="button" id="dialogue-attach-btn" class="icon-btn hidden" title="Attach image" aria-label="Attach image">🖼</button>
-            <button type="submit" id="dialogue-send-btn">Send</button>
+        <div class="dialogue-layout">
+          <aside id="dialogue-sessions-panel" class="dialogue-sessions-panel collapsed" aria-label="Stored dialogue sessions">
+            <div class="dialogue-sessions-header">Saved chats</div>
+            <div id="dialogue-sessions-list" class="dialogue-sessions-list"></div>
+          </aside>
+          <div class="dialogue-main">
+            <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
+            <div id="dialogue-system-wrap" class="hidden">
+              <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>
+            </div>
+            <button id="dialogue-tools-toggle" type="button" class="secondary-btn">⚒ Tools</button>
+            <div id="dialogue-tools-wrap" class="hidden">
+              <div id="dialogue-tools-list" class="dialogue-tools-list"></div>
+              <div class="dialogue-tools-actions">
+                <button id="dialogue-tools-add-btn" type="button" class="secondary-btn">+ Add tool</button>
+              </div>
+              <div id="dialogue-tools-error" class="dialogue-tools-error hidden"></div>
+              <p class="hint">Define one or more functions the model may call. Tool calls appear in the reply (not executed).</p>
+            </div>
+            <div id="dialogue-chat" class="dialogue-chat"></div>
+            <form id="dialogue-form">
+              <div id="dialogue-attachments" class="dialogue-attachments hidden"></div>
+              <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
+              <div class="dialogue-controls">
+                <select id="dialogue-model-select" aria-label="Chat model" title="Chat model"></select>
+                <input type="file" id="dialogue-image-input" accept="image/*" multiple class="hidden" />
+                <button type="button" id="dialogue-attach-btn" class="icon-btn hidden" title="Attach image" aria-label="Attach image">🖼</button>
+                <button type="submit" id="dialogue-send-btn">Send</button>
+              </div>
+            </form>
           </div>
-        </form>
+        </div>
       </section>
 
       <section id="tab-agent" class="tab-panel active">
