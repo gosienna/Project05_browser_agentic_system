@@ -13,7 +13,7 @@ import {
   emptyParamDraft,
   emptyToolDraft,
   openAiToolsToDrafts,
-} from "./tools.js";
+} from "../tools/schema.js";
 import {
   formatAssistantToolCallDisplay,
   MCP_TOOL_HINT,
@@ -947,11 +947,11 @@ function appendDialogueRawPanel(bubble, raw) {
   let mode = "json";
   const renderPanel = () => {
     if (mode === "prompt") {
-      // Processed chat-template string built inside the local engine (not the JSON messages).
+      // Processed chat-template string (ONNX tokenizer or Ollama _debug_render_only).
       panel.textContent =
         typeof raw.prompt === "string" && raw.prompt.length > 0
           ? raw.prompt
-          : "(No processed prompt for this turn. Local ONNX fills this after a reply; API providers send JSON only.)";
+          : "(No processed prompt for this turn. ONNX and Ollama fill this after a reply; other API providers send JSON only.)";
     } else {
       // Original JSON input (messages ± tools) and/or assistant response — never the processed prompt.
       panel.textContent = formatDialogueRawJson(raw);

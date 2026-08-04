@@ -531,7 +531,7 @@ On every turn, reply with exactly ONE JSON object and nothing else:
 
 Do not wrap the JSON in markdown fences. Do not include any text outside the JSON object.`;
 
-const BROWSER_AGENT_TOOLS_NOTE = `// Built-in Browser Agent uses the extension's tools.js exports at runtime
+const BROWSER_AGENT_TOOLS_NOTE = `// Built-in Browser Agent uses the extension's tools/browser.js exports at runtime
 // (read_page, click, navigate, …). This file is documentation / override notes only.
 self.__agentTools = {};
 `;

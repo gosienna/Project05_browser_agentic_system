@@ -1,7 +1,7 @@
 import { runAgent } from "./agent.js";
 import { chatCompletions, ensureOffscreenDocument } from "./llm.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
-import * as tools from "./tools.js";
+import * as tools from "./tools/browser.js";
 import { runSystemEditor } from "./system-editor-l2.js";
 import { runScriptEditor } from "./system-editor-l1.js";
 import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getEditableKinds, getSystem, saveConversation } from "./system-store.js";

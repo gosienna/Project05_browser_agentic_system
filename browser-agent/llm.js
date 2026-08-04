@@ -1,7 +1,7 @@
 // Internal protocol: every provider is consumed through the OpenAI
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
-import { toAnthropicTools } from "./dialogue/tools.js";
+import { toAnthropicTools } from "./tools/schema.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
@@ -150,16 +150,71 @@ async function readJsonResponse(res) {
   }
 }
 
-function toOllamaNativeMessages(messages) {
+const OLLAMA_CHAT_ROLES = new Set(["system", "user", "assistant", "tool"]);
+
+function toOllamaChatMessages(messages) {
   return (messages || [])
-    .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
-    .map((m) => ({ role: m.role, content: m.content ?? "" }));
+    .filter((m) => OLLAMA_CHAT_ROLES.has(m.role))
+    .map((m) => {
+      const out = { role: m.role };
+      if (m.content !== undefined) out.content = m.content;
+      if (m.tool_calls?.length) out.tool_calls = m.tool_calls;
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      if (m.tool_name) out.tool_name = m.tool_name;
+      return out;
+    });
+}
+
+function buildOllamaNativeChatBody(model, request) {
+  const body = {
+    model,
+    messages: toOllamaChatMessages(request.messages),
+    stream: false,
+    options: { temperature: request.temperature },
+  };
+  if (request.tools?.length) body.tools = request.tools;
+  return body;
+}
+
+/** Rendered chat template via Ollama's _debug_render_only (no inference). */
+async function ollamaFetchRenderedPrompt(baseUrl, model, request) {
+  try {
+    const res = await ollamaFetch(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...buildOllamaNativeChatBody(model, request),
+        _debug_render_only: true,
+      }),
+    });
+    const parsed = await readJsonResponse(res);
+    if (parsed.error) {
+      console.warn("[ollama] prompt render:", parsed.error);
+      return null;
+    }
+    if (!res.ok) {
+      console.warn("[ollama] prompt render:", ollamaHttpError(baseUrl, res.status, parsed.body?.error));
+      return null;
+    }
+    const rendered =
+      parsed.body?._debug_info?.rendered_template ?? parsed.body?.debug_info?.rendered_template;
+    return typeof rendered === "string" && rendered.length > 0 ? rendered : null;
+  } catch (err) {
+    console.warn("[ollama] prompt render failed:", err);
+    return null;
+  }
+}
+
+function attachOllamaPrompt(response, prompt) {
+  if (typeof prompt === "string" && prompt.length > 0) response.prompt = prompt;
+  return response;
 }
 
 async function ollamaChatCompletions(request, settings) {
   const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
   const model = request.model || settings.model || "llama3.2";
   const v1Body = { ...request, model, stream: false };
+  const promptPromise = ollamaFetchRenderedPrompt(baseUrl, model, request);
 
   // Prefer Ollama's OpenAI-compatible shim; fall back to native /api/chat on any failure.
   try {
@@ -178,7 +233,8 @@ async function ollamaChatCompletions(request, settings) {
           "engine_error"
         );
       } else {
-        return parsed.body;
+        const prompt = await promptPromise;
+        return attachOllamaPrompt(parsed.body, prompt);
       }
     }
   } catch (err) {
@@ -190,12 +246,7 @@ async function ollamaChatCompletions(request, settings) {
     const res = await ollamaFetch(`${baseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages: toOllamaNativeMessages(request.messages),
-        stream: false,
-        options: { temperature: request.temperature },
-      }),
+      body: JSON.stringify(buildOllamaNativeChatBody(model, request)),
     });
     const parsed = await readJsonResponse(res);
     if (parsed.error) {
@@ -203,24 +254,28 @@ async function ollamaChatCompletions(request, settings) {
     }
     const body = parsed.body;
     if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
-    return {
-      id: `chatcmpl-${crypto.randomUUID()}`,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: body.message?.content ?? "" },
-          finish_reason: body.done ? "stop" : "length",
+    const prompt = await promptPromise;
+    return attachOllamaPrompt(
+      {
+        id: `chatcmpl-${crypto.randomUUID()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: body.message?.content ?? "" },
+            finish_reason: body.done ? "stop" : "length",
+          },
+        ],
+        usage: {
+          prompt_tokens: body.prompt_eval_count ?? 0,
+          completion_tokens: body.eval_count ?? 0,
+          total_tokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
         },
-      ],
-      usage: {
-        prompt_tokens: body.prompt_eval_count ?? 0,
-        completion_tokens: body.eval_count ?? 0,
-        total_tokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
       },
-    };
+      prompt
+    );
   } catch (err) {
     return errorResponse(
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,

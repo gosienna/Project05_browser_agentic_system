@@ -2,7 +2,7 @@
 
 import { registerMcpTool } from "./server.js";
 import { tavilySearch } from "../dialogue/tool-runtime.js";
-import * as browserTools from "../tools.js";
+import * as browserTools from "../tools/browser.js";
 
 const TAB_ID_PROP = {
   type: "integer",

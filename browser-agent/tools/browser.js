@@ -2,7 +2,7 @@
 // object (always includes tabId when relevant) and returns a plain
 // string/object result suitable for feeding back into the chat transcript.
 
-import { ensureOffscreenDocument } from "./llm.js";
+import { ensureOffscreenDocument } from "../llm.js";
 
 export async function read_page({ tabId, maxChars = 14000 }) {
   const [{ result }] = await chrome.scripting.executeScript({

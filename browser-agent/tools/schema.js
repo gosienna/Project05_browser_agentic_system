@@ -1,4 +1,4 @@
-// Dialogue tool definitions: form ↔ OpenAI/Anthropic/Gemini schemas.
+// Tool schema utilities: form ↔ OpenAI/Anthropic/Gemini shapes (dialogue + agent).
 
 const PARAM_TYPES = ["string", "number", "integer", "boolean", "array", "object"];
 
@@ -87,7 +87,7 @@ export function toOpenAiTools(value) {
  * @param {string} text
  * @returns {{ tools: object[], error: string|null }}
  */
-export function parseDialogueToolsJson(text) {
+export function parseToolsJson(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return { tools: [], error: null };
   let parsed;
@@ -171,7 +171,7 @@ export function draftsToOpenAiTools(drafts) {
 export function openAiToolsToDrafts(toolsOrJson) {
   let tools = [];
   if (typeof toolsOrJson === "string") {
-    const { tools: parsed, error } = parseDialogueToolsJson(toolsOrJson);
+    const { tools: parsed, error } = parseToolsJson(toolsOrJson);
     if (error) return [];
     tools = parsed;
   } else if (Array.isArray(toolsOrJson)) {
