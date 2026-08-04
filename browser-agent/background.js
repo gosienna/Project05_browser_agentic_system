@@ -1,5 +1,6 @@
 import { runAgent } from "./agent.js";
 import { chatCompletions, ensureOffscreenDocument } from "./llm.js";
+import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools.js";
 import { runSystemEditor } from "./system-editor-l2.js";
 import { runScriptEditor } from "./system-editor-l1.js";
@@ -16,6 +17,7 @@ chrome.runtime.onStartup?.addListener?.(() => {
 });
 
 ensureSeeded().catch((err) => console.error("[systems] seed failed", err));
+registerBuiltinMcpTools();
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab?.windowId != null) chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
@@ -201,6 +203,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         );
       })
       .then(sendResponse);
+    return true;
+  }
+  if (msg.type === "mcp.tools.list") {
+    getSettings()
+      .then((settings) => {
+        const groups = Array.isArray(msg.groups) && msg.groups.length ? msg.groups : ["dialogue"];
+        const merged = { ...settings, ...(msg.settings && typeof msg.settings === "object" ? msg.settings : {}) };
+        return {
+          tools: listMcpTools({ groups, settings: merged }),
+          openAiTools: listMcpToolsOpenAi({ groups, settings: merged }),
+        };
+      })
+      .then(sendResponse);
+    return true;
+  }
+  if (msg.type === "dialogue.tool.run") {
+    getSettings()
+      .then(async (settings) => {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        return callMcpTool(msg.name, msg.args || {}, { settings, tabId: activeTab?.id });
+      })
+      .then((result) => sendResponse({ result }))
+      .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
   }
   if (msg.type === "onnx.relay") {

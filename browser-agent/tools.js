@@ -9,7 +9,7 @@ export async function read_page({ tabId, maxChars = 14000 }) {
     target: { tabId: requireTabId(tabId) },
     func: () => document.body?.innerText || "",
   });
-  return truncate(result || "", maxChars);
+  return truncate(result || "", maxChars, 14000);
 }
 
 export async function get_links({ tabId }) {
@@ -91,7 +91,7 @@ export async function fetch_url({ url, maxChars = 12000 }) {
   const res = await fetch(url);
   const text = await res.text();
   const stripped = text.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  return truncate(stripped, maxChars);
+  return truncate(stripped, maxChars, 12000);
 }
 
 export function wait({ ms = 1000 }) {
@@ -182,6 +182,16 @@ function requireTabId(tabId) {
   return tabId;
 }
 
-function truncate(str, max) {
-  return str.length > max ? str.slice(0, max) + "\n...[truncated]" : str;
+function normalizeMaxChars(maxChars, defaultMax) {
+  const n = Number(maxChars);
+  if (!Number.isFinite(n) || n <= 0) return defaultMax;
+  return Math.floor(n);
+}
+
+function truncate(str, maxChars, defaultMax) {
+  if (!str) return str || "";
+  const limit = normalizeMaxChars(maxChars, defaultMax);
+  if (str.length <= limit) return str;
+  const kept = str.slice(0, limit);
+  return `${kept}\n...[truncated — ${str.length.toLocaleString()} chars total, showing first ${limit.toLocaleString()}]`;
 }

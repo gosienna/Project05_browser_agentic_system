@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [{ "header": "Origin", "operation": "remove" }]
+    },
+    "condition": {
+      "regexFilter": "^http://127\\.0\\.0\\.1:\\d+/",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [{ "header": "Origin", "operation": "remove" }]
+    },
+    "condition": {
+      "regexFilter": "^http://localhost:\\d+/",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  }
+]

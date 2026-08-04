@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <title>Browser Agent</title>
     <link rel="stylesheet" href="sidepanel.css" />
+    <link rel="stylesheet" href="dialogue/dialogue.css" />
   </head>
   <body>
     <header class="topbar">
@@ -48,12 +49,23 @@
             </div>
             <button id="dialogue-tools-toggle" type="button" class="secondary-btn">⚒ Tools</button>
             <div id="dialogue-tools-wrap" class="hidden">
+              <div class="dialogue-mcp-toggles">
+                <label class="dialogue-web-search-label">
+                  <input type="checkbox" id="dialogue-web-search-enabled" checked />
+                  Web search (Tavily)
+                </label>
+                <label class="dialogue-web-search-label">
+                  <input type="checkbox" id="dialogue-browser-tools-enabled" checked />
+                  Browser tools (MCP)
+                </label>
+              </div>
+              <p id="dialogue-mcp-status" class="dialogue-mcp-status"></p>
               <div id="dialogue-tools-list" class="dialogue-tools-list"></div>
               <div class="dialogue-tools-actions">
                 <button id="dialogue-tools-add-btn" type="button" class="secondary-btn">+ Add tool</button>
               </div>
               <div id="dialogue-tools-error" class="dialogue-tools-error hidden"></div>
-              <p class="hint">Define one or more functions the model may call. Tool calls appear in the reply (not executed).</p>
+              <p class="hint">MCP server tools (above) are executed by the extension. Custom tools are schema-only.</p>
             </div>
             <div id="dialogue-chat" class="dialogue-chat"></div>
             <form id="dialogue-form">
@@ -171,6 +183,11 @@
           <label for="max-steps-input">Max steps per run</label>
           <input id="max-steps-input" type="number" min="1" max="100" step="1" placeholder="14" />
           <p class="hint">Caps LLM/tool-call turns per automation or editor run (Level 1, Level 2, and browser automation). Default 14.</p>
+
+          <h3 class="onnx-section-title">Dialogue web search (Tavily)</h3>
+          <label for="tavily-api-key">Tavily API key</label>
+          <input id="tavily-api-key" type="password" placeholder="tvly-…" autocomplete="off" />
+          <p class="hint">Powers the built-in <code>web_search</code> tool in Dialogue. <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> — free tier includes 1,000 searches/month.</p>
 
           <button id="test-connection-btn" type="button">Test connection</button>
           <span id="test-connection-result"></span>

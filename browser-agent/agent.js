@@ -92,8 +92,14 @@ async function runTool(tools, name, args, ctx) {
   const fn = tools[name];
   if (typeof fn !== "function") throw new Error(`Unknown tool "${name}"`);
   const effectiveArgs = { tabId: ctx.tabId, ...args };
-  if (name === "read_page" && effectiveArgs.maxChars === undefined) effectiveArgs.maxChars = DEFAULT_READ_PAGE_CHARS;
-  if (name === "fetch_url" && effectiveArgs.maxChars === undefined) effectiveArgs.maxChars = DEFAULT_FETCH_URL_CHARS;
+  if (name === "read_page") {
+    const n = Number(effectiveArgs.maxChars);
+    if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_READ_PAGE_CHARS;
+  }
+  if (name === "fetch_url") {
+    const n = Number(effectiveArgs.maxChars);
+    if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_FETCH_URL_CHARS;
+  }
   return fn(effectiveArgs);
 }
 

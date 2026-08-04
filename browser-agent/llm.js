@@ -1,7 +1,7 @@
 // Internal protocol: every provider is consumed through the OpenAI
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
-import { toAnthropicTools } from "./dialogue-tools.js";
+import { toAnthropicTools } from "./dialogue/tools.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
@@ -121,40 +121,88 @@ async function openaiChatCompletions(request, settings) {
 
 // --- ollama --------------------------------------------------------------
 
-async function ollamaChatCompletions(request, settings) {
-  const baseUrl = (settings.baseUrl || "http://localhost:11434").replace(/\/$/, "");
-  const model = request.model || settings.model || "llama3.2";
+function ollamaFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    // Chrome 142+ LNA: annotate loopback targets so localhost requests succeed reliably.
+    targetAddressSpace: "loopback",
+  });
+}
 
-  // Prefer Ollama's OpenAI-compatible shim; it needs no translation.
+function ollamaHttpError(baseUrl, status, detail) {
+  if (status === 403) {
+    return (
+      `Ollama at ${baseUrl} rejected the request (HTTP 403 — CORS). ` +
+      "Reload the extension after updating, or restart Ollama with OLLAMA_ORIGINS=\"*\" " +
+      "(macOS: launchctl setenv OLLAMA_ORIGINS \"*\" then restart the Ollama app)."
+    );
+  }
+  return `Ollama at ${baseUrl}: ${detail || `HTTP ${status}`}`;
+}
+
+async function readJsonResponse(res) {
+  const text = await res.text();
+  if (!text) return { error: `empty response (HTTP ${res.status})` };
   try {
-    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    return { body: JSON.parse(text) };
+  } catch {
+    return { error: `invalid JSON (HTTP ${res.status}): ${text.slice(0, 120)}` };
+  }
+}
+
+function toOllamaNativeMessages(messages) {
+  return (messages || [])
+    .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "system")
+    .map((m) => ({ role: m.role, content: m.content ?? "" }));
+}
+
+async function ollamaChatCompletions(request, settings) {
+  const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const model = request.model || settings.model || "llama3.2";
+  const v1Body = { ...request, model, stream: false };
+
+  // Prefer Ollama's OpenAI-compatible shim; fall back to native /api/chat on any failure.
+  try {
+    const res = await ollamaFetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...request, model }),
+      body: JSON.stringify(v1Body),
     });
     if (res.status !== 404) {
-      const body = await res.json();
-      if (!res.ok) return errorResponse(body?.error?.message || `HTTP ${res.status}`, "engine_error");
-      return body;
+      const parsed = await readJsonResponse(res);
+      if (parsed.error) {
+        console.warn("[ollama] /v1/chat/completions:", parsed.error);
+      } else if (!res.ok) {
+        return errorResponse(
+          ollamaHttpError(baseUrl, res.status, parsed.body?.error?.message),
+          "engine_error"
+        );
+      } else {
+        return parsed.body;
+      }
     }
   } catch (err) {
-    return errorResponse(`Could not reach Ollama at ${baseUrl}: ${err.message}`, "engine_error");
+    console.warn("[ollama] /v1/chat/completions fetch failed:", err);
   }
 
   // Fallback: native /api/chat, translated to chat.completions shape.
   try {
-    const res = await fetch(`${baseUrl}/api/chat`, {
+    const res = await ollamaFetch(`${baseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
-        messages: request.messages,
+        messages: toOllamaNativeMessages(request.messages),
         stream: false,
         options: { temperature: request.temperature },
       }),
     });
-    const body = await res.json();
-    if (!res.ok) return errorResponse(body?.error || `HTTP ${res.status}`, "engine_error");
+    const parsed = await readJsonResponse(res);
+    if (parsed.error) {
+      return errorResponse(ollamaHttpError(baseUrl, res.status, parsed.error), "engine_error");
+    }
+    const body = parsed.body;
+    if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
     return {
       id: `chatcmpl-${crypto.randomUUID()}`,
       object: "chat.completion",
@@ -174,18 +222,55 @@ async function ollamaChatCompletions(request, settings) {
       },
     };
   } catch (err) {
-    return errorResponse(`Could not reach Ollama at ${baseUrl}: ${err.message}`, "engine_error");
+    return errorResponse(
+      `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
+      "engine_error"
+    );
   }
 }
 
 // --- anthropic -------------------------------------------------------------
 
+function toAnthropicMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === "tool") {
+      const block = { type: "tool_result", tool_use_id: m.tool_call_id, content: m.content };
+      const last = out[out.length - 1];
+      if (last?.role === "user" && Array.isArray(last.content) && last.content[0]?.type === "tool_result") {
+        last.content.push(block);
+      } else {
+        out.push({ role: "user", content: [block] });
+      }
+      continue;
+    }
+
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const blocks = [];
+      if (m.content) blocks.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        let input = {};
+        try {
+          input = JSON.parse(tc.function?.arguments || "{}");
+        } catch {
+          input = {};
+        }
+        blocks.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      }
+      out.push({ role: "assistant", content: blocks });
+      continue;
+    }
+
+    const role = m.role === "assistant" ? "assistant" : "user";
+    out.push({ role, content: m.content });
+  }
+  return out;
+}
+
 async function anthropicChatCompletions(request, settings) {
   const baseUrl = (settings.baseUrl || "https://api.anthropic.com").replace(/\/$/, "");
   const system = request.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-  const messages = request.messages
-    .filter((m) => m.role !== "system")
-    .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+  const messages = toAnthropicMessages(request.messages.filter((m) => m.role !== "system"));
   const tools =
     Array.isArray(request.tools) && request.tools.length ? toAnthropicTools(request.tools) : undefined;
 
@@ -208,7 +293,26 @@ async function anthropicChatCompletions(request, settings) {
     });
     const body = await res.json();
     if (!res.ok) return errorResponse(body?.error?.message || `HTTP ${res.status}`, "engine_error");
-    const text = (body.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+
+    const blocks = body.content || [];
+    const text = blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
+    const toolUses = blocks.filter((b) => b.type === "tool_use");
+    const tool_calls = toolUses.map((tu) => ({
+      id: tu.id,
+      type: "function",
+      function: {
+        name: tu.name,
+        arguments: JSON.stringify(tu.input && typeof tu.input === "object" ? tu.input : {}),
+      },
+    }));
+
+    const finishReason =
+      body.stop_reason === "tool_use"
+        ? "tool_calls"
+        : body.stop_reason === "end_turn"
+          ? "stop"
+          : "length";
+
     return {
       id: body.id || `chatcmpl-${crypto.randomUUID()}`,
       object: "chat.completion",
@@ -217,8 +321,12 @@ async function anthropicChatCompletions(request, settings) {
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: text },
-          finish_reason: body.stop_reason === "end_turn" ? "stop" : "length",
+          message: {
+            role: "assistant",
+            content: text || null,
+            ...(tool_calls.length ? { tool_calls } : {}),
+          },
+          finish_reason: finishReason,
         },
       ],
       usage: {
