@@ -4,23 +4,108 @@
 
 import { ensureOffscreenDocument } from "../llm.js";
 
+const DEFAULT_PAGE_HTML_CHARS = 14000;
+const MODIFY_ELEMENT_MAX = 100;
+
 export async function read_page({ tabId, maxChars = 14000 }) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
-    func: () => document.body?.innerText || "",
-  });
+  const result = await runInTab(tabId, () => document.body?.innerText || "");
   return truncate(result || "", maxChars, 14000);
 }
 
+export async function get_page_html({ tabId, selector, maxChars = DEFAULT_PAGE_HTML_CHARS }) {
+  const raw = await runInTab(
+    tabId,
+    (sel) => {
+      if (sel) {
+        const el = document.querySelector(sel);
+        if (!el) return { ok: false, error: `No element matched "${sel}"` };
+        return { ok: true, html: el.outerHTML, url: location.href };
+      }
+      return { ok: true, html: document.documentElement.outerHTML, url: location.href };
+    },
+    [selector || null]
+  );
+  if (!raw?.ok) return raw;
+  const limit = normalizeMaxChars(maxChars, DEFAULT_PAGE_HTML_CHARS);
+  const html = raw.html || "";
+  const truncated = html.length > limit;
+  return {
+    ok: true,
+    html: truncated ? html.slice(0, limit) : html,
+    url: raw.url,
+    ...(truncated
+      ? {
+          truncated: true,
+          totalChars: html.length,
+          shownChars: limit,
+        }
+      : {}),
+  };
+}
+
+export async function modify_element({ tabId, selector, styles, text, innerHTML, all = false }) {
+  if (!selector || typeof selector !== "string") {
+    return { ok: false, error: "selector is required" };
+  }
+  const normalizedStyles = normalizeStyleObject(styles);
+  const hasStyles = normalizedStyles != null;
+  const hasText = text !== undefined && text !== null;
+  const hasInnerHTML = innerHTML !== undefined && innerHTML !== null;
+  if (!hasStyles && !hasText && !hasInnerHTML) {
+    return { ok: false, error: "Provide at least one of styles, text, or innerHTML" };
+  }
+  return runInTab(
+    tabId,
+    (sel, edit, matchAll, max) => {
+      const apply = (el) => {
+        if (edit.styles) Object.assign(el.style, edit.styles);
+        if (edit.text !== undefined && edit.text !== null) el.textContent = String(edit.text);
+        if (edit.innerHTML !== undefined && edit.innerHTML !== null) el.innerHTML = String(edit.innerHTML);
+      };
+      if (matchAll) {
+        const nodes = Array.from(document.querySelectorAll(sel)).slice(0, max);
+        if (!nodes.length) return { ok: false, error: `No elements matched "${sel}"` };
+        nodes.forEach(apply);
+        return { ok: true, matched: nodes.length, updated: nodes.length };
+      }
+      const el = document.querySelector(sel);
+      if (!el) return { ok: false, error: `No element matched "${sel}"` };
+      apply(el);
+      return { ok: true, matched: 1, updated: 1 };
+    },
+    [
+      selector,
+      {
+        styles: hasStyles ? normalizedStyles : undefined,
+        text: hasText ? text : undefined,
+        innerHTML: hasInnerHTML ? innerHTML : undefined,
+      },
+      !!all,
+      MODIFY_ELEMENT_MAX,
+    ]
+  );
+}
+
+export async function execute_script({ tabId, script, args = [] }) {
+  if (typeof script !== "string" || !script.trim()) {
+    throw new Error("execute_script requires a non-empty script string");
+  }
+  return runInTab(
+    tabId,
+    (source, callArgs) => {
+      const fn = (0, eval)(`(${source})`);
+      return fn(...callArgs);
+    },
+    [script, Array.isArray(args) ? args : []]
+  );
+}
+
 export async function get_links({ tabId }) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
-    func: () =>
-      Array.from(document.querySelectorAll("a[href]"))
-        .slice(0, 200)
-        .map((a) => ({ text: a.innerText.trim().slice(0, 120), href: a.href })),
-  });
-  return result;
+  return runInTab(tabId, () =>
+    Array.from(document.querySelectorAll("a[href]"))
+      .slice(0, 200)
+      .map((a) => ({ text: a.innerText.trim().slice(0, 120), href: a.href }))
+  );
 }
 
 export async function list_tabs() {
@@ -39,9 +124,9 @@ export async function navigate({ tabId, url }) {
 }
 
 export async function click({ tabId, selector }) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
-    func: (sel) => {
+  return runInTab(
+    tabId,
+    (sel) => {
       let el = document.querySelector(sel);
       if (!el) {
         el = Array.from(document.querySelectorAll("a, button, [role='button'], input[type=submit]")).find((n) =>
@@ -53,15 +138,14 @@ export async function click({ tabId, selector }) {
       el.click();
       return { ok: true };
     },
-    args: [selector],
-  });
-  return result;
+    [selector]
+  );
 }
 
 export async function type_text({ tabId, selector, text }) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
-    func: (sel, value) => {
+  return runInTab(
+    tabId,
+    (sel, value) => {
       const el = document.querySelector(sel);
       if (!el) return { ok: false, error: `No element matched "${sel}"` };
       el.focus();
@@ -70,21 +154,19 @@ export async function type_text({ tabId, selector, text }) {
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return { ok: true };
     },
-    args: [selector, text],
-  });
-  return result;
+    [selector, text]
+  );
 }
 
 export async function scroll({ tabId, direction = "down" }) {
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
-    func: (dir) => {
+  return runInTab(
+    tabId,
+    (dir) => {
       window.scrollBy(0, dir === "up" ? -window.innerHeight * 0.9 : window.innerHeight * 0.9);
       return { ok: true, scrollY: window.scrollY };
     },
-    args: [direction],
-  });
-  return result;
+    [direction]
+  );
 }
 
 export async function fetch_url({ url, maxChars = 12000 }) {
@@ -175,6 +257,46 @@ async function captureTab(tabId) {
   // captureVisibleTab only sees the foreground tab in that window.
   if (!tab.active) await chrome.tabs.update(id, { active: true });
   return chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+}
+
+function quoteLooseJsonValues(jsonish) {
+  return jsonish.replace(/:\s*([^",{[\s][^,}]*?)\s*([,}])/g, (match, val, tail) => {
+    const v = val.trim();
+    if (/^(true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?)$/.test(v)) return `:${v}${tail}`;
+    return `:"${v.replace(/"/g, '\\"')}"${tail}`;
+  });
+}
+
+function normalizeStyleObject(styles) {
+  if (styles && typeof styles === "object" && !Array.isArray(styles)) return styles;
+  if (typeof styles !== "string") return null;
+  const trimmed = styles.trim();
+  if (!trimmed) return null;
+  const wrapped = trimmed.startsWith("{") ? trimmed : `{${trimmed}}`;
+  try {
+    const parsed = JSON.parse(wrapped);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    try {
+      let fixed = wrapped.replace(/([{,]\s*)([a-zA-Z_][\w-]*)\s*:/g, '$1"$2":');
+      fixed = quoteLooseJsonValues(fixed);
+      const parsed = JSON.parse(fixed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+async function runInTab(tabId, func, args = []) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: requireTabId(tabId) },
+    world: "ISOLATED",
+    func,
+    args,
+  });
+  return result;
 }
 
 function requireTabId(tabId) {

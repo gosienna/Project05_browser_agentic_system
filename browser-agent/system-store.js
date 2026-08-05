@@ -519,6 +519,9 @@ Tools:
 - click({tabId, selector}): clicks the first element matching a CSS selector or visible text.
 - type_text({tabId, selector, text}): types text into an input/textarea matching selector.
 - scroll({tabId, direction}): scrolls the tab "up" or "down" by one screen.
+- get_page_html({tabId, selector?, maxChars?}): returns raw HTML from the live tab.
+- modify_element({tabId, selector, styles?, text?, innerHTML?, all?}): change styles or content on matched element(s).
+- execute_script({tabId, script, args?}): run a JS function in the tab (JSON-serializable return).
 - fetch_url({url}): fetches a URL's text content without opening a tab.
 - wait({ms}): pauses for ms milliseconds.
 - describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image.

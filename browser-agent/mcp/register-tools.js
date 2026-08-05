@@ -185,6 +185,70 @@ export function registerBuiltinMcpTools() {
   });
 
   registerMcpTool({
+    name: "get_page_html",
+    description:
+      "Return raw HTML from a live browser tab (after JS rendering). Omit selector for full document; pass selector for one element's outerHTML. Use before modify_element to pick selectors. Changes are not persisted — reload reverts the page.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        selector: { type: "string", description: "Optional CSS selector; omit for full document HTML" },
+        maxChars: { type: "integer", description: "Max characters (default 14000; use selector to limit size; omit or use ≤0 for default)" },
+      },
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.get_page_html(args)),
+  });
+
+  registerMcpTool({
+    name: "modify_element",
+    description:
+      "Change DOM content or styles on a tab. Provide selector plus at least one of styles (camelCase CSS), text (textContent), or innerHTML. Set all:true to update up to 100 matches. Example: enlarge title — selector \"h1\", styles {fontSize:\"2.5rem\"}. Example: bold red text — styles {color:\"red\", fontWeight:\"bold\"}. Reload reverts changes.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        selector: { type: "string", description: "CSS selector for target element(s)" },
+        styles: {
+          type: "object",
+          description: "CamelCase CSS properties, e.g. { color: \"red\", fontSize: \"2rem\" }",
+          additionalProperties: { type: "string" },
+        },
+        text: { type: "string", description: "Set element textContent" },
+        innerHTML: { type: "string", description: "Set element innerHTML" },
+        all: { type: "boolean", description: "Apply to all matching elements (max 100)" },
+      },
+      required: ["selector"],
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.modify_element(args)),
+  });
+
+  registerMcpTool({
+    name: "execute_script",
+    description:
+      "Run a JavaScript function in the tab (isolated world: DOM access yes, page JS variables no). script is a function source string; args is an optional array passed to it. Return value must be JSON-serializable. Example: highlight download links — script \"() => { const sel = 'a[download], a[href$=\\\\\".pdf\\\\\"]'; let n = 0; document.querySelectorAll(sel).forEach(el => { el.style.outline = '3px solid red'; n++; }); return { highlighted: n }; }\"",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        script: { type: "string", description: "Function source, e.g. \"() => document.title\" or \"(sel) => ...\"" },
+        args: {
+          type: "array",
+          description: "Optional arguments passed to the function",
+          items: {},
+        },
+      },
+      required: ["script"],
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.execute_script(args)),
+  });
+
+  registerMcpTool({
     name: "wait",
     description: "Pause for a number of milliseconds (max 15000).",
     groups: ["dialogue", "browser"],

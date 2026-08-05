@@ -22,6 +22,29 @@ import {
 } from "./tool-runtime.js";
 
 const DIALOGUE_MAX_TOOL_ROUNDS = 5;
+/** Keep tool payloads small — large HTML + local ONNX (esp. WebGPU) can OOM or crash the next inference. */
+const DIALOGUE_TOOL_RESULT_CHARS = 8000;
+const DIALOGUE_HTML_FIELD_CHARS = 6000;
+
+function stringifyToolResultForLlm(toolName, result) {
+  if (result == null) return "";
+  let payload = result;
+  if (toolName === "get_page_html" && result && typeof result === "object" && typeof result.html === "string") {
+    const html = result.html;
+    if (html.length > DIALOGUE_HTML_FIELD_CHARS) {
+      payload = {
+        ...result,
+        html: html.slice(0, DIALOGUE_HTML_FIELD_CHARS),
+        truncatedForContext: true,
+        totalChars: html.length,
+        shownChars: DIALOGUE_HTML_FIELD_CHARS,
+      };
+    }
+  }
+  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  if (text.length <= DIALOGUE_TOOL_RESULT_CHARS) return text;
+  return `${text.slice(0, DIALOGUE_TOOL_RESULT_CHARS)}\n...[truncated for LLM context]`;
+}
 
 let $;
 let sendMessage;
@@ -335,7 +358,7 @@ function turnsToChatMessages(turns) {
   for (const t of turns) {
     if (t.role === "tool") {
       if (t.pending) continue;
-      const body = t.error ? `Error: ${t.error}` : JSON.stringify(t.result, null, 2);
+      const body = t.error ? `Error: ${t.error}` : stringifyToolResultForLlm(t.toolName, t.result);
       out.push({ role: "user", content: `Tool ${t.toolName} result:\n${body}` });
       continue;
     }
@@ -422,7 +445,7 @@ async function executeDialogueToolTurn(call, btn) {
   toolTurn.content = formatToolTurnDisplay(call.name, result, errMsg);
   renderDialogue();
 
-  const resultText = errMsg ? `Error: ${errMsg}` : JSON.stringify(result, null, 2);
+  const resultText = errMsg ? `Error: ${errMsg}` : stringifyToolResultForLlm(call.name, result);
   return { toolTurn, resultText };
 }
 

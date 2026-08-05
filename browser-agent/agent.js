@@ -12,6 +12,9 @@ Tools:
 - click({tabId, selector}): clicks the first element matching a CSS selector or visible text.
 - type_text({tabId, selector, text}): types text into an input/textarea matching selector.
 - scroll({tabId, direction}): scrolls the tab "up" or "down" by one screen.
+- get_page_html({tabId, selector?, maxChars?}): returns raw HTML from the live tab (full document or one element).
+- modify_element({tabId, selector, styles?, text?, innerHTML?, all?}): change styles or content on matched element(s).
+- execute_script({tabId, script, args?}): run a JS function in the tab; return value must be JSON-serializable.
 - fetch_url({url}): fetches a URL's text content without opening a tab.
 - wait({ms}): pauses for ms milliseconds.
 - describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image (screenshot of tabId, or imageUrl/dataUrl). Returns {caption, model}.
@@ -27,6 +30,7 @@ Do not wrap the JSON in markdown fences. Do not include any text outside the JSO
 // Tool-result truncation defaults; overridable per-run (see agent hardening, Phase 2).
 const DEFAULT_READ_PAGE_CHARS = 14000;
 const DEFAULT_FETCH_URL_CHARS = 12000;
+const DEFAULT_PAGE_HTML_CHARS = 14000;
 const TOOL_RESULT_CHARS_IN_TRANSCRIPT = 8000;
 
 export async function runAgent({ task, settings, tools, tabId, onEvent, onComplete }) {
@@ -99,6 +103,10 @@ async function runTool(tools, name, args, ctx) {
   if (name === "fetch_url") {
     const n = Number(effectiveArgs.maxChars);
     if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_FETCH_URL_CHARS;
+  }
+  if (name === "get_page_html") {
+    const n = Number(effectiveArgs.maxChars);
+    if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_PAGE_HTML_CHARS;
   }
   return fn(effectiveArgs);
 }

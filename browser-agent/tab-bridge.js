@@ -27,17 +27,7 @@ export async function handleTabBridge(msg) {
       if (typeof fnSource !== "string" || !fnSource.trim()) {
         throw new Error("executeInTab requires fnSource string");
       }
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "ISOLATED",
-        func: (source, callArgs) => {
-          // Dynamic tool code from the agent system (sandbox → bridge).
-          const fn = (0, eval)(`(${source})`);
-          return fn(...callArgs);
-        },
-        args: [fnSource, args],
-      });
-      return result;
+      return tools.execute_script({ tabId, script: fnSource, args });
     }
     case "readPage":
       return tools.read_page({ tabId: await resolveTabId(msg.tabId), maxChars: msg.maxChars });

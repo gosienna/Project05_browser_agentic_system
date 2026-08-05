@@ -6,7 +6,7 @@ const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 export const MCP_TOOL_HINT =
   "You have MCP tools available in this chat. " +
   "When you need current information or browser actions, call the appropriate tool. " +
-  "For local ONNX models, use: call:<tool_name>{arg:value,...} — e.g. call:web_search{query:today's date} or call:read_page{}.";
+  "For local ONNX models, use: call:<tool_name>{arg:value,...} — e.g. call:web_search{query:today's date} or call:modify_element{selector:h1,styles:{fontSize:2.5rem,color:red}}.";
 
 /**
  * Tavily Search API — basic depth (1 credit per request).
@@ -55,37 +55,118 @@ export async function tavilySearch({ query, max_results = 5 } = {}, settings = {
     })),
   };
 }
+/** Extract content between balanced `{` `}` starting at openIdx. */
+function extractBalancedBraces(text, openIdx) {
+  if (text[openIdx] !== "{") return null;
+  let depth = 0;
+  for (let i = openIdx; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        return { inner: text.slice(openIdx + 1, i), end: i + 1 };
+      }
+    }
+  }
+  return null;
+}
+
+function quoteLooseJsonValues(jsonish) {
+  return jsonish.replace(/:\s*([^",{[\s][^,}]*?)\s*([,}])/g, (match, val, tail) => {
+    const v = val.trim();
+    if (/^(true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?)$/.test(v)) return `:${v}${tail}`;
+    return `:"${v.replace(/"/g, '\\"')}"${tail}`;
+  });
+}
+
+function parseLooseObjectString(str) {
+  const trimmed = String(str || "").trim();
+  if (!trimmed) return null;
+  const wrapped = trimmed.startsWith("{") ? trimmed : `{${trimmed}}`;
+  try {
+    const parsed = JSON.parse(wrapped);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    /* try quote-fixing keys and bare values */
+  }
+  try {
+    let fixed = wrapped.replace(/([{,]\s*)([a-zA-Z_][\w-]*)\s*:/g, '$1"$2":');
+    fixed = quoteLooseJsonValues(fixed);
+    const parsed = JSON.parse(fixed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function readLooseValue(s, start) {
+  let i = start;
+  while (i < s.length && /\s/.test(s[i])) i++;
+  if (i >= s.length) return { value: "", end: i };
+
+  const q = s[i];
+  if (q === '"' || q === "'") {
+    i++;
+    let val = "";
+    while (i < s.length && s[i] !== q) {
+      if (s[i] === "\\" && i + 1 < s.length) {
+        val += s[i + 1];
+        i += 2;
+      } else {
+        val += s[i];
+        i++;
+      }
+    }
+    if (s[i] === q) i++;
+    return { value: val, end: i };
+  }
+
+  if (s[i] === "{") {
+    const br = extractBalancedBraces(s, i);
+    if (br) {
+      const obj = parseLooseObjectString(`{${br.inner}}`);
+      return { value: obj ?? `{${br.inner}}`, end: br.end };
+    }
+  }
+
+  let j = i;
+  while (j < s.length && s[j] !== ",") j++;
+  return { value: s.slice(i, j).trim(), end: j };
+}
+
+function coerceToolArg(key, val) {
+  if (key === "max_results") return Number(val) || 5;
+  if (key === "maxChars") {
+    const n = Number(val);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+  if (key === "all") return val === true || val === "true";
+  return val;
+}
+
 /** Parse `key:value` or JSON-ish argument strings from small-model tool text. */
 export function parseLooseToolArgs(inner) {
   const trimmed = String(inner || "").trim();
   if (!trimmed) return {};
 
   if (trimmed.startsWith("{")) {
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      try {
-        const fixed = trimmed.replace(/([{,]\s*)([a-zA-Z_][\w]*)\s*:/g, '$1"$2":');
-        return JSON.parse(fixed);
-      } catch {
-        /* fall through */
-      }
-    }
+    const parsed = parseLooseObjectString(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
   }
 
   const args = {};
-  const pairRe = /([a-zA-Z_][\w]*)\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^,]+)/g;
-  let m;
-  while ((m = pairRe.exec(trimmed)) !== null) {
-    let val = m[2].trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    if (m[1] === "max_results") args[m[1]] = Number(val) || 5;
-    else if (m[1] === "maxChars") {
-      const n = Number(val);
-      args[m[1]] = Number.isFinite(n) && n > 0 ? n : undefined;
-    } else args[m[1]] = val;
+  let i = 0;
+  while (i < trimmed.length) {
+    while (i < trimmed.length && /[\s,]/.test(trimmed[i])) i++;
+    if (i >= trimmed.length) break;
+    const keyMatch = /^([a-zA-Z_][\w]*)\s*:/.exec(trimmed.slice(i));
+    if (!keyMatch) break;
+    const key = keyMatch[1];
+    i += keyMatch[0].length;
+    const { value, end } = readLooseValue(trimmed, i);
+    i = end;
+    args[key] = coerceToolArg(key, value);
   }
   if (Object.keys(args).length) return args;
 
@@ -101,18 +182,22 @@ export function parseTextToolCalls(text, toolNames = []) {
   if (!text || typeof text !== "string") return calls;
 
   const allowed = new Set(toolNames.filter(Boolean));
-  const re = /call:\s*([a-zA-Z0-9_-]+)\s*\{([\s\S]*?)\}/g;
+  const re = /call:\s*([a-zA-Z0-9_-]+)\s*\{/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const name = m[1];
     if (allowed.size && !allowed.has(name)) continue;
+    const openIdx = m.index + m[0].length - 1;
+    const br = extractBalancedBraces(text, openIdx);
+    if (!br) continue;
     calls.push({
       id: `textcall_${calls.length}_${Date.now()}`,
       name,
-      args: parseLooseToolArgs(m[2]),
-      raw: m[0],
+      args: parseLooseToolArgs(br.inner),
+      raw: text.slice(m.index, br.end),
       source: "text",
     });
+    re.lastIndex = br.end;
   }
 
   if (!calls.length && allowed.size) {
