@@ -323,6 +323,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .onnx-registry .model-name { font-weight: 500; }
 .onnx-registry .model-meta { color: #666; font-size: 11px; }
+.onnx-registry .model-context { color: #888; font-size: 11px; }
 .onnx-registry .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; white-space: nowrap; }
 .onnx-registry .badge.downloaded { background: #dff4e6; color: #1c7c44; }
 .onnx-registry small { color: #666; }
@@ -371,7 +372,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   textarea, input, select { background: #26262c; color: #eee; border-color: #3a3a42; }
   .model-badge, .level-badge { background: #2a2f3d; color: #ccc; }
   #onnx-unload-btn, #test-connection-btn { background: #26262c; }
-  .onnx-registry .model-meta, .onnx-registry small { color: #999; }
+  .onnx-registry .model-meta, .onnx-registry .model-context, .onnx-registry small { color: #999; }
   .onnx-registry button.danger { background: #3a2531; color: #f48fb1; border-color: #5c3a4a; }
   .onnx-registry button.danger:hover:not(:disabled) { background: #4a2e3d; }
   .history-item { background: #26262c; border-color: #3a3a42; }

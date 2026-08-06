@@ -428,6 +428,11 @@
   overflow-y: auto;
 }
 #dialogue-form { display: flex; flex-direction: column; gap: 6px; }
+.dialogue-context-bar { display: flex; flex-direction: column; gap: 2px; }
+.dialogue-context-bar.hidden { display: none; }
+#dialogue-context-label { color: #666; font-size: 11px; }
+#dialogue-context-fill { height: 100%; width: 0%; background: #2557d6; border-radius: 999px; transition: width 0.2s; }
+#dialogue-context-fill.warn { background: #c2185b; }
 
 @media (prefers-color-scheme: dark) {
   .dialogue-bubble { background: #26262c; border-color: #3a3a42; }
@@ -451,6 +456,7 @@
   .dialogue-raw-mode { background: #26262c; border-color: #3a3a42; color: #ccc; }
   .dialogue-raw-mode.active { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
   .dialogue-tools-error { color: #f48fb1; }
+  #dialogue-context-label { color: #999; }
   .dialogue-tool-card { background: #26262c; border-color: #3a3a42; }
   .dialogue-tool-card-title,
   .dialogue-tool-fields label,

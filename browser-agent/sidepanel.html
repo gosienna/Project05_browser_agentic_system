@@ -71,6 +71,10 @@
             <form id="dialogue-form">
               <div id="dialogue-attachments" class="dialogue-attachments hidden"></div>
               <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
+              <div id="dialogue-context-bar" class="dialogue-context-bar hidden" title="">
+                <div class="progress-bar"><div id="dialogue-context-fill"></div></div>
+                <small id="dialogue-context-label"></small>
+              </div>
               <div class="dialogue-controls">
                 <select id="dialogue-model-select" aria-label="Chat model" title="Chat model"></select>
                 <input type="file" id="dialogue-image-input" accept="image/*" multiple class="hidden" />
@@ -178,6 +182,7 @@
             <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
             <label for="model-name">Model</label>
             <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
+            <p id="remote-context-note" class="hint"></p>
           </div>
 
           <label for="max-steps-input">Max steps per run</label>

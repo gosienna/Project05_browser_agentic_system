@@ -13,6 +13,14 @@ const ASYNCIFY_MJS = "ort-wasm-simd-threaded.asyncify.mjs";
 const CPU_WASM = "ort-wasm-simd-threaded.wasm";
 const CPU_MJS = "ort-wasm-simd-threaded.mjs";
 
+// Context-length estimate heuristics (see getContextEstimate below).
+// KV cache dtype isn't an explicit config field in transformers.js; this proxies
+// it off the execution device (fp16 on WebGPU, fp32 on wasm/CPU).
+const KV_BYTES_PER_ELEMENT = { webgpu: 2, wasm: 4 };
+// navigator.deviceMemory is a bucketed/capped total-RAM hint, not a free-RAM
+// reading, and is shared with the rest of the system/browser — assume half.
+const ASSUMED_FREE_MEMORY_FRACTION = 0.5;
+
 let transformersModule = null;
 /** @type {"asyncify"|"cpu"|null} */
 let ortFlavor = null;
@@ -208,6 +216,9 @@ const loaded = new Map();
 let busy = false;
 let queue = Promise.resolve();
 
+/** @type {Map<string, object>} successful getContextEstimate() results only. */
+const contextEstimateCache = new Map();
+
 function slotKey(task, modelId) {
   return `${task}::${modelId}`;
 }
@@ -350,6 +361,81 @@ function llmLoadedModelId() {
     if (loadedModel) return loadedModel;
   }
   return null;
+}
+
+/** Trained max context length. `max_position_embeddings` is a plain top-level
+ * config field (not covered by normalized_config's text_config recursion), so
+ * composite VLM configs (Gemma4, Ministral, ...) need the nested fallback. */
+function readMaxContext(config) {
+  return config?.max_position_embeddings ?? config?.text_config?.max_position_embeddings ?? null;
+}
+
+/** KV-cache bytes/token = 2 (K and V) * layers * kv_heads * head_dim * bytesPerElement. */
+function kvCacheBytesPerToken(config, bytesPerElement) {
+  const n = config?.normalized_config || {};
+  const numLayers = n.num_layers;
+  const numKvHeads = n.num_heads;
+  const headDim = n.dim_kv ?? (config?.hidden_size && config?.num_attention_heads
+    ? config.hidden_size / config.num_attention_heads
+    : null);
+  if (!numLayers || !numKvHeads || !headDim) return null;
+  return 2 * numLayers * numKvHeads * headDim * bytesPerElement;
+}
+
+/**
+ * Estimate a model's usable context: its trained max (from config.json, fetched
+ * without downloading weights) combined with a rough memory-constrained max
+ * derived from the KV-cache-per-token cost and navigator.deviceMemory — the
+ * only memory signal available inside this Dedicated Worker. Never throws.
+ */
+export async function getContextEstimate(modelId) {
+  if (!modelId) return { modelId, error: { message: "No model specified.", type: "engine_error" } };
+  if (contextEstimateCache.has(modelId)) return contextEstimateCache.get(modelId);
+
+  let config;
+  try {
+    const { AutoConfig } = await loadTransformers();
+    if (!AutoConfig) throw new Error("AutoConfig unavailable in this transformers.js build.");
+    config = await AutoConfig.from_pretrained(modelId);
+  } catch (err) {
+    return { modelId, error: { message: `Could not read model config: ${err?.message || err}`, type: "engine_error" } };
+  }
+
+  const { device: probedDevice } = await probeDevice();
+  const bytesPerElement = KV_BYTES_PER_ELEMENT[probedDevice] ?? KV_BYTES_PER_ELEMENT.wasm;
+  const trainedMaxContext = readMaxContext(config);
+  const bytesPerToken = kvCacheBytesPerToken(config, bytesPerElement);
+  const deviceMemoryGB = typeof navigator !== "undefined" && navigator.deviceMemory ? navigator.deviceMemory : null;
+  const approxWeightsMB = registryEntry(modelId)?.approxSizeMB ?? null;
+
+  let memoryLimitedTokens = null;
+  if (bytesPerToken && deviceMemoryGB != null) {
+    const budgetBytes =
+      deviceMemoryGB * 1024 ** 3 * ASSUMED_FREE_MEMORY_FRACTION - (approxWeightsMB || 0) * 1024 * 1024;
+    memoryLimitedTokens = Math.max(0, Math.floor(budgetBytes / bytesPerToken));
+  }
+
+  const candidates = [trainedMaxContext, memoryLimitedTokens].filter((v) => v != null);
+  const effectiveMaxContext = candidates.length ? Math.min(...candidates) : null;
+
+  const caveats = [
+    "KV cache dtype is assumed from the execution device (fp16 on WebGPU, fp32 on CPU/wasm), not read from an explicit model field.",
+    "Device memory is a bucketed browser hint capped at 8GB and shared with the rest of the system — not a live free-RAM reading.",
+  ];
+
+  const result = {
+    modelId,
+    trainedMaxContext,
+    memoryLimitedTokens,
+    effectiveMaxContext,
+    device: probedDevice,
+    deviceMemoryGB,
+    assumedFreeFraction: ASSUMED_FREE_MEMORY_FRACTION,
+    approxWeightsMB,
+    caveats,
+  };
+  contextEstimateCache.set(modelId, result);
+  return result;
 }
 
 async function probeDevice() {
@@ -704,10 +790,11 @@ async function invokeMinistral(entry, input, options) {
     top_p: options.top_p ?? DEFAULT_TOP_P,
   });
   const promptLen = inputs.input_ids.dims.at(-1);
+  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
   const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
     skip_special_tokens: true,
   });
-  return [{ generated_text: decoded?.[0] ?? "", prompt }];
+  return [{ generated_text: decoded?.[0] ?? "", prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen } }];
 }
 
 async function invokeGemma4(entry, input, options) {
@@ -742,10 +829,11 @@ async function invokeGemma4(entry, input, options) {
     top_p: options.top_p ?? DEFAULT_TOP_P,
   });
   const promptLen = inputs.input_ids.dims.at(-1);
+  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
   const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
     skip_special_tokens: true,
   });
-  return [{ generated_text: decoded?.[0] ?? "", prompt }];
+  return [{ generated_text: decoded?.[0] ?? "", prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen } }];
 }
 
 async function invokeEntry(entry, task, input, options) {
@@ -767,6 +855,24 @@ function renderChatPrompt(pipe, input, tools) {
     console.warn("[onnx] could not render chat prompt:", err);
   }
   return typeof input === "string" ? input : null;
+}
+
+/** Approximate token count for the plain pipeline path — retokenizes text with
+ * no forward pass. Prompt/completion are tokenized separately (not one combined
+ * sequence), so this can be off by a token or two vs. what was actually fed
+ * to the model; still real numbers, not the hardcoded zeros this replaces. */
+function tokenizeUsage(tokenizer, prompt, generatedText) {
+  if (!tokenizer) return null;
+  try {
+    const promptTokens = typeof prompt === "string" ? tokenizer(prompt).input_ids.dims.at(-1) : null;
+    const completionTokens =
+      typeof generatedText === "string" ? tokenizer(generatedText).input_ids.dims.at(-1) : null;
+    if (promptTokens == null && completionTokens == null) return null;
+    return { prompt_tokens: promptTokens ?? 0, completion_tokens: completionTokens ?? 0 };
+  } catch (err) {
+    console.warn("[onnx] token count failed:", err);
+    return null;
+  }
 }
 
 async function invokePipeline(pipe, task, input, options) {
@@ -796,6 +902,7 @@ async function invokePipeline(pipe, task, input, options) {
     }
     if (prompt != null && Array.isArray(raw) && raw[0] && typeof raw[0] === "object") {
       raw[0].prompt = prompt;
+      raw[0].usage = tokenizeUsage(pipe?.tokenizer, prompt, raw[0].generated_text);
     }
     return raw;
   }
@@ -815,7 +922,11 @@ function normalizeOutput(task, raw, options) {
     const first = Array.isArray(raw) ? raw[0] : raw;
     const text = first?.generated_text ?? "";
     const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
-    return { text: content, prompt: typeof first?.prompt === "string" ? first.prompt : null };
+    return {
+      text: content,
+      prompt: typeof first?.prompt === "string" ? first.prompt : null,
+      usage: first?.usage ?? null,
+    };
   }
   if (task === "image-to-text") {
     const first = Array.isArray(raw) ? raw[0] : raw;
@@ -859,10 +970,11 @@ async function runChatCompletions(request) {
 
   const content = result.output?.text ?? "";
   const finishReason = content.length > 0 ? "stop" : "length";
+  const usage = result.output?.usage;
   const response = toResponse(result.model, content, finishReason, {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
+    prompt_tokens: usage?.prompt_tokens ?? 0,
+    completion_tokens: usage?.completion_tokens ?? 0,
+    total_tokens: (usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0),
   });
   // Chat-template string actually tokenized for the local model (Dialogue "Prompt" raw mode).
   if (typeof result.output?.prompt === "string") response.prompt = result.output.prompt;

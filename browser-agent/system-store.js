@@ -348,7 +348,7 @@ function dialogueSessionTitle(turns) {
  * Create or update a Dialogue session. Pass `{ id }` to update; omit to create.
  * `turns` may include `images` as data URLs.
  */
-export async function putDialogueSession({ id = null, systemPrompt = "", toolsJson = "", turns = [] } = {}) {
+export async function putDialogueSession({ id = null, systemPrompt = "", toolsJson = "", turns = [], lastUsage = null } = {}) {
   await ensureSeeded();
   const now = Date.now();
   const existing = id ? await getDialogueSession(id) : null;
@@ -358,6 +358,7 @@ export async function putDialogueSession({ id = null, systemPrompt = "", toolsJs
     systemPrompt: String(systemPrompt || ""),
     toolsJson: String(toolsJson || ""),
     turns: Array.isArray(turns) ? turns : [],
+    lastUsage: lastUsage || null,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };

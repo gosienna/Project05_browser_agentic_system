@@ -65,6 +65,9 @@ let dialogueTurns = [];
 let dialogueImages = [];
 let dialogueSending = false;
 let dialogueSessionId = null;
+let dialogueLastUsage = null;
+let dialogueContextEstimate = null;
+let dialogueContextEstimateModelId = null;
 
 /** Wire Dialogue tab UI; call once from sidepanel init. */
 export function createDialoguePanel(deps) {
@@ -86,11 +89,13 @@ export function createDialoguePanel(deps) {
     onTabActivate() {
       refreshDialogueModelSelect();
       refreshDialogueSessionsList();
+      refreshDialogueContextEstimate();
     },
     onSettingsChanged() {
       refreshDialogueModelSelect();
       syncDialogueMcpTogglesFromSettings();
       renderDialogueToolsForm();
+      refreshDialogueContextEstimate();
     },
   };
 }
@@ -215,6 +220,7 @@ async function persistDialogueSession() {
       systemPrompt: dialogueSystemPrompt,
       toolsJson: draftsToToolsJson(dialogueToolDrafts) || "",
       turns: dialogueTurns,
+      lastUsage: dialogueLastUsage,
     });
     dialogueSessionId = record.id;
     await refreshDialogueSessionsList();
@@ -235,12 +241,14 @@ async function openDialogueSession(id) {
     dialogueToolDrafts = openAiToolsToDrafts(session.toolsJson || "");
     dialogueTurns = Array.isArray(session.turns) ? session.turns : [];
     dialogueImages = [];
+    dialogueLastUsage = session.lastUsage || null;
     $("#dialogue-system-input").value = dialogueSystemPrompt;
     clearDialogueToolsError();
     renderDialogueToolsForm();
     renderDialogueAttachments();
     renderDialogue();
     await refreshDialogueSessionsList();
+    await refreshDialogueContextEstimate();
   } catch (err) {
     console.error("[dialogue] open session failed", err);
   }
@@ -253,11 +261,13 @@ function startNewDialogueSession() {
   dialogueToolDrafts = [];
   dialogueTurns = [];
   dialogueImages = [];
+  dialogueLastUsage = null;
   $("#dialogue-system-input").value = "";
   clearDialogueToolsError();
   renderDialogueToolsForm();
   renderDialogueAttachments();
   renderDialogue();
+  renderDialogueContextBar();
   refreshDialogueSessionsList();
 }
 
@@ -700,6 +710,75 @@ async function listOllamaModels() {
   }
 }
 
+function formatDialogueTokenCount(n) {
+  if (n == null) return null;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function dialogueContextLimit(est) {
+  if (!est || est.error) return null;
+  return est.effectiveMaxContext ?? est.trainedMaxContext ?? null;
+}
+
+/** Reflects `dialogueLastUsage`/`dialogueContextEstimate` into the bar under the input. ONNX only. */
+function renderDialogueContextBar() {
+  const bar = $("#dialogue-context-bar");
+  if (!bar) return;
+  const provider = getSettings().provider || "onnx";
+  const est = dialogueContextEstimate;
+  const limit = dialogueContextLimit(est);
+  if (provider !== "onnx" || !est || est.error || limit == null) {
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+
+  const used = (dialogueLastUsage?.prompt_tokens ?? 0) + (dialogueLastUsage?.completion_tokens ?? 0);
+  const pct = Math.min(100, (used / limit) * 100);
+  const fill = $("#dialogue-context-fill");
+  fill.style.width = `${pct}%`;
+  fill.classList.toggle("warn", pct >= 90);
+
+  const memoryBinds = est.effectiveMaxContext != null && est.effectiveMaxContext < est.trainedMaxContext;
+  const limitLabel = memoryBinds
+    ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)})`
+    : `${formatDialogueTokenCount(limit)} tokens`;
+  $("#dialogue-context-label").textContent = `Context: ${formatDialogueTokenCount(used)} / ${limitLabel}`;
+  bar.title = (est.caveats || []).join("\n");
+}
+
+/** Fetch (once per model id) the ONNX context estimate for the active dialogue model, then render. */
+async function refreshDialogueContextEstimate() {
+  const provider = getSettings().provider || "onnx";
+  if (provider !== "onnx") {
+    dialogueContextEstimate = null;
+    dialogueContextEstimateModelId = null;
+    renderDialogueContextBar();
+    return;
+  }
+  const modelId = getSettings().onnxModel || "";
+  if (!modelId) {
+    dialogueContextEstimate = null;
+    dialogueContextEstimateModelId = null;
+    renderDialogueContextBar();
+    return;
+  }
+  if (dialogueContextEstimateModelId === modelId && dialogueContextEstimate) {
+    renderDialogueContextBar();
+    return;
+  }
+  try {
+    const est = await sendMessage({ type: "onnx.relay", engineType: "engine.contextEstimate", model: modelId });
+    dialogueContextEstimate = est || null;
+    dialogueContextEstimateModelId = modelId;
+  } catch {
+    dialogueContextEstimate = null;
+    dialogueContextEstimateModelId = null;
+  }
+  renderDialogueContextBar();
+}
+
 async function refreshDialogueModelSelect() {
   const select = $("#dialogue-model-select");
   if (!select) return;
@@ -1061,6 +1140,10 @@ async function sendDialogue() {
       const inputRaw = snapshotDialogueRawInput(messages, tools);
       const res = await dialogueChatCompletion(messages, tools);
       if (res?.error) throw new Error(res.error.message);
+      if (res.usage) {
+        dialogueLastUsage = res.usage;
+        renderDialogueContextBar();
+      }
 
       const msg = res.choices?.[0]?.message ?? {};
       if (round === 0 && typeof res?.prompt === "string") userTurn.raw.prompt = res.prompt;
@@ -1118,6 +1201,10 @@ async function sendDialogue() {
       const inputRaw = snapshotDialogueRawInput(messages, tools);
       const res = await dialogueChatCompletion(messages, tools);
       if (res?.error) throw new Error(res.error.message);
+      if (res.usage) {
+        dialogueLastUsage = res.usage;
+        renderDialogueContextBar();
+      }
       const content = res.choices?.[0]?.message?.content || "(stopped: tool round limit)";
       dialogueTurns.push({
         role: "assistant",

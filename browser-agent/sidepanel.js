@@ -32,6 +32,8 @@ let lastKnownDevice = null;
 let dialoguePanel = null;
 let systems = [];
 let currentSystemId = null;
+/** @type {Map<string, object>} client-side cache of engine.contextEstimate results, keyed by model id. */
+const contextEstimateCache = new Map();
 
 init();
 
@@ -216,6 +218,14 @@ function applySettingsToForm() {
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#remote-settings").classList.toggle("hidden", isOnnx);
   if (isOnnx) refreshOnnxSettings();
+  const noteEl = $("#remote-context-note");
+  if (noteEl) {
+    noteEl.textContent = isOnnx
+      ? ""
+      : settings.provider === "ollama"
+        ? "Context-length estimate not available: the extension can't see the Ollama host machine's memory or read the served model's config from here."
+        : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
+  }
   renderModelBadge();
   dialoguePanel?.onSettingsChanged();
 }
@@ -290,6 +300,34 @@ function sizeLabel(mb) {
   return `~${mb} MB`;
 }
 
+function formatTokenCount(n) {
+  if (n == null) return null;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function contextEstimateText(est) {
+  if (!est) return "Context: checking…";
+  if (est.error) return "Context: unknown";
+  const trained = formatTokenCount(est.trainedMaxContext);
+  if (!trained) return "Context: unknown";
+  // Only surface a separate "usable" figure when memory is actually the
+  // binding constraint (effective < trained) — otherwise the model's own
+  // limit applies and a second number would misleadingly look like more room.
+  const memoryBinds = est.memoryLimitedTokens != null && est.effectiveMaxContext < est.trainedMaxContext;
+  if (memoryBinds) return `Context: ${trained} max · ~${formatTokenCount(est.effectiveMaxContext)} usable (est.)`;
+  return `Context: ${trained} max`;
+}
+
+function contextEstimateTitle(est) {
+  if (!est || est.error) return "";
+  const parts = [...(est.caveats || [])];
+  if (est.deviceMemoryGB != null) {
+    parts.push(`Assumes ~${(est.deviceMemoryGB * est.assumedFreeFraction).toFixed(1)}GB free of ${est.deviceMemoryGB}GB reported device memory, running on ${est.device || "unknown device"}.`);
+  }
+  return parts.join("\n");
+}
+
 /** HF Hub pipeline_tag → display label (mirrors engine.PIPELINE_TAG_LABELS). */
 const PIPELINE_TAG_LABELS = {
   "text-generation": "Text Generation",
@@ -336,9 +374,26 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel, { modalit
       <span class="model-info">
         <span class="model-name">${m.label}</span>
         <small class="model-meta">${modelMetaLabel(m)}</small>
+        ${modality === "llm" ? `<small class="model-context"></small>` : ""}
       </span>
       <span class="badge ${isDownloaded ? "downloaded" : ""}">${isDownloaded ? "Downloaded" : "Not downloaded"}</span>
     `;
+    if (modality === "llm") {
+      const contextEl = li.querySelector(".model-context");
+      const cached = contextEstimateCache.get(m.id);
+      contextEl.textContent = contextEstimateText(cached);
+      contextEl.title = contextEstimateTitle(cached);
+      if (!cached) {
+        sendMessage({ type: "onnx.relay", engineType: "engine.contextEstimate", model: m.id })
+          .then((est) => {
+            if (!est) return;
+            contextEstimateCache.set(m.id, est);
+            contextEl.textContent = contextEstimateText(est);
+            contextEl.title = contextEstimateTitle(est);
+          })
+          .catch(() => {});
+      }
+    }
     const actions = document.createElement("span");
     actions.className = "model-actions";
     const btn = document.createElement("button");

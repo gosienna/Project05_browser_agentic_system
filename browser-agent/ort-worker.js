@@ -53,6 +53,8 @@ async function handle(msg) {
       if (task === "*") return { models: engine.MODEL_REGISTRY };
       return { models: engine.modelsForTask(task) };
     }
+    case "engine.contextEstimate":
+      return engine.getContextEstimate(msg.model || msg.request?.model);
     default:
       return {
         error: {
