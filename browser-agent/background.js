@@ -1,5 +1,6 @@
 import { runAgent } from "./agent.js";
-import { chatCompletions, ensureOffscreenDocument } from "./llm.js";
+import { getMaxTokens } from "./agent-config.js";
+import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools/browser.js";
 import { runSystemEditor } from "./system-editor-l2.js";
@@ -197,7 +198,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             messages: msg.messages,
             ...(tools ? { tools } : {}),
             temperature: settings.temperature ?? 0.2,
-            max_tokens: settings.maxTokens ?? 1024,
+            max_tokens: getMaxTokens(settings),
+          },
+          settings
+        );
+      })
+      .then(sendResponse);
+    return true;
+  }
+  if (msg.type === "dialogue.renderPrompt") {
+    getSettings()
+      .then((settings) => {
+        const model = settings.provider === "onnx" ? settings.onnxModel : settings.model;
+        const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
+        return renderChatPromptPreview(
+          {
+            model,
+            messages: msg.messages,
+            ...(tools ? { tools } : {}),
           },
           settings
         );

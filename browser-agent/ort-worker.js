@@ -29,6 +29,8 @@ async function handle(msg) {
   switch (msg.type) {
     case "chat.completions":
       return engine.chatCompletions(msg.request);
+    case "chat.renderPrompt":
+      return engine.renderChatPromptOnly(msg.request);
     case "engine.run":
       return engine.run(msg.request);
     case "engine.status":

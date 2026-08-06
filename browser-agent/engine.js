@@ -20,6 +20,12 @@ const KV_BYTES_PER_ELEMENT = { webgpu: 2, wasm: 4 };
 // navigator.deviceMemory is a bucketed/capped total-RAM hint, not a free-RAM
 // reading, and is shared with the rest of the system/browser — assume half.
 const ASSUMED_FREE_MEMORY_FRACTION = 0.5;
+// ORT + Transformers.js run inside a wasm32 module with a 4GB linear-memory cap.
+const WASM_MAX_HEAP_BYTES = 4 * 1024 ** 3;
+// Headroom for ORT runtime, activations, and JS↔wasm buffers inside the same heap.
+const WASM_HEAP_RESERVE_BYTES = 768 * 1024 * 1024;
+// Browsers rarely allow allocating the full 4GB before other heap uses.
+const WASM_USABLE_HEAP_FRACTION = 0.85;
 
 let transformersModule = null;
 /** @type {"asyncify"|"cpu"|null} */
@@ -382,6 +388,41 @@ function kvCacheBytesPerToken(config, bytesPerElement) {
   return 2 * numLayers * numKvHeads * headDim * bytesPerElement;
 }
 
+/** KV tokens that fit in the wasm32 4GB heap after weights + runtime reserve (CPU EP path). */
+function estimateWasmMemoryLimitedTokens(config, approxWeightsMB) {
+  const bytesPerToken = kvCacheBytesPerToken(config, KV_BYTES_PER_ELEMENT.wasm);
+  if (!bytesPerToken) return null;
+  const weightsBytes = (approxWeightsMB || 0) * 1024 * 1024;
+  const budgetBytes =
+    WASM_MAX_HEAP_BYTES * WASM_USABLE_HEAP_FRACTION - WASM_HEAP_RESERVE_BYTES - weightsBytes;
+  if (budgetBytes <= 0) return 0;
+  return Math.floor(budgetBytes / bytesPerToken);
+}
+
+/** KV tokens from navigator.deviceMemory minus approximate weights (GPU / system RAM hint). */
+function estimateDeviceMemoryLimitedTokens(config, probedDevice, deviceMemoryGB, approxWeightsMB) {
+  const bytesPerToken = kvCacheBytesPerToken(config, KV_BYTES_PER_ELEMENT[probedDevice] ?? KV_BYTES_PER_ELEMENT.wasm);
+  if (!bytesPerToken || deviceMemoryGB == null) return null;
+  const budgetBytes =
+    deviceMemoryGB * 1024 ** 3 * ASSUMED_FREE_MEMORY_FRACTION - (approxWeightsMB || 0) * 1024 * 1024;
+  if (budgetBytes <= 0) return 0;
+  return Math.floor(budgetBytes / bytesPerToken);
+}
+
+function contextBindingConstraint(trainedMaxContext, deviceLimited, wasmLimited, effectiveMaxContext) {
+  if (effectiveMaxContext == null || trainedMaxContext == null || effectiveMaxContext >= trainedMaxContext) {
+    return null;
+  }
+  const candidates = [
+    ["wasm", wasmLimited],
+    ["device-memory", deviceLimited],
+  ];
+  for (const [kind, limit] of candidates) {
+    if (limit != null && limit === effectiveMaxContext) return kind;
+  }
+  return "memory";
+}
+
 /**
  * Estimate a model's usable context: its trained max (from config.json, fetched
  * without downloading weights) combined with a rough memory-constrained max
@@ -402,36 +443,53 @@ export async function getContextEstimate(modelId) {
   }
 
   const { device: probedDevice } = await probeDevice();
-  const bytesPerElement = KV_BYTES_PER_ELEMENT[probedDevice] ?? KV_BYTES_PER_ELEMENT.wasm;
   const trainedMaxContext = readMaxContext(config);
-  const bytesPerToken = kvCacheBytesPerToken(config, bytesPerElement);
   const deviceMemoryGB = typeof navigator !== "undefined" && navigator.deviceMemory ? navigator.deviceMemory : null;
   const approxWeightsMB = registryEntry(modelId)?.approxSizeMB ?? null;
 
-  let memoryLimitedTokens = null;
-  if (bytesPerToken && deviceMemoryGB != null) {
-    const budgetBytes =
-      deviceMemoryGB * 1024 ** 3 * ASSUMED_FREE_MEMORY_FRACTION - (approxWeightsMB || 0) * 1024 * 1024;
-    memoryLimitedTokens = Math.max(0, Math.floor(budgetBytes / bytesPerToken));
-  }
+  const memoryLimitedTokens = estimateDeviceMemoryLimitedTokens(
+    config,
+    probedDevice,
+    deviceMemoryGB,
+    approxWeightsMB
+  );
+  const wasmMemoryLimitedTokens = estimateWasmMemoryLimitedTokens(config, approxWeightsMB);
 
-  const candidates = [trainedMaxContext, memoryLimitedTokens].filter((v) => v != null);
+  const candidates = [trainedMaxContext, memoryLimitedTokens, wasmMemoryLimitedTokens].filter(
+    (v) => v != null
+  );
   const effectiveMaxContext = candidates.length ? Math.min(...candidates) : null;
+  const bindingConstraint = contextBindingConstraint(
+    trainedMaxContext,
+    memoryLimitedTokens,
+    wasmMemoryLimitedTokens,
+    effectiveMaxContext
+  );
 
   const caveats = [
     "KV cache dtype is assumed from the execution device (fp16 on WebGPU, fp32 on CPU/wasm), not read from an explicit model field.",
     "Device memory is a bucketed browser hint capped at 8GB and shared with the rest of the system — not a live free-RAM reading.",
+    `WASM linear memory is capped at 4GB per engine instance; ~${Math.round(WASM_HEAP_RESERVE_BYTES / (1024 * 1024))}MB is reserved for runtime overhead inside that heap.`,
+    "VLM image tokens and other apps using the GPU (e.g. Ollama) are not included — usable context may be lower in practice.",
   ];
+  if (bindingConstraint === "wasm") {
+    caveats.push(
+      "Usable context is limited by the WASM 4GB heap (weights + KV cache on CPU), not the model's trained max length."
+    );
+  }
 
   const result = {
     modelId,
     trainedMaxContext,
     memoryLimitedTokens,
+    wasmMemoryLimitedTokens,
     effectiveMaxContext,
+    bindingConstraint,
     device: probedDevice,
     deviceMemoryGB,
     assumedFreeFraction: ASSUMED_FREE_MEMORY_FRACTION,
     approxWeightsMB,
+    wasmHeapReserveMB: Math.round(WASM_HEAP_RESERVE_BYTES / (1024 * 1024)),
     caveats,
   };
   contextEstimateCache.set(modelId, result);
@@ -562,6 +620,7 @@ export async function loadModel(modelOrOpts) {
 
   const modelId = opts.model;
   if (!modelId) throw new Error("No model specified.");
+  const forceCpuEp = opts.forceCpuEp === true;
 
   // Registry task is authoritative (e.g. Gemma 4 → image-text-to-text).
   const task = opts.task || registryEntry(modelId)?.task || TEXT_GENERATION;
@@ -588,7 +647,7 @@ export async function loadModel(modelOrOpts) {
   // individual sessions may still use CPU EP (e.g. q2f16 mobile).
   await configureOrt(preferred === "webgpu" ? "webgpu" : "wasm");
 
-  const sessionDevice = sessionDeviceForModel(modelId, preferred);
+  const sessionDevice = forceCpuEp ? "wasm" : sessionDeviceForModel(modelId, preferred);
   const modelDtype = dtypeForModel(modelId, sessionDevice);
   const progress_callback = (event) => {
     broadcastProgress({
@@ -606,6 +665,7 @@ export async function loadModel(modelOrOpts) {
     `[onnx] loading ${task} ${modelId} on ${sessionDevice} (${modelDtype})` +
       `${isGemma4Model(modelId) ? " [gemma4]" : ""}` +
       `${isMinistralModel(modelId) ? " [ministral]" : ""}` +
+      `${forceCpuEp ? " [cpu-fallback]" : ""}` +
       `${sessionDevice !== preferred ? ` (runtime=${preferred})` : ""}`
   );
 
@@ -621,7 +681,7 @@ export async function loadModel(modelOrOpts) {
         dtype: modelDtype,
         progress_callback,
       });
-      entry = { kind: "gemma4", model, processor, pipeline: null, task, modelId };
+      entry = { kind: "gemma4", model, processor, pipeline: null, task, modelId, forceCpuEp };
     } else if (isMinistralModel(modelId)) {
       if (!AutoModelForImageTextToText || !AutoProcessor) {
         throw new Error("Ministral support missing — rebuild vendor/transformers (need @huggingface/transformers ≥ 4.2).");
@@ -632,7 +692,7 @@ export async function loadModel(modelOrOpts) {
         dtype: modelDtype,
         progress_callback,
       });
-      entry = { kind: "ministral", model, processor, pipeline: null, task, modelId };
+      entry = { kind: "ministral", model, processor, pipeline: null, task, modelId, forceCpuEp };
     } else {
       const pipelineOpts = {
         device: sessionDevice,
@@ -640,7 +700,7 @@ export async function loadModel(modelOrOpts) {
       };
       if (task === TEXT_GENERATION) pipelineOpts.dtype = modelDtype;
       const pipe = await pipeline(task, modelId, pipelineOpts);
-      entry = { kind: "pipeline", pipeline: pipe, task, modelId };
+      entry = { kind: "pipeline", pipeline: pipe, task, modelId, forceCpuEp };
     }
   } catch (err) {
     const message = String(err?.message || err);
@@ -702,6 +762,10 @@ export function chatCompletions(request) {
   return enqueue(() => runChatCompletions(request));
 }
 
+export function renderChatPromptOnly(request) {
+  return enqueue(() => runRenderChatPromptOnly(request));
+}
+
 async function ensureLoaded(task, modelId) {
   const key = slotKey(task, modelId);
   if (loaded.has(key)) return loaded.get(key);
@@ -739,18 +803,37 @@ async function runInference(request) {
       raw = await invokeEntry(entry, task, request.input, options);
     } catch (err) {
       const message = String(err?.message || err);
-      if (isOomError(message)) {
-        console.warn(`[onnx] OOM during ${task}, unloading other pipelines and retrying once`);
-        await unloadOthersExcept(task, modelId);
-        const reloaded = await ensureLoaded(task, modelId);
-        if (reloaded?.error) return reloaded;
-        if (!reloaded?.pipeline && !reloaded?.model) {
-          return errorResponse(`Failed to reload model "${modelId}" after OOM.`, "oom");
-        }
-        try {
-          raw = await invokeEntry(reloaded, task, request.input, options);
-        } catch (err2) {
-          return await handleGenerationFailure(task, modelId, err2);
+      if (isGpuResourceError(message)) {
+        const alreadyCpu = entry?.forceCpuEp === true;
+        if (!alreadyCpu && device === "webgpu") {
+          console.warn(`[onnx] GPU error during ${task}, unloading and retrying once on CPU EP`);
+          await unloadOthersExcept(task, modelId);
+          await unload({ task, model: modelId });
+          try {
+            await loadModel({ task, model: modelId, forceCpuEp: true });
+            const reloaded = loaded.get(slotKey(task, modelId));
+            if (!reloaded?.pipeline && !reloaded?.model) {
+              return errorResponse(`Failed to reload "${modelId}" on CPU after a GPU error.`, "oom");
+            }
+            raw = await invokeEntry(reloaded, task, request.input, options);
+          } catch (err2) {
+            return await handleGenerationFailure(task, modelId, err2);
+          }
+        } else if (!alreadyCpu) {
+          console.warn(`[onnx] OOM during ${task}, unloading other pipelines and retrying once`);
+          await unloadOthersExcept(task, modelId);
+          const reloaded = await ensureLoaded(task, modelId);
+          if (reloaded?.error) return reloaded;
+          if (!reloaded?.pipeline && !reloaded?.model) {
+            return errorResponse(`Failed to reload model "${modelId}" after OOM.`, "oom");
+          }
+          try {
+            raw = await invokeEntry(reloaded, task, request.input, options);
+          } catch (err2) {
+            return await handleGenerationFailure(task, modelId, err2);
+          }
+        } else {
+          return await handleGenerationFailure(task, modelId, err);
         }
       } else {
         return await handleGenerationFailure(task, modelId, err);
@@ -839,6 +922,7 @@ async function invokeGemma4(entry, input, options) {
 async function invokeEntry(entry, task, input, options) {
   if (entry?.kind === "gemma4") return invokeGemma4(entry, input, options);
   if (entry?.kind === "ministral") return invokeMinistral(entry, input, options);
+  if (task === TEXT_GENERATION) return invokeTextLlm(entry.pipeline, input, options);
   return invokePipeline(entry.pipeline, task, input, options);
 }
 
@@ -875,31 +959,66 @@ function tokenizeUsage(tokenizer, prompt, generatedText) {
   }
 }
 
+/**
+ * Text LLMs loaded as a pipeline entry. Uses model.generate directly so completion
+ * is sliced by token index (like Gemma 4). TextGenerationPipeline strips the prompt
+ * by decoded string length, which corrupts Qwen/Llama outputs that use chat tokens.
+ */
+async function invokeTextLlm(pipe, input, options) {
+  const { model, tokenizer } = pipe;
+  if (!model || !tokenizer) {
+    throw new Error("Text-generation pipeline is missing model or tokenizer");
+  }
+
+  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const temperature = options.temperature ?? 0.2;
+  const tools = options?.tools?.length ? options.tools : undefined;
+  const prompt = renderChatPrompt(pipe, input, tools);
+  const promptText =
+    typeof prompt === "string" ? prompt : typeof input === "string" ? input : null;
+  if (!promptText) {
+    throw new Error("Could not render chat prompt for text-generation input");
+  }
+
+  const inputs = tokenizer(promptText, { add_special_tokens: false });
+  const outputs = await model.generate({
+    ...inputs,
+    max_new_tokens: maxNewTokens,
+    temperature,
+    do_sample: temperature > 0,
+    top_p: options.top_p ?? DEFAULT_TOP_P,
+  });
+  const promptLen = inputs.input_ids.dims.at(-1);
+  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
+  const decoded = tokenizer.batch_decode(outputs.slice(null, [promptLen, null]), {
+    skip_special_tokens: true,
+  });
+  return [
+    {
+      generated_text: decoded?.[0] ?? "",
+      prompt: promptText,
+      usage: { prompt_tokens: promptLen, completion_tokens: completionLen },
+    },
+  ];
+}
+
 async function invokePipeline(pipe, task, input, options) {
-  if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
+  if (task === IMAGE_TEXT_TO_TEXT) {
     const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
     const temperature = options.temperature ?? 0.2;
     const tools = options?.tools?.length ? options.tools : undefined;
     const prompt = renderChatPrompt(pipe, input, tools);
-    // Prefer chat-template path when tools are present so declarations are injected.
-    let raw;
-    if (tools && pipe?.tokenizer?.apply_chat_template && Array.isArray(input) && typeof prompt === "string") {
-      raw = await pipe(prompt, {
-        max_new_tokens: maxNewTokens,
-        temperature,
-        do_sample: temperature > 0,
-        top_p: options.top_p ?? DEFAULT_TOP_P,
-        return_full_text: false,
-      });
-    } else {
-      raw = await pipe(input, {
-        max_new_tokens: maxNewTokens,
-        temperature,
-        do_sample: temperature > 0,
-        top_p: options.top_p ?? DEFAULT_TOP_P,
-        return_full_text: false,
-      });
-    }
+    const pipeInput =
+      pipe?.tokenizer?.apply_chat_template && Array.isArray(input) && typeof prompt === "string"
+        ? prompt
+        : input;
+    const raw = await pipe(pipeInput, {
+      max_new_tokens: maxNewTokens,
+      temperature,
+      do_sample: temperature > 0,
+      top_p: options.top_p ?? DEFAULT_TOP_P,
+      return_full_text: false,
+    });
     if (prompt != null && Array.isArray(raw) && raw[0] && typeof raw[0] === "object") {
       raw[0].prompt = prompt;
       raw[0].usage = tokenizeUsage(pipe?.tokenizer, prompt, raw[0].generated_text);
@@ -917,11 +1036,23 @@ async function invokePipeline(pipe, task, input, options) {
   return pipe(input, options);
 }
 
+function extractGeneratedText(generated) {
+  if (typeof generated === "string") return generated;
+  if (Array.isArray(generated)) {
+    for (let i = generated.length - 1; i >= 0; i--) {
+      const m = generated[i];
+      if (m?.role === "assistant" && typeof m.content === "string") return m.content;
+    }
+    const last = generated.at(-1);
+    if (typeof last?.content === "string") return last.content;
+  }
+  return generated != null ? String(generated) : "";
+}
+
 function normalizeOutput(task, raw, options) {
   if (task === TEXT_GENERATION || task === IMAGE_TEXT_TO_TEXT) {
     const first = Array.isArray(raw) ? raw[0] : raw;
-    const text = first?.generated_text ?? "";
-    const content = typeof text === "string" ? text : text?.at?.(-1)?.content ?? String(text);
+    const content = extractGeneratedText(first?.generated_text ?? "");
     return {
       text: content,
       prompt: typeof first?.prompt === "string" ? first.prompt : null,
@@ -948,6 +1079,46 @@ function normalizeOutput(task, raw, options) {
     return { text };
   }
   return raw;
+}
+
+async function runRenderChatPromptOnly(request) {
+  const modelId = request?.model;
+  if (!modelId) return { prompt: null };
+
+  const messages = request.messages;
+  if (!Array.isArray(messages)) return { prompt: null };
+
+  const task = registryEntry(modelId)?.task || TEXT_GENERATION;
+  const tools = Array.isArray(request.tools) && request.tools.length ? request.tools : undefined;
+
+  const entryOrErr = await ensureLoaded(task, modelId);
+  if (entryOrErr?.error) {
+    console.warn("[onnx] render prompt:", entryOrErr.error?.message);
+    return { prompt: null };
+  }
+
+  const prompt = renderPromptFromEntry(entryOrErr, messages, tools);
+  return { prompt: typeof prompt === "string" ? prompt : null };
+}
+
+function renderPromptFromEntry(entry, messages, tools) {
+  const toolsOpt = tools?.length ? tools : undefined;
+  if (entry?.kind === "gemma4" || entry?.kind === "ministral") {
+    const { processor } = entry;
+    if (!processor?.apply_chat_template) return null;
+    const rawMessages = Array.isArray(messages) ? messages : [];
+    const { messages: gemmaMsgs } = toGemmaMessages(rawMessages);
+    const templateOpts = { add_generation_prompt: true };
+    if (toolsOpt) templateOpts.tools = toolsOpt;
+    if (entry.kind === "gemma4") templateOpts.enable_thinking = false;
+    try {
+      return processor.apply_chat_template(gemmaMsgs, templateOpts);
+    } catch (err) {
+      console.warn("[onnx] could not render chat prompt:", err);
+      return null;
+    }
+  }
+  return renderChatPrompt(entry?.pipeline, messages, toolsOpt);
 }
 
 async function runChatCompletions(request) {
@@ -984,7 +1155,7 @@ async function runChatCompletions(request) {
 async function handleLoadFailure(task, modelId, err) {
   const message = String(err?.message || err);
   console.error(`[onnx] failed to load ${task} ${modelId}:`, message);
-  if (isOomError(message) && device === "webgpu") {
+  if (isGpuResourceError(message) && device === "webgpu") {
     if (isLlmTask(task)) {
       const smaller = nextSmallerModel(modelId);
       if (smaller) {
@@ -1040,15 +1211,34 @@ async function handleLoadFailure(task, modelId, err) {
 async function handleGenerationFailure(task, modelId, err) {
   const message = String(err?.message || err);
   console.error(`[onnx] ${task} failed for ${modelId}:`, message);
-  if (isOomError(message)) {
+  if (isGpuResourceError(message)) {
     await unload({ task, model: modelId });
-    return errorResponse(`Ran out of memory running "${task}". The model was unloaded — try again or free other models.`, "oom");
+    return errorResponse(
+      `Ran out of GPU/CPU memory running "${task}". ${gpuErrorHint()}`,
+      "oom"
+    );
   }
   return errorResponse(`Local ${task} failed: ${message}`, "engine_error");
 }
 
 function isOomError(message) {
   return /out of memory|oom|allocation failed/i.test(message);
+}
+
+/** WebGPU OOM often surfaces as mapAsync / invalid-buffer errors after an earlier GPU fault. */
+function isGpuResourceError(message) {
+  return (
+    isOomError(message) ||
+    /mapAsync|BufferManager::Download|Invalid Buffer|previous error/i.test(message) ||
+    /webgpu.*buffer|GPUBuffer/i.test(message)
+  );
+}
+
+function gpuErrorHint() {
+  return (
+    "Close other GPU-heavy apps (e.g. `ollama stop` if a large model is loaded), unload other ONNX models, " +
+    "use a smaller VLM (Gemma 4 E2B / Ministral 3B), or reduce max_tokens. Reload the extension if errors persist."
+  );
 }
 
 function nextSmallerModel(modelId) {

@@ -20,6 +20,13 @@ import {
   normalizeAssistantToolCalls,
   toOpenAiToolCall,
 } from "./tool-runtime.js";
+import {
+  extractDialogueRawPayload,
+  mountCollapsibleJsonTree,
+  parseDialogueRawPayload,
+  serializeDialogueRawPayload,
+} from "./raw-json-view.js";
+import { listOllamaModelsWithMeta } from "../ollama-models.js";
 
 const DIALOGUE_MAX_TOOL_ROUNDS = 5;
 /** Keep tool payloads small — large HTML + local ONNX (esp. WebGPU) can OOM or crash the next inference. */
@@ -68,6 +75,15 @@ let dialogueSessionId = null;
 let dialogueLastUsage = null;
 let dialogueContextEstimate = null;
 let dialogueContextEstimateModelId = null;
+let dialogueInputPreviewMode = "json";
+let dialogueInputPreviewGeneration = 0;
+let dialogueInputPreviewTimer = null;
+let dialogueInputPayloadOverride = null;
+let dialogueInputJsonViewMode = "edit";
+let dialogueInputJsonDirty = false;
+
+const DIALOGUE_RAW_PROMPT_PLACEHOLDER =
+  "(No processed prompt for this turn. ONNX and Ollama fill this after a reply; other API providers send JSON only.)";
 
 /** Wire Dialogue tab UI; call once from sidepanel init. */
 export function createDialoguePanel(deps) {
@@ -113,6 +129,7 @@ function wire() {
   });
   $("#dialogue-system-input").addEventListener("input", (e) => {
     dialogueSystemPrompt = e.target.value;
+    notifyDialogueInputChanged();
   });
   $("#dialogue-tools-toggle").addEventListener("click", () => {
     const wrap = $("#dialogue-tools-wrap");
@@ -138,6 +155,7 @@ function wire() {
       sendDialogue();
     }
   });
+  $("#dialogue-input").addEventListener("input", () => notifyDialogueInputChanged());
   $("#dialogue-attach-btn").addEventListener("click", () => $("#dialogue-image-input").click());
   $("#dialogue-image-input").addEventListener("change", async (e) => {
     await addDialogueImages(e.target.files);
@@ -149,6 +167,7 @@ function wire() {
     webSearchCb.addEventListener("change", (e) => {
       saveSettings({ dialogueWebSearch: e.target.checked });
       renderDialogueToolsForm();
+      notifyDialogueInputChanged();
     });
   }
   const browserToolsCb = $("#dialogue-browser-tools-enabled");
@@ -156,8 +175,10 @@ function wire() {
     browserToolsCb.addEventListener("change", (e) => {
       saveSettings({ dialogueBrowserTools: e.target.checked });
       renderDialogueToolsForm();
+      notifyDialogueInputChanged();
     });
   }
+  wireDialogueInputPreview();
   renderDialogue();
   renderDialogueToolsForm();
   refreshDialogueModelSelect();
@@ -242,6 +263,9 @@ async function openDialogueSession(id) {
     dialogueTurns = Array.isArray(session.turns) ? session.turns : [];
     dialogueImages = [];
     dialogueLastUsage = session.lastUsage || null;
+    clearDialogueInputPayloadOverride();
+    dialogueInputJsonViewMode = "edit";
+    dialogueInputJsonDirty = false;
     $("#dialogue-system-input").value = dialogueSystemPrompt;
     clearDialogueToolsError();
     renderDialogueToolsForm();
@@ -249,6 +273,7 @@ async function openDialogueSession(id) {
     renderDialogue();
     await refreshDialogueSessionsList();
     await refreshDialogueContextEstimate();
+    notifyDialogueInputChanged();
   } catch (err) {
     console.error("[dialogue] open session failed", err);
   }
@@ -262,6 +287,9 @@ function startNewDialogueSession() {
   dialogueTurns = [];
   dialogueImages = [];
   dialogueLastUsage = null;
+  clearDialogueInputPayloadOverride();
+  dialogueInputJsonViewMode = "edit";
+  dialogueInputJsonDirty = false;
   $("#dialogue-system-input").value = "";
   clearDialogueToolsError();
   renderDialogueToolsForm();
@@ -269,6 +297,7 @@ function startNewDialogueSession() {
   renderDialogue();
   renderDialogueContextBar();
   refreshDialogueSessionsList();
+  notifyDialogueInputChanged();
 }
 
 async function deleteDialogueSessionUi(id, title) {
@@ -303,6 +332,354 @@ function syncDialogueToolsFromUi() {
   }
   clearDialogueToolsError();
   return tools;
+}
+
+/** Lenient tool sync for live preview — shows current drafts even when invalid. */
+function syncDialogueToolsFromUiLenient() {
+  const { tools } = draftsToOpenAiTools(dialogueToolDrafts);
+  return tools || [];
+}
+
+function isDialogueInputPreviewOpen() {
+  const wrap = $("#dialogue-preview-wrap");
+  return wrap && !wrap.classList.contains("hidden");
+}
+
+function clearDialogueInputPayloadOverride() {
+  dialogueInputPayloadOverride = null;
+  updateDialogueInputOverrideStatus();
+}
+
+function updateDialogueInputOverrideStatus() {
+  const status = $("#dialogue-preview-json-status");
+  if (!status) return;
+  if (dialogueInputPayloadOverride) {
+    status.textContent = "Custom payload (used on Send)";
+    status.className = "dialogue-raw-json-status override";
+    status.classList.remove("hidden");
+  } else if (!status.classList.contains("error")) {
+    status.textContent = "";
+    status.className = "dialogue-raw-json-status hidden";
+  }
+}
+
+function notifyDialogueInputChanged() {
+  if (dialogueInputJsonViewMode === "edit" && document.activeElement === $("#dialogue-preview-json-edit")) {
+    scheduleDialogueInputPreviewRefresh();
+    return;
+  }
+  dialogueInputJsonDirty = false;
+  clearDialogueInputPayloadOverride();
+  scheduleDialogueInputPreviewRefresh();
+}
+
+function scheduleDialogueInputPreviewRefresh() {
+  if (!isDialogueInputPreviewOpen()) return;
+  if (dialogueInputPreviewTimer) clearTimeout(dialogueInputPreviewTimer);
+  if (dialogueInputPreviewMode === "json") {
+    refreshDialogueInputPreview();
+  } else {
+    dialogueInputPreviewTimer = setTimeout(() => refreshDialogueInputPreview(), 400);
+  }
+}
+
+async function buildPendingDialogueLlmInput() {
+  const userTools = syncDialogueToolsFromUiLenient();
+  const tools = await buildDialogueTools(userTools);
+  const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
+  const text = $("#dialogue-input")?.value.trim() || "";
+  const images = dialogueImages.slice();
+
+  const messages = [
+    ...buildDialogueSystemMessages(mcpToolNames),
+    ...turnsToChatMessages(dialogueTurns),
+  ];
+  if (text || images.length) {
+    messages.push(turnToMessage({ role: "user", content: text, images }));
+  }
+  return { messages, tools };
+}
+
+async function fetchDialoguePromptPreview(messages, tools) {
+  const res = await sendMessage({
+    type: "dialogue.renderPrompt",
+    messages,
+    ...(tools.length ? { tools } : {}),
+  });
+  return res?.prompt ?? null;
+}
+
+async function refreshDialogueInputPreview() {
+  if (!isDialogueInputPreviewOpen()) return;
+
+  const jsonRoot = $("#dialogue-preview-json-root");
+  const promptPanel = $("#dialogue-preview-panel");
+  const editEl = $("#dialogue-preview-json-edit");
+  if (!jsonRoot || !promptPanel) return;
+
+  const generation = ++dialogueInputPreviewGeneration;
+
+  try {
+    if (dialogueInputPreviewMode === "prompt") {
+      jsonRoot.classList.add("hidden");
+      editEl?.classList.add("hidden");
+      $(".dialogue-raw-json-actions")?.classList.add("hidden");
+      promptPanel.classList.remove("hidden");
+
+      const { messages, tools } = dialogueInputPayloadOverride
+        ? { messages: dialogueInputPayloadOverride.messages, tools: dialogueInputPayloadOverride.tools ?? [] }
+        : await buildPendingDialogueLlmInput();
+      const raw = snapshotDialogueRawInput(messages, tools);
+
+      promptPanel.textContent = "Rendering…";
+      const prompt = await fetchDialoguePromptPreview(messages, tools);
+      if (generation !== dialogueInputPreviewGeneration) return;
+      raw.prompt = prompt;
+      renderDialoguePromptPanel(promptPanel, raw);
+      return;
+    }
+
+    promptPanel.classList.add("hidden");
+    $(".dialogue-raw-json-actions")?.classList.remove("hidden");
+
+    if (dialogueInputJsonViewMode === "edit") {
+      jsonRoot.classList.add("hidden");
+      editEl?.classList.remove("hidden");
+      setDialogueInputJsonViewUi("edit");
+
+      if (!dialogueInputJsonDirty && document.activeElement !== editEl) {
+        const payload = await getDialogueInputPreviewPayloadForEdit();
+        if (editEl) editEl.value = serializeDialogueRawPayload(payload);
+      }
+      updateDialogueInputOverrideStatus();
+      return;
+    }
+
+    editEl?.classList.add("hidden");
+    jsonRoot.classList.remove("hidden");
+    setDialogueInputJsonViewUi("tree");
+
+    if (dialogueInputPayloadOverride) {
+      mountCollapsibleJsonTree(jsonRoot, dialogueInputPayloadOverride);
+      return;
+    }
+
+    const { messages, tools } = await buildPendingDialogueLlmInput();
+    const raw = snapshotDialogueRawInput(messages, tools);
+    mountCollapsibleJsonTree(jsonRoot, extractDialogueRawPayload(raw));
+  } catch (err) {
+    if (generation !== dialogueInputPreviewGeneration) return;
+    if (dialogueInputJsonViewMode === "edit" && editEl) {
+      editEl.value = `Preview error: ${err.message || String(err)}`;
+    } else {
+      jsonRoot.textContent = `Preview error: ${err.message || String(err)}`;
+    }
+  }
+}
+
+function renderDialoguePromptPanel(panel, raw) {
+  panel.textContent =
+    typeof raw.prompt === "string" && raw.prompt.length > 0
+      ? raw.prompt
+      : DIALOGUE_RAW_PROMPT_PLACEHOLDER;
+}
+
+function renderDialogueRawJsonTree(container, raw) {
+  mountCollapsibleJsonTree(container, extractDialogueRawPayload(raw));
+}
+
+async function getDialogueInputPreviewPayloadForEdit() {
+  if (dialogueInputPayloadOverride) return dialogueInputPayloadOverride;
+  const { messages, tools } = await buildPendingDialogueLlmInput();
+  const raw = snapshotDialogueRawInput(messages, tools);
+  return extractDialogueRawPayload(raw);
+}
+
+function setDialogueInputJsonViewUi(mode) {
+  const editBtn = $("#dialogue-preview-json-edit-btn");
+  const applyBtn = $("#dialogue-preview-json-apply-btn");
+  const cancelBtn = $("#dialogue-preview-json-cancel-btn");
+  if (mode === "edit") {
+    editBtn.textContent = "Tree view";
+    applyBtn?.classList.remove("hidden");
+    cancelBtn?.classList.remove("hidden");
+  } else {
+    editBtn.textContent = "Edit JSON";
+    applyBtn?.classList.add("hidden");
+    cancelBtn?.classList.add("hidden");
+  }
+}
+
+function setDialogueInputJsonViewMode(mode) {
+  dialogueInputJsonViewMode = mode;
+  refreshDialogueInputPreview();
+}
+
+function showDialogueInputJsonEditView() {
+  if (dialogueInputJsonViewMode === "edit") {
+    setDialogueInputJsonViewMode("tree");
+    return;
+  }
+  dialogueInputJsonViewMode = "edit";
+  if (!dialogueInputJsonDirty) {
+    getDialogueInputPreviewPayloadForEdit().then((payload) => {
+      const editEl = $("#dialogue-preview-json-edit");
+      if (editEl) editEl.value = serializeDialogueRawPayload(payload);
+    });
+  }
+  refreshDialogueInputPreview();
+}
+
+function cancelDialogueInputJsonEdit() {
+  dialogueInputJsonDirty = false;
+  clearDialogueInputPayloadOverride();
+  const editEl = $("#dialogue-preview-json-edit");
+  getDialogueInputPreviewPayloadForEdit().then((payload) => {
+    if (editEl) editEl.value = serializeDialogueRawPayload(payload);
+  });
+  updateDialogueInputOverrideStatus();
+}
+
+function applyDialogueInputJsonEdit() {
+  const editEl = $("#dialogue-preview-json-edit");
+  const status = $("#dialogue-preview-json-status");
+  if (!editEl) return;
+
+  const { data, error } = parseDialogueRawPayload(editEl.value);
+  if (error) {
+    if (status) {
+      status.textContent = error;
+      status.className = "dialogue-raw-json-status error";
+      status.classList.remove("hidden");
+    }
+    return;
+  }
+
+  dialogueInputPayloadOverride = data;
+  dialogueInputJsonDirty = false;
+  updateDialogueInputOverrideStatus();
+}
+
+/** Extract last user message from override messages for bubble display. */
+function userTurnFromMessage(msg) {
+  const turn = { role: "user", content: "", images: [] };
+  if (!msg) return turn;
+
+  const c = msg.content;
+  if (typeof c === "string") {
+    turn.content = c;
+    return turn;
+  }
+  if (Array.isArray(c)) {
+    const textParts = c.filter((p) => p?.type === "text").map((p) => p.text || "");
+    turn.content = textParts.join("\n");
+    turn.images = c
+      .filter((p) => p?.type === "image_url" && p.image_url?.url)
+      .map((p) => p.image_url.url);
+    return turn;
+  }
+  turn.content = c != null ? String(c) : "";
+  return turn;
+}
+
+function findLastUserMessage(messages) {
+  if (!Array.isArray(messages)) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") return messages[i];
+  }
+  return null;
+}
+
+function wireDialogueInputPreview() {
+  const toggle = $("#dialogue-preview-toggle");
+  const wrap = $("#dialogue-preview-wrap");
+  const jsonBtn = $("#dialogue-preview-json-btn");
+  const promptBtn = $("#dialogue-preview-prompt-btn");
+  if (!toggle || !wrap) return;
+
+  toggle.addEventListener("click", () => {
+    wrap.classList.toggle("hidden");
+    const open = !wrap.classList.contains("hidden");
+    toggle.textContent = open ? "Hide raw" : "Show raw";
+    if (open) refreshDialogueInputPreview();
+  });
+
+  const setMode = (mode) => {
+    if (mode === "prompt" && dialogueInputJsonViewMode === "edit") {
+      dialogueInputJsonViewMode = "edit";
+    }
+    dialogueInputPreviewMode = mode;
+    jsonBtn?.classList.toggle("active", mode === "json");
+    promptBtn?.classList.toggle("active", mode === "prompt");
+  };
+
+  jsonBtn?.addEventListener("click", () => {
+    setMode("json");
+    dialogueInputJsonViewMode = "edit";
+    refreshDialogueInputPreview();
+  });
+  promptBtn?.addEventListener("click", () => {
+    setMode("prompt");
+    refreshDialogueInputPreview();
+  });
+
+  $("#dialogue-preview-json-edit-btn")?.addEventListener("click", () => showDialogueInputJsonEditView());
+  $("#dialogue-preview-json-apply-btn")?.addEventListener("click", () => applyDialogueInputJsonEdit());
+  $("#dialogue-preview-json-cancel-btn")?.addEventListener("click", () => cancelDialogueInputJsonEdit());
+  $("#dialogue-preview-json-edit")?.addEventListener("input", () => {
+    dialogueInputJsonDirty = true;
+    const status = $("#dialogue-preview-json-status");
+    if (status?.classList.contains("error")) {
+      status.textContent = "";
+      status.className = "dialogue-raw-json-status hidden";
+    }
+  });
+}
+
+function renderDialogueRawPanelContent(jsonRoot, promptPanel, raw, mode) {
+  if (mode === "prompt") {
+    jsonRoot?.classList.add("hidden");
+    promptPanel?.classList.remove("hidden");
+    renderDialoguePromptPanel(promptPanel, raw);
+  } else {
+    promptPanel?.classList.add("hidden");
+    jsonRoot?.classList.remove("hidden");
+    renderDialogueRawJsonTree(jsonRoot, raw);
+  }
+}
+
+function createDialogueRawModeSwitcher({ getMode, setMode, onModeChange }) {
+  const modes = document.createElement("div");
+  modes.className = "dialogue-raw-modes";
+  const jsonBtn = document.createElement("button");
+  jsonBtn.type = "button";
+  jsonBtn.className = "dialogue-raw-mode active";
+  jsonBtn.textContent = "JSON";
+  const promptBtn = document.createElement("button");
+  promptBtn.type = "button";
+  promptBtn.className = "dialogue-raw-mode";
+  promptBtn.textContent = "Prompt";
+  modes.appendChild(jsonBtn);
+  modes.appendChild(promptBtn);
+
+  const syncActive = () => {
+    const mode = getMode();
+    jsonBtn.classList.toggle("active", mode === "json");
+    promptBtn.classList.toggle("active", mode === "prompt");
+  };
+
+  jsonBtn.addEventListener("click", () => {
+    setMode("json");
+    syncActive();
+    onModeChange?.();
+  });
+  promptBtn.addEventListener("click", () => {
+    setMode("prompt");
+    syncActive();
+    onModeChange?.();
+  });
+
+  return { modes, syncActive };
 }
 
 function isDialogueWebSearchEnabled() {
@@ -412,23 +789,6 @@ function buildDialogueRawFromCompletion(inputRaw, res) {
   return raw;
 }
 
-function formatDialogueRawJson(raw) {
-  const requestPayload =
-    raw.request !== undefined
-      ? raw.tools?.length > 0
-        ? { messages: raw.request, tools: raw.tools }
-        : raw.request
-      : undefined;
-
-  if (requestPayload !== undefined && raw.response !== undefined) {
-    return JSON.stringify({ request: requestPayload, response: raw.response }, null, 2);
-  }
-  if (requestPayload !== undefined) return JSON.stringify(requestPayload, null, 2);
-  if (raw.response !== undefined) return JSON.stringify(raw.response, null, 2);
-  const { prompt: _prompt, tools: _tools, ...rest } = raw;
-  return JSON.stringify(rest, null, 2);
-}
-
 async function executeDialogueToolTurn(call, btn) {
   const toolTurn = {
     role: "tool",
@@ -490,14 +850,14 @@ function createMcpToolCard(tool) {
   jsonLabel.className = "dialogue-tool-json-label";
   jsonLabel.textContent = "MCP tool JSON (tools/list)";
 
-  const pre = document.createElement("pre");
-  pre.className = "dialogue-tool-json";
-  pre.textContent = JSON.stringify(tool, null, 2);
+  const jsonRoot = document.createElement("div");
+  jsonRoot.className = "dialogue-raw-json-root dialogue-tool-json";
+  mountCollapsibleJsonTree(jsonRoot, tool);
 
   card.appendChild(header);
   card.appendChild(hint);
   card.appendChild(jsonLabel);
-  card.appendChild(pre);
+  card.appendChild(jsonRoot);
   return card;
 }
 
@@ -538,6 +898,7 @@ async function renderDialogueToolsForm() {
       empty.textContent = "No tools yet. Enable MCP tools below or click “+ Add tool” for schema-only custom tools.";
       list.appendChild(empty);
     }
+    notifyDialogueInputChanged();
     return;
   }
 
@@ -691,23 +1052,48 @@ async function renderDialogueToolsForm() {
     card.appendChild(header);
     card.appendChild(fields);
     card.appendChild(paramsWrap);
+
+    const jsonLabel = document.createElement("div");
+    jsonLabel.className = "dialogue-tool-json-label";
+    jsonLabel.textContent = "Tool JSON (OpenAI shape)";
+
+    const jsonRoot = document.createElement("div");
+    jsonRoot.className = "dialogue-raw-json-root dialogue-tool-json";
+    const { tools: previewTools } = draftsToOpenAiTools([tool]);
+    mountCollapsibleJsonTree(
+      jsonRoot,
+      previewTools?.[0] ?? {
+        type: "function",
+        function: {
+          name: tool.name || "(name required)",
+          description: tool.description || "",
+          parameters: { type: "object", properties: {} },
+        },
+      }
+    );
+
+    card.appendChild(jsonLabel);
+    card.appendChild(jsonRoot);
     list.appendChild(card);
   });
+  notifyDialogueInputChanged();
 }
 
 async function listOllamaModels() {
-  const base = (getSettings().baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2000);
-    const res = await fetch(`${base}/api/tags`, { signal: ctrl.signal, targetAddressSpace: "loopback" });
-    clearTimeout(timer);
-    if (!res.ok) return [];
-    const body = await res.json();
-    return (body.models || []).map((m) => ({ id: m.name, label: m.name }));
-  } catch {
-    return [];
+  return listOllamaModelsWithMeta(getSettings().baseUrl);
+}
+
+/** Bubble text for a non-tool assistant message; warns on token-limit truncation. */
+function formatAssistantDisplayContent(msg, choice) {
+  const content = typeof msg?.content === "string" ? msg.content.trim() : "";
+  if (content) return content;
+  if (choice?.finish_reason === "length") {
+    return (
+      "⚠ Response truncated: hit the max token limit before completing. " +
+      "Increase max tokens in Settings and try again."
+    );
   }
+  return "(empty response)";
 }
 
 function formatDialogueTokenCount(n) {
@@ -738,11 +1124,13 @@ function renderDialogueContextBar() {
   const pct = Math.min(100, (used / limit) * 100);
   const fill = $("#dialogue-context-fill");
   fill.style.width = `${pct}%`;
-  fill.classList.toggle("warn", pct >= 90);
+  const memoryBinds =
+    est.effectiveMaxContext != null && est.trainedMaxContext != null && est.effectiveMaxContext < est.trainedMaxContext;
+  fill.classList.toggle("warn", pct >= 90 || (memoryBinds && pct >= 75));
 
-  const memoryBinds = est.effectiveMaxContext != null && est.effectiveMaxContext < est.trainedMaxContext;
+  const wasmCap = est.bindingConstraint === "wasm" ? ", WASM 4GB cap" : "";
   const limitLabel = memoryBinds
-    ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)})`
+    ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)}${wasmCap})`
     : `${formatDialogueTokenCount(limit)} tokens`;
   $("#dialogue-context-label").textContent = `Context: ${formatDialogueTokenCount(used)} / ${limitLabel}`;
   bar.title = (est.caveats || []).join("\n");
@@ -837,6 +1225,7 @@ async function refreshDialogueModelSelect() {
     const opt = document.createElement("option");
     opt.value = o.id;
     opt.textContent = o.label;
+    opt.title = o.label;
     select.appendChild(opt);
   }
   select.value = selected || options[0].id;
@@ -869,6 +1258,7 @@ async function onDialogueModelChange(e) {
     const modelInput = $("#model-name");
     if (modelInput) modelInput.value = modelId;
   }
+  notifyDialogueInputChanged();
 }
 
 /** Ask before fetching weights that are not yet in IndexedDB. */
@@ -910,6 +1300,7 @@ async function addDialogueImages(fileList) {
     dialogueImages.push(await fileToDataUrl(file));
   }
   renderDialogueAttachments();
+  notifyDialogueInputChanged();
 }
 
 function fileToDataUrl(file) {
@@ -940,6 +1331,7 @@ function renderDialogueAttachments() {
     remove.addEventListener("click", () => {
       dialogueImages.splice(i, 1);
       renderDialogueAttachments();
+      notifyDialogueInputChanged();
     });
     item.appendChild(img);
     item.appendChild(remove);
@@ -1030,54 +1422,31 @@ function appendDialogueRawPanel(bubble, raw) {
   const wrap = document.createElement("div");
   wrap.className = "dialogue-raw-wrap hidden";
 
-  const modes = document.createElement("div");
-  modes.className = "dialogue-raw-modes";
-  const jsonBtn = document.createElement("button");
-  jsonBtn.type = "button";
-  jsonBtn.className = "dialogue-raw-mode active";
-  jsonBtn.textContent = "JSON";
-  const promptBtn = document.createElement("button");
-  promptBtn.type = "button";
-  promptBtn.className = "dialogue-raw-mode";
-  promptBtn.textContent = "Prompt";
-  modes.appendChild(jsonBtn);
-  modes.appendChild(promptBtn);
+  const jsonRoot = document.createElement("div");
+  jsonRoot.className = "dialogue-raw-json-root";
 
-  const panel = document.createElement("pre");
-  panel.className = "dialogue-raw-panel";
+  const promptPanel = document.createElement("pre");
+  promptPanel.className = "dialogue-raw-panel hidden";
 
   let mode = "json";
-  const renderPanel = () => {
-    if (mode === "prompt") {
-      // Processed chat-template string (ONNX tokenizer or Ollama _debug_render_only).
-      panel.textContent =
-        typeof raw.prompt === "string" && raw.prompt.length > 0
-          ? raw.prompt
-          : "(No processed prompt for this turn. ONNX and Ollama fill this after a reply; other API providers send JSON only.)";
-    } else {
-      // Original JSON input (messages ± tools) and/or assistant response — never the processed prompt.
-      panel.textContent = formatDialogueRawJson(raw);
-    }
-    jsonBtn.classList.toggle("active", mode === "json");
-    promptBtn.classList.toggle("active", mode === "prompt");
-  };
-  renderPanel();
+  const { modes, syncActive } = createDialogueRawModeSwitcher({
+    getMode: () => mode,
+    setMode: (m) => {
+      mode = m;
+    },
+    onModeChange: () => renderDialogueRawPanelContent(jsonRoot, promptPanel, raw, mode),
+  });
+  syncActive();
+  renderDialogueRawPanelContent(jsonRoot, promptPanel, raw, mode);
 
-  jsonBtn.addEventListener("click", () => {
-    mode = "json";
-    renderPanel();
-  });
-  promptBtn.addEventListener("click", () => {
-    mode = "prompt";
-    renderPanel();
-  });
   toggle.addEventListener("click", () => {
     wrap.classList.toggle("hidden");
     toggle.textContent = wrap.classList.contains("hidden") ? "Show raw" : "Hide raw";
   });
 
   wrap.appendChild(modes);
-  wrap.appendChild(panel);
+  wrap.appendChild(jsonRoot);
+  wrap.appendChild(promptPanel);
   bubble.appendChild(toggle);
   bubble.appendChild(wrap);
 }
@@ -1087,17 +1456,59 @@ async function sendDialogue() {
   const input = $("#dialogue-input");
   const text = input.value.trim();
   const images = dialogueImages.slice();
-  if (!text && images.length === 0) return;
 
-  const userTools = syncDialogueToolsFromUi();
-  if (userTools === null) {
-    $("#dialogue-tools-wrap").classList.remove("hidden");
-    return;
+  if (
+    dialogueInputPreviewMode === "json" &&
+    dialogueInputJsonViewMode === "edit" &&
+    isDialogueInputPreviewOpen()
+  ) {
+    const editEl = $("#dialogue-preview-json-edit");
+    if (editEl?.value.trim()) {
+      const { data, error } = parseDialogueRawPayload(editEl.value);
+      if (error) {
+        alert(error);
+        $("#dialogue-preview-wrap")?.classList.remove("hidden");
+        return;
+      }
+      dialogueInputPayloadOverride = data;
+      dialogueInputJsonDirty = false;
+    }
   }
 
-  const tools = await buildDialogueTools(userTools);
-  const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
-  if (isDialogueWebSearchEnabled() && !getSettings().tavilyApiKey?.trim()) {
+  let messages;
+  let tools;
+  let userTurn;
+
+  if (dialogueInputPayloadOverride) {
+    messages = structuredClone(dialogueInputPayloadOverride.messages);
+    tools = structuredClone(dialogueInputPayloadOverride.tools ?? []);
+    const lastUser = findLastUserMessage(messages);
+    if (!lastUser) {
+      alert("Custom payload must include at least one user message.");
+      return;
+    }
+    userTurn = userTurnFromMessage(lastUser);
+  } else {
+    if (!text && images.length === 0) return;
+
+    const userTools = syncDialogueToolsFromUi();
+    if (userTools === null) {
+      $("#dialogue-tools-wrap").classList.remove("hidden");
+      return;
+    }
+
+    tools = await buildDialogueTools(userTools);
+    const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
+    userTurn = { role: "user", content: text, images };
+    messages = [
+      ...buildDialogueSystemMessages(mcpToolNames),
+      ...turnsToChatMessages(dialogueTurns),
+      turnToMessage(userTurn),
+    ];
+  }
+
+  const hasWebSearchTool = tools.some((t) => t.function?.name === "web_search");
+  if (hasWebSearchTool && isDialogueWebSearchEnabled() && !getSettings().tavilyApiKey?.trim()) {
     if (
       !confirm(
         "Web search is enabled but no Tavily API key is set in Settings. " +
@@ -1113,18 +1524,14 @@ async function sendDialogue() {
     if (!confirmOnnxDownload(getSettings().onnxModel)) return;
   }
 
-  const userTurn = { role: "user", content: text, images };
-  let messages = [
-    ...buildDialogueSystemMessages(mcpToolNames),
-    ...turnsToChatMessages(dialogueTurns),
-    turnToMessage(userTurn),
-  ];
-
   userTurn.raw = snapshotDialogueRawInput(messages, tools);
   dialogueTurns.push(userTurn);
   input.value = "";
   dialogueImages = [];
   renderDialogueAttachments();
+  clearDialogueInputPayloadOverride();
+  dialogueInputJsonDirty = false;
+  dialogueInputJsonViewMode = "edit";
   renderDialogue();
 
   dialogueSending = true;
@@ -1145,14 +1552,15 @@ async function sendDialogue() {
         renderDialogueContextBar();
       }
 
-      const msg = res.choices?.[0]?.message ?? {};
+      const choice = res.choices?.[0] ?? {};
+      const msg = choice.message ?? {};
       if (round === 0 && typeof res?.prompt === "string") userTurn.raw.prompt = res.prompt;
 
       const calls = normalizeAssistantToolCalls(msg, tools);
       if (!calls.length) {
         dialogueTurns.push({
           role: "assistant",
-          content: msg.content || "(empty response)",
+          content: formatAssistantDisplayContent(msg, choice),
           raw: buildDialogueRawFromCompletion(inputRaw, res),
         });
         gotAssistantReply = true;
@@ -1205,7 +1613,10 @@ async function sendDialogue() {
         dialogueLastUsage = res.usage;
         renderDialogueContextBar();
       }
-      const content = res.choices?.[0]?.message?.content || "(stopped: tool round limit)";
+      const finalChoice = res.choices?.[0] ?? {};
+      const finalMsg = finalChoice.message ?? {};
+      let content = formatAssistantDisplayContent(finalMsg, finalChoice);
+      if (content === "(empty response)") content = "(stopped: tool round limit)";
       dialogueTurns.push({
         role: "assistant",
         content,

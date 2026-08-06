@@ -16,7 +16,7 @@ import {
   updateSystemEditorConfig,
 } from "./system-store.js";
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
-import { DEFAULT_MAX_STEPS } from "./agent-config.js";
+import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
 import { createDialoguePanel } from "./dialogue/index.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -187,6 +187,11 @@ function wireSettingsForm() {
     e.target.value = n;
     saveSettings({ maxSteps: n });
   });
+  $("#max-tokens-input").addEventListener("change", (e) => {
+    const n = getMaxTokens({ maxTokens: e.target.value });
+    e.target.value = n;
+    saveSettings({ maxTokens: n });
+  });
   $("#tavily-api-key").addEventListener("change", (e) => saveSettings({ tavilyApiKey: e.target.value.trim() }));
   $("#onnx-unload-btn").addEventListener("click", async () => {
     await sendMessage({ type: "onnx.relay", engineType: "engine.unload" });
@@ -208,6 +213,7 @@ function applySettingsToForm() {
   $("#api-key").value = settings.apiKey || "";
   $("#model-name").value = settings.model || "";
   $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
+  $("#max-tokens-input").value = getMaxTokens(settings);
   $("#tavily-api-key").value = settings.tavilyApiKey || "";
   const webSearchCb = $("#dialogue-web-search-enabled");
   if (webSearchCb) webSearchCb.checked = settings.dialogueWebSearch !== false;
@@ -311,11 +317,14 @@ function contextEstimateText(est) {
   if (est.error) return "Context: unknown";
   const trained = formatTokenCount(est.trainedMaxContext);
   if (!trained) return "Context: unknown";
-  // Only surface a separate "usable" figure when memory is actually the
-  // binding constraint (effective < trained) — otherwise the model's own
-  // limit applies and a second number would misleadingly look like more room.
-  const memoryBinds = est.memoryLimitedTokens != null && est.effectiveMaxContext < est.trainedMaxContext;
-  if (memoryBinds) return `Context: ${trained} max · ~${formatTokenCount(est.effectiveMaxContext)} usable (est.)`;
+  const memoryBinds =
+    est.effectiveMaxContext != null &&
+    est.trainedMaxContext != null &&
+    est.effectiveMaxContext < est.trainedMaxContext;
+  if (memoryBinds) {
+    const wasmCap = est.bindingConstraint === "wasm" ? " · WASM 4GB cap" : "";
+    return `Context: ${trained} max · ~${formatTokenCount(est.effectiveMaxContext)} usable (est.${wasmCap})`;
+  }
   return `Context: ${trained} max`;
 }
 
@@ -324,6 +333,9 @@ function contextEstimateTitle(est) {
   const parts = [...(est.caveats || [])];
   if (est.deviceMemoryGB != null) {
     parts.push(`Assumes ~${(est.deviceMemoryGB * est.assumedFreeFraction).toFixed(1)}GB free of ${est.deviceMemoryGB}GB reported device memory, running on ${est.device || "unknown device"}.`);
+  }
+  if (est.wasmMemoryLimitedTokens != null) {
+    parts.push(`WASM heap estimate: ~${formatTokenCount(est.wasmMemoryLimitedTokens)} KV tokens after weights + ${est.wasmHeapReserveMB ?? 768}MB runtime reserve.`);
   }
   return parts.join("\n");
 }

@@ -2,6 +2,7 @@
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
 import { toAnthropicTools } from "./tools/schema.js";
+import { getMaxTokens } from "./agent-config.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
@@ -28,13 +29,30 @@ export async function chatCompletions(request, settings) {
   }
 }
 
+/** Render chat template without inference (Dialogue input preview). */
+export async function renderChatPromptPreview(request, settings) {
+  const provider = settings?.provider || "onnx";
+  switch (provider) {
+    case "onnx":
+      return onnxRenderChatPrompt(request, settings);
+    case "ollama": {
+      const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const model = request.model || settings.model || "llama3.2";
+      const prompt = await ollamaFetchRenderedPrompt(baseUrl, model, request);
+      return { prompt };
+    }
+    default:
+      return { prompt: null };
+  }
+}
+
 /** Back-compat convenience wrapper used by agent.js and the system editors. */
 export async function chat(messages, settings) {
   const request = {
     model: settings?.model,
     messages,
     temperature: settings?.temperature ?? 0.2,
-    max_tokens: settings?.maxTokens ?? 1024,
+    max_tokens: getMaxTokens(settings),
   };
   const response = await chatCompletions(request, settings);
   if (response.error) throw new Error(response.error.message);
@@ -95,6 +113,31 @@ async function onnxChatCompletions(request, settings) {
     return response;
   } catch (err) {
     return errorResponse(`Local engine error: ${err.message}`, "engine_error");
+  }
+}
+
+async function onnxRenderChatPrompt(request, settings) {
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    console.warn("[onnx] render prompt:", err);
+    return { prompt: null };
+  }
+
+  const model = request.model || settings?.onnxModel;
+  if (!model) return { prompt: null };
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      target: "onnx-engine",
+      type: "chat.renderPrompt",
+      request: { ...request, model },
+    });
+    if (!response || response.error) return { prompt: null };
+    return { prompt: typeof response.prompt === "string" ? response.prompt : null };
+  } catch (err) {
+    console.warn("[onnx] render prompt failed:", err);
+    return { prompt: null };
   }
 }
 
@@ -342,7 +385,7 @@ async function anthropicChatCompletions(request, settings) {
         system: system || undefined,
         messages,
         ...(tools ? { tools } : {}),
-        max_tokens: request.max_tokens ?? 1024,
+        max_tokens: request.max_tokens ?? getMaxTokens(settings),
         temperature: request.temperature,
       }),
     });
