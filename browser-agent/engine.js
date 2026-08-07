@@ -3,6 +3,7 @@
 // text-generation. Intended to run inside ort-worker.js (Dedicated Worker).
 
 import { applyIndexedDbCache, clearModelCache, deleteModelFromCache, listCachedFiles } from "./model-cache.js";
+import { isQwen3ThinkingModel } from "./reasoning-content.js";
 
 const VENDOR_DIR = "vendor/transformers/";
 // transformers.js ≥4 uses asyncify for WebGPU (exports webgpuInit).
@@ -134,7 +135,11 @@ export const MODEL_REGISTRY = [
   // LLM — ordered smallest → largest for OOM downshift
   // pipeline_tag matches Hugging Face model-card metadata (display + Hub taxonomy).
   { id: "onnx-community/Llama-3.2-1B-Instruct-ONNX", label: "Llama 3.2 1B", approxSizeMB: 700, tier: "fast", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
-  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1000, tier: "fast", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
+  // Pinned to CPU EP (wasm) + q8: WebGPU's KV-cache carry-over corrupts this model's
+  // output within the first few generated tokens (confirmed: identical tokenizer +
+  // model.generate() call is clean on plain onnxruntime-node; only onnxruntime-web's
+  // WebGPU path degenerates). q8 is upstream's own CPU default dtype.
+  { id: "onnx-community/Qwen2.5-1.5B-Instruct", label: "Qwen 2.5 1.5B", approxSizeMB: 1580, dtype: "q8", forceCpu: true, tier: "fast", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
   { id: "onnx-community/Llama-3.2-3B-Instruct-ONNX", label: "Llama 3.2 3B", approxSizeMB: 1800, tier: "default", task: "text-generation", pipeline_tag: "text-generation", modality: "llm" },
   {
     id: "mistralai/Ministral-3-3B-Instruct-2512-ONNX",
@@ -251,7 +256,11 @@ function llmRegistry() {
 
 function dtypeForModel(modelId, device) {
   const entry = registryEntry(modelId);
-  if (entry?.dtype) return entry.dtype;
+  if (entry?.dtype) {
+    // Per-device override (e.g. { webgpu: "q4f16", wasm: "q8" }) vs. a flat string
+    // applied to both devices.
+    return typeof entry.dtype === "object" ? entry.dtype[device] ?? entry.dtype.default : entry.dtype;
+  }
   if (device === "webgpu") return "q4f16";
   return "q4";
 }
@@ -266,6 +275,10 @@ function isWebGpuBlockedQuant(dtypeName) {
  * q2f16 mobile weights must use the CPU EP even when WebGPU runtime is loaded.
  */
 function sessionDeviceForModel(modelId, preferredDevice) {
+  if (preferredDevice === "webgpu" && registryEntry(modelId)?.forceCpu) {
+    console.warn(`[onnx] ${modelId} is pinned to CPU EP (WebGPU KV-cache corruption); using CPU EP`);
+    return "wasm";
+  }
   const dt = dtypeForModel(modelId, preferredDevice);
   if (preferredDevice === "webgpu" && isWebGpuBlockedQuant(dt)) {
     console.warn(
@@ -561,6 +574,10 @@ export async function deleteModel(modelId) {
   return { ...(await status()), removed };
 }
 
+function requestPeerUnload(peer, msg) {
+  self.postMessage({ type: "engine.unloadPeer", peer, msg });
+}
+
 async function disposeEntry(entry) {
   try {
     if (entry?.model?.dispose) await entry.model.dispose();
@@ -594,6 +611,14 @@ export async function unload(opts) {
     if (model && entry.modelId !== model) continue;
     await disposeEntry(entry);
     loaded.delete(key);
+  }
+  return status();
+}
+
+/** Unload chat LLM pipelines only (keep vision/audio for agent tools). */
+export async function unloadLlm() {
+  for (const llmTask of LLM_TASKS) {
+    await unload({ task: llmTask });
   }
   return status();
 }
@@ -634,6 +659,7 @@ export async function loadModel(modelOrOpts) {
   }
   // Only one LLM pipeline at a time (text or vision-language).
   if (isLlmTask(task)) {
+    requestPeerUnload("webllm-engine", { type: "engine.unload" });
     for (const llmTask of LLM_TASKS) {
       if (llmTask === task) continue;
       await unload({ task: llmTask });
@@ -700,7 +726,7 @@ export async function loadModel(modelOrOpts) {
       };
       if (task === TEXT_GENERATION) pipelineOpts.dtype = modelDtype;
       const pipe = await pipeline(task, modelId, pipelineOpts);
-      entry = { kind: "pipeline", pipeline: pipe, task, modelId, forceCpuEp };
+      entry = { kind: "pipeline", pipeline: pipe, task, modelId, forceCpuEp, sessionDevice, modelDtype };
     }
   } catch (err) {
     const message = String(err?.message || err);
@@ -887,7 +913,7 @@ async function invokeGemma4(entry, input, options) {
   const { messages, imageSources } = toGemmaMessages(rawMessages);
 
   const templateOpts = {
-    enable_thinking: false,
+    enable_thinking: options.enable_thinking !== false,
     add_generation_prompt: true,
   };
   if (options?.tools?.length) templateOpts.tools = options.tools;
@@ -922,16 +948,22 @@ async function invokeGemma4(entry, input, options) {
 async function invokeEntry(entry, task, input, options) {
   if (entry?.kind === "gemma4") return invokeGemma4(entry, input, options);
   if (entry?.kind === "ministral") return invokeMinistral(entry, input, options);
-  if (task === TEXT_GENERATION) return invokeTextLlm(entry.pipeline, input, options);
+  if (task === TEXT_GENERATION) return invokeTextLlm(entry.pipeline, input, options, entry);
   return invokePipeline(entry.pipeline, task, input, options);
 }
 
+/** Some HF chat templates accept enable_thinking (Qwen3 family). */
+function templateThinkingExtra(modelId, thinkingEnabled) {
+  if (!isQwen3ThinkingModel(modelId) && !/qwen3/i.test(modelId || "")) return {};
+  return { enable_thinking: thinkingEnabled };
+}
+
 /** Render the chat-template string the tokenizer would feed the model (for Dialogue raw view). */
-function renderChatPrompt(pipe, input, tools) {
+function renderChatPrompt(pipe, input, tools, templateExtra = {}) {
   try {
     const tokenizer = pipe?.tokenizer;
     if (tokenizer?.apply_chat_template && Array.isArray(input)) {
-      const opts = { tokenize: false, add_generation_prompt: true };
+      const opts = { tokenize: false, add_generation_prompt: true, ...templateExtra };
       if (tools?.length) opts.tools = tools;
       return tokenizer.apply_chat_template(input, opts);
     }
@@ -964,7 +996,7 @@ function tokenizeUsage(tokenizer, prompt, generatedText) {
  * is sliced by token index (like Gemma 4). TextGenerationPipeline strips the prompt
  * by decoded string length, which corrupts Qwen/Llama outputs that use chat tokens.
  */
-async function invokeTextLlm(pipe, input, options) {
+async function invokeTextLlm(pipe, input, options, entry) {
   const { model, tokenizer } = pipe;
   if (!model || !tokenizer) {
     throw new Error("Text-generation pipeline is missing model or tokenizer");
@@ -973,7 +1005,8 @@ async function invokeTextLlm(pipe, input, options) {
   const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
   const temperature = options.temperature ?? 0.2;
   const tools = options?.tools?.length ? options.tools : undefined;
-  const prompt = renderChatPrompt(pipe, input, tools);
+  const templateExtra = templateThinkingExtra(entry?.id ?? entry?.model, options.enable_thinking !== false);
+  const prompt = renderChatPrompt(pipe, input, tools, templateExtra);
   const promptText =
     typeof prompt === "string" ? prompt : typeof input === "string" ? input : null;
   if (!promptText) {
@@ -981,18 +1014,47 @@ async function invokeTextLlm(pipe, input, options) {
   }
 
   const inputs = tokenizer(promptText, { add_special_tokens: false });
+  // TEMP diagnostics for the Qwen hang investigation — remove once root-caused.
+  const diagStart = Date.now();
+  let diagStepCount = 0;
+  const diagStreamer = {
+    put(ids) {
+      diagStepCount++;
+      const flat = Array.isArray(ids) ? ids.flat(2) : ids;
+      console.log(`[onnx][diag] +${Date.now() - diagStart}ms step=${diagStepCount} ids=${flat.map(String).join(",")}`);
+    },
+    end() {
+      console.log(`[onnx][diag] stream end after ${Date.now() - diagStart}ms, ${diagStepCount} put() calls`);
+    },
+  };
   const outputs = await model.generate({
     ...inputs,
     max_new_tokens: maxNewTokens,
     temperature,
     do_sample: temperature > 0,
+    streamer: diagStreamer,
     top_p: options.top_p ?? DEFAULT_TOP_P,
   });
   const promptLen = inputs.input_ids.dims.at(-1);
   const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
-  const decoded = tokenizer.batch_decode(outputs.slice(null, [promptLen, null]), {
+  const completionSlice = outputs.slice(null, [promptLen, null]);
+  const decoded = tokenizer.batch_decode(completionSlice, {
     skip_special_tokens: true,
   });
+  // TEMP diagnostics for the Qwen garbling investigation — remove once root-caused.
+  try {
+    const ids = Array.from(completionSlice.data ?? completionSlice.ort_tensor?.data ?? []);
+    const eos = model.generation_config?.eos_token_id;
+    console.log(
+      `[onnx][diag] device=${entry?.sessionDevice} dtype=${entry?.modelDtype} vocab_size=${model.config?.vocab_size} ` +
+        `promptLen=${promptLen} completionLen=${completionLen} eos_token_id=${JSON.stringify(eos)}`
+    );
+    console.log(`[onnx][diag] first 40 completion ids: ${ids.slice(0, 40).join(",")}`);
+    console.log(`[onnx][diag] last 20 completion ids: ${ids.slice(-20).join(",")}`);
+    console.log(`[onnx][diag] raw decoded (no skip_special_tokens): ${JSON.stringify(tokenizer.batch_decode(completionSlice, { skip_special_tokens: false })?.[0]?.slice(0, 400))}`);
+  } catch (diagErr) {
+    console.warn("[onnx][diag] failed:", diagErr);
+  }
   return [
     {
       generated_text: decoded?.[0] ?? "",
@@ -1097,12 +1159,13 @@ async function runRenderChatPromptOnly(request) {
     return { prompt: null };
   }
 
-  const prompt = renderPromptFromEntry(entryOrErr, messages, tools);
+  const prompt = renderPromptFromEntry(entryOrErr, messages, tools, request);
   return { prompt: typeof prompt === "string" ? prompt : null };
 }
 
-function renderPromptFromEntry(entry, messages, tools) {
+function renderPromptFromEntry(entry, messages, tools, request) {
   const toolsOpt = tools?.length ? tools : undefined;
+  const thinkingEnabled = request?.thinkingEnabled !== false;
   if (entry?.kind === "gemma4" || entry?.kind === "ministral") {
     const { processor } = entry;
     if (!processor?.apply_chat_template) return null;
@@ -1110,7 +1173,7 @@ function renderPromptFromEntry(entry, messages, tools) {
     const { messages: gemmaMsgs } = toGemmaMessages(rawMessages);
     const templateOpts = { add_generation_prompt: true };
     if (toolsOpt) templateOpts.tools = toolsOpt;
-    if (entry.kind === "gemma4") templateOpts.enable_thinking = false;
+    if (entry.kind === "gemma4") templateOpts.enable_thinking = thinkingEnabled;
     try {
       return processor.apply_chat_template(gemmaMsgs, templateOpts);
     } catch (err) {
@@ -1118,7 +1181,9 @@ function renderPromptFromEntry(entry, messages, tools) {
       return null;
     }
   }
-  return renderChatPrompt(entry?.pipeline, messages, toolsOpt);
+  const modelId = request?.model ?? entry?.id;
+  const templateExtra = templateThinkingExtra(modelId, thinkingEnabled);
+  return renderChatPrompt(entry?.pipeline, messages, toolsOpt, templateExtra);
 }
 
 async function runChatCompletions(request) {
@@ -1126,6 +1191,7 @@ async function runChatCompletions(request) {
   if (!modelId) return errorResponse("No model specified.", "model_not_loaded");
 
   const task = registryEntry(modelId)?.task || TEXT_GENERATION;
+  const thinkingEnabled = request.thinkingEnabled !== false;
   const result = await runInference({
     task,
     model: modelId,
@@ -1133,6 +1199,7 @@ async function runChatCompletions(request) {
     options: {
       max_new_tokens: request.max_tokens ?? 512,
       temperature: request.temperature ?? 0.2,
+      enable_thinking: thinkingEnabled,
       ...(Array.isArray(request.tools) && request.tools.length ? { tools: request.tools } : {}),
     },
   });

@@ -14,8 +14,9 @@
 
 **Non-goals (do not build)**
 - No custom Python/Node servers.
-- No WebLLM/TVM integration (may come later; keep provider layer open).
 - No provider-native tool calling — the agent keeps its plain-JSON tool protocol.
+
+(WebLLM in-browser chat provider was added later; see `webllm-engine.js` and Settings → Built-in (WebLLM, WebGPU).)
 
 ---
 

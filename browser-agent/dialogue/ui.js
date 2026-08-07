@@ -485,7 +485,9 @@ function renderDialoguePromptPanel(panel, raw) {
 }
 
 function renderDialogueRawJsonTree(container, raw) {
-  mountCollapsibleJsonTree(container, extractDialogueRawPayload(raw));
+  mountCollapsibleJsonTree(container, extractDialogueRawPayload(raw), {
+    collapsedKeys: ["reasoning", "thinking", "reasoning_content"],
+  });
 }
 
 async function getDialogueInputPreviewPayloadForEdit() {
@@ -1096,6 +1098,42 @@ function formatAssistantDisplayContent(msg, choice) {
   return "(empty response)";
 }
 
+function assistantReasoningFromMessage(msg) {
+  return typeof msg?.reasoning === "string" ? msg.reasoning.trim() : "";
+}
+
+function appendDialogueThinkingBlock(bubble, reasoning) {
+  if (!reasoning) return;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "dialogue-thinking-toggle";
+  toggle.textContent = "Show thinking";
+
+  const wrap = document.createElement("div");
+  wrap.className = "dialogue-thinking-wrap hidden";
+
+  const pre = document.createElement("pre");
+  pre.className = "dialogue-thinking-content";
+  pre.textContent = reasoning;
+  wrap.appendChild(pre);
+
+  toggle.addEventListener("click", () => {
+    wrap.classList.toggle("hidden");
+    toggle.textContent = wrap.classList.contains("hidden") ? "Show thinking" : "Hide thinking";
+  });
+
+  bubble.appendChild(toggle);
+  bubble.appendChild(wrap);
+}
+
+function assistantTurnFromCompletion(msg, choice) {
+  return {
+    role: "assistant",
+    content: formatAssistantDisplayContent(msg, choice),
+    ...(assistantReasoningFromMessage(msg) ? { reasoning: assistantReasoningFromMessage(msg) } : {}),
+  };
+}
+
 function formatDialogueTokenCount(n) {
   if (n == null) return null;
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
@@ -1107,14 +1145,14 @@ function dialogueContextLimit(est) {
   return est.effectiveMaxContext ?? est.trainedMaxContext ?? null;
 }
 
-/** Reflects `dialogueLastUsage`/`dialogueContextEstimate` into the bar under the input. ONNX only. */
+/** Reflects context usage into the bar under the input (local ONNX / WebLLM). */
 function renderDialogueContextBar() {
   const bar = $("#dialogue-context-bar");
   if (!bar) return;
   const provider = getSettings().provider || "onnx";
   const est = dialogueContextEstimate;
   const limit = dialogueContextLimit(est);
-  if (provider !== "onnx" || !est || est.error || limit == null) {
+  if ((provider !== "onnx" && provider !== "webllm") || !est || est.error || limit == null) {
     bar.classList.add("hidden");
     return;
   }
@@ -1128,7 +1166,7 @@ function renderDialogueContextBar() {
     est.effectiveMaxContext != null && est.trainedMaxContext != null && est.effectiveMaxContext < est.trainedMaxContext;
   fill.classList.toggle("warn", pct >= 90 || (memoryBinds && pct >= 75));
 
-  const wasmCap = est.bindingConstraint === "wasm" ? ", WASM 4GB cap" : "";
+  const wasmCap = provider === "onnx" && est.bindingConstraint === "wasm" ? ", WASM 4GB cap" : "";
   const limitLabel = memoryBinds
     ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)}${wasmCap})`
     : `${formatDialogueTokenCount(limit)} tokens`;
@@ -1136,16 +1174,16 @@ function renderDialogueContextBar() {
   bar.title = (est.caveats || []).join("\n");
 }
 
-/** Fetch (once per model id) the ONNX context estimate for the active dialogue model, then render. */
+/** Fetch context estimate for the active local dialogue model, then render. */
 async function refreshDialogueContextEstimate() {
   const provider = getSettings().provider || "onnx";
-  if (provider !== "onnx") {
+  if (provider !== "onnx" && provider !== "webllm") {
     dialogueContextEstimate = null;
     dialogueContextEstimateModelId = null;
     renderDialogueContextBar();
     return;
   }
-  const modelId = getSettings().onnxModel || "";
+  const modelId = provider === "webllm" ? getSettings().webllmModel || "" : getSettings().onnxModel || "";
   if (!modelId) {
     dialogueContextEstimate = null;
     dialogueContextEstimateModelId = null;
@@ -1157,7 +1195,8 @@ async function refreshDialogueContextEstimate() {
     return;
   }
   try {
-    const est = await sendMessage({ type: "onnx.relay", engineType: "engine.contextEstimate", model: modelId });
+    const relay = provider === "webllm" ? "webllm.relay" : "onnx.relay";
+    const est = await sendMessage({ type: relay, engineType: "engine.contextEstimate", model: modelId });
     dialogueContextEstimate = est || null;
     dialogueContextEstimateModelId = modelId;
   } catch {
@@ -1190,6 +1229,24 @@ async function refreshDialogueModelSelect() {
       llmModels().find((m) => m.tier === "default")?.id ||
       options[0]?.id ||
       "";
+  } else if (provider === "webllm") {
+    if (getRegistry().length === 0) {
+      try {
+        const modelsRes = await sendMessage({ type: "webllm.relay", engineType: "engine.models" });
+        if (modelsRes?.models?.length) setRegistry(modelsRes.models);
+      } catch {
+        // engine may not be started yet
+      }
+    }
+    options = llmModels().map((m) => ({
+      id: m.id,
+      label: `${m.label} (${m.approxSizeMB >= 1000 ? `~${(m.approxSizeMB / 1000).toFixed(1)} GB` : `~${m.approxSizeMB} MB`})`,
+    }));
+    selected =
+      getSettings().webllmModel ||
+      llmModels().find((m) => m.tier === "default")?.id ||
+      options[0]?.id ||
+      "";
   } else if (provider === "ollama") {
     options = await listOllamaModels();
     selected = getSettings().model || options[0]?.id || "";
@@ -1206,7 +1263,7 @@ async function refreshDialogueModelSelect() {
     const opt = document.createElement("option");
     opt.value = "";
     opt.textContent =
-      provider === "onnx"
+      provider === "onnx" || provider === "webllm"
         ? "No models — open Settings"
         : provider === "ollama"
           ? "No Ollama models found"
@@ -1217,7 +1274,7 @@ async function refreshDialogueModelSelect() {
     return;
   }
 
-  select.disabled = provider !== "onnx" && provider !== "ollama";
+  select.disabled = provider !== "onnx" && provider !== "webllm" && provider !== "ollama";
   if (!options.some((o) => o.id === selected) && selected) {
     options = [{ id: selected, label: selected.split("/").pop() }, ...options];
   }
@@ -1241,11 +1298,16 @@ async function onDialogueModelChange(e) {
   const modelId = select.value;
   if (!modelId) return;
   const provider = getSettings().provider || "onnx";
-  const previous = provider === "onnx" ? getSettings().onnxModel || "" : getSettings().model || "";
+  const previous =
+    provider === "onnx"
+      ? getSettings().onnxModel || ""
+      : provider === "webllm"
+        ? getSettings().webllmModel || ""
+        : getSettings().model || "";
 
   if (provider === "onnx") {
     if (!getDownloadedModels()[modelId]) {
-      if (!confirmOnnxDownload(modelId)) {
+      if (!confirmLocalModelDownload(modelId)) {
         select.value = previous;
         return;
       }
@@ -1253,6 +1315,15 @@ async function onDialogueModelChange(e) {
     await saveSettings({ onnxModel: modelId });
     const entry = llmModels().find((m) => m.id === modelId);
     startDownload(modelId, entry?.task || "text-generation");
+  } else if (provider === "webllm") {
+    if (!getDownloadedModels()[modelId]) {
+      if (!confirmLocalModelDownload(modelId)) {
+        select.value = previous;
+        return;
+      }
+    }
+    await saveSettings({ webllmModel: modelId });
+    startDownload(modelId);
   } else {
     await saveSettings({ model: modelId });
     const modelInput = $("#model-name");
@@ -1262,13 +1333,22 @@ async function onDialogueModelChange(e) {
 }
 
 /** Ask before fetching weights that are not yet in IndexedDB. */
-function confirmOnnxDownload(modelId) {
+function confirmLocalModelDownload(modelId) {
   const entry = getRegistry().find((m) => m.id === modelId);
   const label = entry?.label || modelId.split("/").pop();
-  const meta = entry ? modelMetaLabel(entry) : "unknown size";
+  const meta = entry
+    ? entry.contextWindow
+      ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
+      : modelMetaLabel(entry)
+    : "unknown size";
   return confirm(
     `"${label}" is not downloaded yet (${meta}).\n\nDownload it now? This uses the network and may take a few minutes.`
   );
+}
+
+/** @deprecated use confirmLocalModelDownload */
+function confirmOnnxDownload(modelId) {
+  return confirmLocalModelDownload(modelId);
 }
 
 /** Whether the current dialogue model can take image input. */
@@ -1404,6 +1484,7 @@ function renderDialogue() {
       text.textContent = turn.content;
       bubble.appendChild(text);
     }
+    if (turn.reasoning) appendDialogueThinkingBlock(bubble, turn.reasoning);
 
     if (turn.raw) appendDialogueRawPanel(bubble, turn.raw);
 
@@ -1521,7 +1602,10 @@ async function sendDialogue() {
 
   const provider = getSettings().provider || "onnx";
   if (provider === "onnx" && getSettings().onnxModel && !getDownloadedModels()[getSettings().onnxModel]) {
-    if (!confirmOnnxDownload(getSettings().onnxModel)) return;
+    if (!confirmLocalModelDownload(getSettings().onnxModel)) return;
+  }
+  if (provider === "webllm" && getSettings().webllmModel && !getDownloadedModels()[getSettings().webllmModel]) {
+    if (!confirmLocalModelDownload(getSettings().webllmModel)) return;
   }
 
   userTurn.raw = snapshotDialogueRawInput(messages, tools);
@@ -1559,8 +1643,7 @@ async function sendDialogue() {
       const calls = normalizeAssistantToolCalls(msg, tools);
       if (!calls.length) {
         dialogueTurns.push({
-          role: "assistant",
-          content: formatAssistantDisplayContent(msg, choice),
+          ...assistantTurnFromCompletion(msg, choice),
           raw: buildDialogueRawFromCompletion(inputRaw, res),
         });
         gotAssistantReply = true;
@@ -1615,11 +1698,10 @@ async function sendDialogue() {
       }
       const finalChoice = res.choices?.[0] ?? {};
       const finalMsg = finalChoice.message ?? {};
-      let content = formatAssistantDisplayContent(finalMsg, finalChoice);
-      if (content === "(empty response)") content = "(stopped: tool round limit)";
+      let turn = assistantTurnFromCompletion(finalMsg, finalChoice);
+      if (turn.content === "(empty response)") turn = { ...turn, content: "(stopped: tool round limit)" };
       dialogueTurns.push({
-        role: "assistant",
-        content,
+        ...turn,
         raw: buildDialogueRawFromCompletion(inputRaw, res),
       });
     }

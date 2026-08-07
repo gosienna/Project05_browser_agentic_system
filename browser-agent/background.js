@@ -143,16 +143,33 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
-async function markModelDownloaded(modelId) {
+async function markOnnxModelDownloaded(modelId) {
   const { onnxModels } = await chrome.storage.local.get("onnxModels");
   await chrome.storage.local.set({ onnxModels: { ...(onnxModels || {}), [modelId]: true } });
+}
+
+async function markWebllmModelDownloaded(modelId) {
+  const { webllmModels } = await chrome.storage.local.get("webllmModels");
+  await chrome.storage.local.set({ webllmModels: { ...(webllmModels || {}), [modelId]: true } });
+}
+
+function resolveChatModel(settings) {
+  const provider = settings?.provider || "onnx";
+  if (provider === "onnx") return settings.onnxModel;
+  if (provider === "webllm") return settings.webllmModel;
+  return settings.model;
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
   if (msg.target === "onnx-model-ready" && msg.model) {
-    markModelDownloaded(msg.model);
+    markOnnxModelDownloaded(msg.model);
+    return;
+  }
+
+  if (msg.target === "webllm-model-ready" && msg.model) {
+    markWebllmModelDownloaded(msg.model);
     return;
   }
 
@@ -190,7 +207,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "dialogue.send") {
     getSettings()
       .then((settings) => {
-        const model = settings.provider === "onnx" ? settings.onnxModel : settings.model;
+        const model = resolveChatModel(settings);
         const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return chatCompletions(
           {
@@ -209,7 +226,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "dialogue.renderPrompt") {
     getSettings()
       .then((settings) => {
-        const model = settings.provider === "onnx" ? settings.onnxModel : settings.model;
+        const model = resolveChatModel(settings);
         const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return renderChatPromptPreview(
           {
@@ -259,7 +276,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       )
       .then(async (res) => {
         const loadedModel = msg.model || msg.request?.model;
-        if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markModelDownloaded(loadedModel);
+        if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markOnnxModelDownloaded(loadedModel);
+        sendResponse(res);
+      })
+      .catch((err) => sendResponse({ error: { message: err.message, type: "engine_error", code: null } }));
+    return true;
+  }
+  if (msg.type === "webllm.relay") {
+    ensureOffscreenDocument()
+      .then(() =>
+        chrome.runtime.sendMessage({
+          target: "webllm-engine",
+          type: msg.engineType,
+          model: msg.model,
+          request: msg.request,
+        })
+      )
+      .then(async (res) => {
+        const loadedModel = msg.model || msg.request?.model;
+        if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markWebllmModelDownloaded(loadedModel);
         sendResponse(res);
       })
       .catch((err) => sendResponse({ error: { message: err.message, type: "engine_error", code: null } }));

@@ -402,6 +402,35 @@
   padding: 0;
   cursor: pointer;
 }
+.dialogue-thinking-toggle {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  background: none;
+  border: none;
+  color: #666;
+  padding: 0;
+  cursor: pointer;
+  font-style: italic;
+}
+.dialogue-thinking-wrap {
+  margin-top: 4px;
+}
+.dialogue-thinking-content {
+  margin: 0;
+  padding: 8px;
+  background: #f6f6f8;
+  border: 1px solid #e4e4ea;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #555;
+  font-style: italic;
+  max-height: 240px;
+  overflow: auto;
+}
 .dialogue-raw-wrap {
   margin-top: 6px;
   display: flex;
@@ -605,6 +634,8 @@
   .dialogue-session-del { border-left-color: #3a3a42; color: #aaa; }
   .dialogue-session-del:hover { background: #3a2531; color: #f48fb1; }
   .dialogue-raw-panel { background: #1f1f24; border-color: #3a3a42; }
+  .dialogue-thinking-toggle { color: #999; }
+  .dialogue-thinking-content { background: #1f1f24; border-color: #3a3a42; color: #aaa; }
   .dialogue-raw-json-root,
   .dialogue-raw-json-edit { background: #1f1f24; border-color: #3a3a42; color: #ddd; }
   .dialogue-json-key { color: #b89ad4; }

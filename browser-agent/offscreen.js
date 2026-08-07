@@ -1,57 +1,95 @@
-// Offscreen shell: owns chrome.runtime messaging and delegates all ORT work to
-// a Dedicated Worker (Atomics.wait is illegal on the window/offscreen main
-// thread and causes "Aborted()" with the threaded ORT WASM build).
+// Offscreen shell: owns chrome.runtime messaging and delegates ORT / WebLLM work to
+// Dedicated Workers (Atomics.wait is illegal on the window/offscreen main thread).
 
-const worker = new Worker(chrome.runtime.getURL("ort-worker.js"), { type: "module" });
-let seq = 0;
-/** @type {Map<number, { resolve: Function, reject: Function }>} */
-const pending = new Map();
-let workerReady = new Promise((resolve) => {
-  const onReady = (event) => {
-    if (event.data?.type === "ort-worker-ready") {
-      worker.removeEventListener("message", onReady);
-      console.log("[onnx] offscreen ↔ ort-worker linked");
-      resolve();
-    }
+const WORKERS = {
+  "onnx-engine": {
+    script: "ort-worker.js",
+    readyType: "ort-worker-ready",
+    label: "onnx",
+  },
+  "webllm-engine": {
+    script: "webllm-worker.js",
+    readyType: "webllm-worker-ready",
+    label: "webllm",
+  },
+};
+
+/** @type {Map<string, { worker: Worker, ready: Promise<void>, pending: Map<number, { resolve: Function }>, seq: number }>} */
+const hosts = new Map();
+
+function createWorkerHost(target) {
+  const spec = WORKERS[target];
+  if (!spec) throw new Error(`Unknown engine target "${target}"`);
+
+  let readyResolve;
+  const ready = new Promise((resolve) => {
+    readyResolve = resolve;
+  });
+
+  const host = {
+    worker: new Worker(chrome.runtime.getURL(spec.script), { type: "module" }),
+    ready,
+    pending: new Map(),
+    seq: 0,
   };
-  worker.addEventListener("message", onReady);
-});
 
-worker.addEventListener("message", (event) => {
-  const data = event.data || {};
+  host.worker.addEventListener("message", (event) => {
+    const data = event.data || {};
 
-  // Worker chrome.* shim → real extension messaging (progress, model-ready).
-  if (data.type === "chrome.runtime.sendMessage") {
-    chrome.runtime.sendMessage(data.message).catch(() => {});
-    return;
-  }
+    if (data.type === spec.readyType) {
+      console.log(`[${spec.label}] offscreen ↔ ${spec.script} linked`);
+      readyResolve();
+      return;
+    }
 
-  const { id, result } = data;
-  if (id == null) return;
-  const waiter = pending.get(id);
-  if (!waiter) return;
-  pending.delete(id);
-  waiter.resolve(result);
-});
+    if (data.type === "chrome.runtime.sendMessage") {
+      chrome.runtime.sendMessage(data.message).catch(() => {});
+      return;
+    }
 
-worker.addEventListener("error", (event) => {
-  console.error("[onnx] ort-worker error:", event.message, event);
-});
+    if (data.type === "engine.unloadPeer") {
+      callWorker(data.peer, data.msg).catch((err) =>
+        console.warn(`[${spec.label}] peer unload ${data.peer}:`, err)
+      );
+      return;
+    }
 
-worker.addEventListener("messageerror", (event) => {
-  console.error("[onnx] ort-worker messageerror:", event);
-});
+    const { id, result } = data;
+    if (id == null) return;
+    const waiter = host.pending.get(id);
+    if (!waiter) return;
+    host.pending.delete(id);
+    waiter.resolve(result);
+  });
 
-function callWorker(msg) {
-  return workerReady.then(
+  host.worker.addEventListener("error", (event) => {
+    console.error(`[${spec.label}] worker error:`, event.message, event);
+  });
+
+  host.worker.addEventListener("messageerror", (event) => {
+    console.error(`[${spec.label}] worker messageerror:`, event);
+  });
+
+  hosts.set(target, host);
+  return host;
+}
+
+function getHost(target) {
+  if (!hosts.has(target)) createWorkerHost(target);
+  return hosts.get(target);
+}
+
+function callWorker(target, msg) {
+  const host = getHost(target);
+  return host.ready.then(
     () =>
       new Promise((resolve, reject) => {
-        const id = ++seq;
-        pending.set(id, { resolve, reject });
+        const id = ++host.seq;
+        host.pending.set(id, { resolve });
         try {
-          worker.postMessage({ id, msg });
+          host.worker.postMessage({ id, msg });
         } catch (err) {
-          pending.delete(id);
+          host.pending.delete(id);
           reject(err);
         }
       })
@@ -59,9 +97,9 @@ function callWorker(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!msg || msg.target !== "onnx-engine") return;
+  if (!msg || (msg.target !== "onnx-engine" && msg.target !== "webllm-engine")) return;
 
-  callWorker(msg)
+  callWorker(msg.target, msg)
     .then(sendResponse)
     .catch((err) =>
       sendResponse({
@@ -71,4 +109,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-console.log("[onnx] offscreen document ready (worker host)");
+console.log("[local-engine] offscreen document ready (ORT + WebLLM worker host)");

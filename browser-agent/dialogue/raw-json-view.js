@@ -1,6 +1,7 @@
 /** Collapsible JSON tree for Dialogue raw I/O panels. */
 
 const DEFAULT_EXPAND_DEPTH = 2;
+const DEFAULT_COLLAPSED_KEYS = new Set(["reasoning", "thinking", "reasoning_content"]);
 
 /** Normalize snapshot/raw shapes into one object for tree display. */
 export function extractDialogueRawPayload(raw) {
@@ -96,7 +97,14 @@ export function mountCollapsibleJsonTree(container, data, options = {}) {
   if (!container) return;
   container.innerHTML = "";
   const depth = options.defaultExpandDepth ?? DEFAULT_EXPAND_DEPTH;
-  const root = buildJsonNode(data, { keyLabel: "root", depth: 0, expandDepth: depth, isRoot: true });
+  const collapsedKeys = new Set(options.collapsedKeys ?? DEFAULT_COLLAPSED_KEYS);
+  const root = buildJsonNode(data, {
+    keyLabel: "root",
+    depth: 0,
+    expandDepth: depth,
+    collapsedKeys,
+    isRoot: true,
+  });
   if (root) container.appendChild(root);
   else {
     const empty = document.createElement("div");
@@ -132,7 +140,8 @@ function buildObjectNode(obj, ctx) {
   }
 
   const keys = Object.keys(obj);
-  const collapsed = ctx.depth >= ctx.expandDepth;
+  const forceCollapsed = !ctx.isRoot && ctx.collapsedKeys?.has(ctx.keyLabel);
+  const collapsed = forceCollapsed || ctx.depth >= ctx.expandDepth;
   if (collapsed) node.classList.add("collapsed");
 
   const row = document.createElement("div");
@@ -176,6 +185,7 @@ function buildObjectNode(obj, ctx) {
       keyLabel: k,
       depth: ctx.depth + 1,
       expandDepth: ctx.expandDepth,
+      collapsedKeys: ctx.collapsedKeys,
       isRoot: false,
     });
     if (child) children.appendChild(child);
@@ -223,6 +233,7 @@ function buildArrayNode(arr, ctx) {
       keyLabel: `[${i}]`,
       depth: ctx.depth + 1,
       expandDepth: ctx.expandDepth,
+      collapsedKeys: ctx.collapsedKeys,
       isRoot: false,
     };
     if (item && typeof item === "object" && !Array.isArray(item) && typeof item.role === "string") {

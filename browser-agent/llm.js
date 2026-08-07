@@ -3,6 +3,7 @@
 
 import { toAnthropicTools } from "./tools/schema.js";
 import { getMaxTokens } from "./agent-config.js";
+import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
@@ -12,21 +13,41 @@ let offscreenReadyPromise = null;
  * @param {object} settings
  * @returns {Promise<object>} OpenAI-shaped chat.completion (or {error} on failure)
  */
+function withThinkingRequest(request, settings) {
+  const thinkingEnabled = isThinkingEnabled(settings);
+  return { ...request, thinkingEnabled };
+}
+
+function finalizeChatCompletion(response, settings) {
+  if (response?.error) return response;
+  return normalizeChatCompletion(response, { thinkingEnabled: isThinkingEnabled(settings) });
+}
+
 export async function chatCompletions(request, settings) {
+  const req = withThinkingRequest(request, settings);
   const provider = settings?.provider || "onnx";
+  let response;
   switch (provider) {
     case "onnx":
-      return onnxChatCompletions(request, settings);
+      response = await onnxChatCompletions(req, settings);
+      break;
+    case "webllm":
+      response = await webllmChatCompletions(req, settings);
+      break;
     case "openai":
     case "openai-compatible":
-      return openaiChatCompletions(request, settings);
+      response = await openaiChatCompletions(req, settings);
+      break;
     case "ollama":
-      return ollamaChatCompletions(request, settings);
+      response = await ollamaChatCompletions(req, settings);
+      break;
     case "anthropic":
-      return anthropicChatCompletions(request, settings);
+      response = await anthropicChatCompletions(req, settings);
+      break;
     default:
       return errorResponse(`Unknown provider "${provider}"`, "engine_error");
   }
+  return finalizeChatCompletion(response, settings);
 }
 
 /** Render chat template without inference (Dialogue input preview). */
@@ -35,6 +56,8 @@ export async function renderChatPromptPreview(request, settings) {
   switch (provider) {
     case "onnx":
       return onnxRenderChatPrompt(request, settings);
+    case "webllm":
+      return { prompt: null };
     case "ollama": {
       const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
       const model = request.model || settings.model || "llama3.2";
@@ -72,7 +95,7 @@ export async function ensureOffscreenDocument() {
       await chrome.offscreen.createDocument({
         url: ONNX_OFFSCREEN_URL,
         reasons: ["WORKERS"],
-        justification: "Run the local ONNX/Transformers.js LLM engine off the service worker.",
+        justification: "Run local ONNX/WebLLM inference engines off the service worker.",
       });
     } catch (err) {
       // "Only a single offscreen document may be created" -> already exists, fine.
@@ -138,6 +161,33 @@ async function onnxRenderChatPrompt(request, settings) {
   } catch (err) {
     console.warn("[onnx] render prompt failed:", err);
     return { prompt: null };
+  }
+}
+
+async function webllmChatCompletions(request, settings) {
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    return errorResponse(`Could not start local engine: ${err.message}`, "engine_error");
+  }
+
+  const model = request.model || settings?.webllmModel;
+  if (!model) {
+    return errorResponse("No WebLLM model selected — open Settings and pick a model to download.", "model_not_loaded");
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      target: "webllm-engine",
+      type: "chat.completions",
+      request: { ...request, model },
+    });
+    if (!response) {
+      return errorResponse("WebLLM engine did not respond (offscreen document may have been evicted).", "engine_error");
+    }
+    return response;
+  } catch (err) {
+    return errorResponse(`WebLLM engine error: ${err.message}`, "engine_error");
   }
 }
 
@@ -213,10 +263,40 @@ function buildOllamaNativeChatBody(model, request) {
     model,
     messages: toOllamaChatMessages(request.messages),
     stream: false,
+    think: request.thinkingEnabled !== false,
     options: { temperature: request.temperature },
   };
   if (request.tools?.length) body.tools = request.tools;
   return body;
+}
+
+function ollamaAssistantMessage(msg) {
+  if (!msg || typeof msg !== "object") return { role: "assistant", content: "" };
+  const out = { role: "assistant", content: msg.content ?? "" };
+  const reasoning = msg.thinking ?? msg.reasoning ?? msg.reasoning_content;
+  if (typeof reasoning === "string" && reasoning.trim()) out.reasoning = reasoning.trim();
+  return out;
+}
+
+function ollamaChatCompletionFromNative(body, model) {
+  return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: ollamaAssistantMessage(body.message),
+        finish_reason: body.done ? "stop" : "length",
+      },
+    ],
+    usage: {
+      prompt_tokens: body.prompt_eval_count ?? 0,
+      completion_tokens: body.eval_count ?? 0,
+      total_tokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
+    },
+  };
 }
 
 /** Rendered chat template via Ollama's _debug_render_only (no inference). */
@@ -256,7 +336,12 @@ function attachOllamaPrompt(response, prompt) {
 async function ollamaChatCompletions(request, settings) {
   const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
   const model = request.model || settings.model || "llama3.2";
-  const v1Body = { ...request, model, stream: false };
+  const v1Body = {
+    ...request,
+    model,
+    stream: false,
+    think: request.thinkingEnabled !== false,
+  };
   const promptPromise = ollamaFetchRenderedPrompt(baseUrl, model, request);
 
   // Prefer Ollama's OpenAI-compatible shim; fall back to native /api/chat on any failure.
@@ -298,27 +383,7 @@ async function ollamaChatCompletions(request, settings) {
     const body = parsed.body;
     if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
     const prompt = await promptPromise;
-    return attachOllamaPrompt(
-      {
-        id: `chatcmpl-${crypto.randomUUID()}`,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: body.message?.content ?? "" },
-            finish_reason: body.done ? "stop" : "length",
-          },
-        ],
-        usage: {
-          prompt_tokens: body.prompt_eval_count ?? 0,
-          completion_tokens: body.eval_count ?? 0,
-          total_tokens: (body.prompt_eval_count ?? 0) + (body.eval_count ?? 0),
-        },
-      },
-      prompt
-    );
+    return attachOllamaPrompt(ollamaChatCompletionFromNative(body, model), prompt);
   } catch (err) {
     return errorResponse(
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,

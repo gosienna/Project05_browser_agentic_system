@@ -27,7 +27,7 @@ The Agent tab is a multi-system workspace. Each **agent system** is stored in In
 
 **Tab access from sandbox:** the sandbox cannot call `chrome.*`. It uses an injected `api` (`listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`) bridged through the host → [`tab-bridge.js`](../browser-agent/tab-bridge.js) in the service worker. Any open tab (active or not) can be targeted by `tabId`.
 
-**Edit components (LLM):** [`system-editor-l2.js`](../browser-agent/system-editor-l2.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel (a restricted single-script variant lives in [`system-editor-l1.js`](../browser-agent/system-editor-l1.js)). Same `chat()` providers as the browser agent (ONNX / Ollama / API).
+**Edit components (LLM):** [`system-editor-l2.js`](../browser-agent/system-editor-l2.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel (a restricted single-script variant lives in [`system-editor-l1.js`](../browser-agent/system-editor-l1.js)). Same `chat()` providers as the browser agent (ONNX / WebLLM / Ollama / API).
 
 ```
 Side panel Agent tab
@@ -96,10 +96,12 @@ export async function runAgent({ task, settings, tools, tabId, onEvent })
 
 **Parameters:**
 - `task` — User's goal (e.g., "search Google for 'AI'")
-- `settings` — LLM provider config (ONNX/OpenAI/Ollama/Anthropic)
+- `settings` — LLM provider config (ONNX/WebLLM/OpenAI/Ollama/Anthropic)
 - `tools` — Object containing browser tool functions
 - `tabId` — ID of the active browser tab
 - `onEvent` — Callback to report progress (`thinking`, `tool_start`, `tool_end`, `final`)
+
+**Local engines:** `onnx` runs Transformers.js in [`engine.js`](../browser-agent/engine.js) (WebGPU or WASM fallback). `webllm` runs MLC [`webllm-engine.js`](../browser-agent/webllm-engine.js) (WebGPU only, faster chat). Vision/audio agent tools (`describe_image`, etc.) always use ONNX even when chat provider is WebLLM. Switching between ONNX and WebLLM chat unloads the other engine's LLM weights to save GPU memory.
 
 **Flow:**
 
@@ -259,7 +261,7 @@ Used by `sidepanel.js` to display agent progress in real-time.
 | read_page truncation | 14,000 chars | Large pages get condensed |
 | fetch_url truncation | 12,000 chars | URL content limited |
 | Transcript truncation | 8,000 chars | Individual results capped in history |
-| Model dependency | Any via `chat()` | ONNX/OpenAI/Ollama/Anthropic supported |
+| Model dependency | Any via `chat()` | ONNX/WebLLM/OpenAI/Ollama/Anthropic supported |
 
 **Gotcha:** Truncation happens *per-result*, so a 14,000-char page is added to history as 8,000 chars, then next tool result gets another 8,000, etc. Full history can still grow large over 14 steps.
 

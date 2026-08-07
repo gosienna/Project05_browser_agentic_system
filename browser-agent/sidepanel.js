@@ -23,7 +23,9 @@ const $ = (sel) => document.querySelector(sel);
 
 let settings = {};
 let registry = [];
+let webllmRegistry = [];
 let downloadedModels = {};
+let downloadedWebllmModels = {};
 let agentPort = null;
 let editorPort = null;
 let running = false;
@@ -52,11 +54,12 @@ async function init() {
     sendMessage,
     getSettings: () => settings,
     saveSettings,
-    getRegistry: () => registry,
+    getRegistry: () => (settings.provider === "webllm" ? webllmRegistry : registry),
     setRegistry: (models) => {
-      registry = models;
+      if (settings.provider === "webllm") webllmRegistry = models;
+      else registry = models;
     },
-    getDownloadedModels: () => downloadedModels,
+    getDownloadedModels: () => (settings.provider === "webllm" ? downloadedWebllmModels : downloadedModels),
     llmModels,
     modelMetaLabel,
     startDownload,
@@ -67,7 +70,8 @@ async function init() {
   wireHistory();
 
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.target === "onnx-progress") onProgress(msg);
+    if (msg?.target === "onnx-progress") onOnnxProgress(msg);
+    if (msg?.target === "webllm-progress") onWebllmProgress(msg);
     if (msg?.type === "system.reload" && msg.systemId === currentSystemId) {
       reloadHomeFrame();
     }
@@ -121,6 +125,7 @@ function wireSettingsModal() {
 function openSettingsModal() {
   $("#settings-modal").classList.remove("hidden");
   if (settings.provider === "onnx") refreshOnnxSettings();
+  if (settings.provider === "webllm") refreshWebllmSettings();
 }
 
 function closeSettingsModal() {
@@ -135,7 +140,14 @@ function wireOnboarding() {
     $("#onboarding").classList.add("hidden");
     openSettingsModal();
     await refreshOnnxSettings();
-    startDownload("onnx-community/Qwen2.5-1.5B-Instruct", "text-generation");
+    startOnnxDownload("onnx-community/Qwen2.5-1.5B-Instruct", "text-generation");
+  });
+  $("#ob-webllm").addEventListener("click", async () => {
+    await saveSettings({ provider: "webllm", webllmModel: "Llama-3.2-3B-Instruct-q4f16_1-MLC" });
+    $("#onboarding").classList.add("hidden");
+    openSettingsModal();
+    await refreshWebllmSettings();
+    startWebllmDownload("Llama-3.2-3B-Instruct-q4f16_1-MLC");
   });
   $("#ob-ollama").addEventListener("click", async () => {
     await saveSettings({ provider: "ollama", baseUrl: "http://127.0.0.1:11434", model: "llama3.2" });
@@ -176,7 +188,15 @@ async function probeOllama() {
 
 function wireSettingsForm() {
   $("#provider-select").addEventListener("change", async (e) => {
-    await saveSettings({ provider: e.target.value });
+    const prev = settings.provider || "onnx";
+    const next = e.target.value;
+    await saveSettings({ provider: next });
+    if (prev === "onnx" && next !== "onnx") {
+      await sendMessage({ type: "onnx.relay", engineType: "engine.unloadLlm" });
+    }
+    if (prev === "webllm" && next !== "webllm") {
+      await sendMessage({ type: "webllm.relay", engineType: "engine.unload" });
+    }
     applySettingsToForm();
   });
   $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value }));
@@ -192,6 +212,9 @@ function wireSettingsForm() {
     e.target.value = n;
     saveSettings({ maxTokens: n });
   });
+  $("#enable-thinking-input")?.addEventListener("change", (e) => {
+    saveSettings({ enableThinking: e.target.checked });
+  });
   $("#tavily-api-key").addEventListener("change", (e) => saveSettings({ tavilyApiKey: e.target.value.trim() }));
   $("#onnx-unload-btn").addEventListener("click", async () => {
     await sendMessage({ type: "onnx.relay", engineType: "engine.unload" });
@@ -204,6 +227,17 @@ function wireSettingsForm() {
     downloadedModels = {};
     await refreshOnnxSettings();
   });
+  $("#webllm-unload-btn").addEventListener("click", async () => {
+    await sendMessage({ type: "webllm.relay", engineType: "engine.unload" });
+    await refreshWebllmSettings();
+  });
+  $("#webllm-clear-cache-btn").addEventListener("click", async () => {
+    if (!confirm("Delete all cached WebLLM model weights from IndexedDB? You'll need to re-download models.")) return;
+    await sendMessage({ type: "webllm.relay", engineType: "engine.clearCache" });
+    await chrome.storage.local.set({ webllmModels: {} });
+    downloadedWebllmModels = {};
+    await refreshWebllmSettings();
+  });
   $("#test-connection-btn").addEventListener("click", testConnection);
 }
 
@@ -214,19 +248,26 @@ function applySettingsToForm() {
   $("#model-name").value = settings.model || "";
   $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
   $("#max-tokens-input").value = getMaxTokens(settings);
+  const thinkingCb = $("#enable-thinking-input");
+  if (thinkingCb) thinkingCb.checked = settings.enableThinking !== false;
   $("#tavily-api-key").value = settings.tavilyApiKey || "";
   const webSearchCb = $("#dialogue-web-search-enabled");
   if (webSearchCb) webSearchCb.checked = settings.dialogueWebSearch !== false;
   const browserToolsCb = $("#dialogue-browser-tools-enabled");
   if (browserToolsCb) browserToolsCb.checked = settings.dialogueBrowserTools !== false;
 
-  const isOnnx = (settings.provider || "onnx") === "onnx";
+  const provider = settings.provider || "onnx";
+  const isOnnx = provider === "onnx";
+  const isWebllm = provider === "webllm";
+  const isLocal = isOnnx || isWebllm;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
-  $("#remote-settings").classList.toggle("hidden", isOnnx);
+  $("#webllm-settings").classList.toggle("hidden", !isWebllm);
+  $("#remote-settings").classList.toggle("hidden", isLocal);
   if (isOnnx) refreshOnnxSettings();
+  if (isWebllm) refreshWebllmSettings();
   const noteEl = $("#remote-context-note");
   if (noteEl) {
-    noteEl.textContent = isOnnx
+    noteEl.textContent = isLocal
       ? ""
       : settings.provider === "ollama"
         ? "Context-length estimate not available: the extension can't see the Ollama host machine's memory or read the served model's config from here."
@@ -301,6 +342,111 @@ async function refreshOnnxSettings() {
   dialoguePanel?.onSettingsChanged();
 }
 
+async function refreshWebllmSettings() {
+  const { webllmModels } = await chrome.storage.local.get("webllmModels");
+  downloadedWebllmModels = webllmModels || {};
+
+  const statusRes = await sendMessage({ type: "webllm.relay", engineType: "engine.status" });
+  if (statusRes?.error) {
+    $("#webllm-device").textContent = "Device: not started yet";
+    $("#webllm-cache-hint").textContent = "";
+  } else {
+    const deviceLabel =
+      statusRes.device === "webgpu"
+        ? "GPU (WebGPU)"
+        : statusRes.device === "unavailable"
+          ? "WebGPU unavailable"
+          : "unknown";
+    $("#webllm-device").textContent = `Device: ${deviceLabel}`;
+    const cached = statusRes.cachedModels || [];
+    webllmRegistry = statusRes.registry || webllmRegistry;
+    const catalogCount = webllmRegistry.length || statusRes.registry?.length || 0;
+    $("#webllm-cache-hint").textContent = cached.length
+      ? `IndexedDB cache: ${cached.length} model(s) cached · ${catalogCount} in catalog`
+      : catalogCount
+        ? `${catalogCount} models in catalog (IndexedDB cache empty)`
+        : "IndexedDB cache: empty";
+    lastKnownDevice = statusRes.device === "webgpu" ? "webgpu" : lastKnownDevice;
+    renderModelBadge();
+  }
+
+  if (webllmRegistry.length === 0) {
+    const modelsRes = await sendMessage({ type: "webllm.relay", engineType: "engine.models" });
+    webllmRegistry = modelsRes?.models || [];
+  }
+
+  if (webllmRegistry.length && settings.webllmModel && !webllmRegistry.some((m) => m.id === settings.webllmModel)) {
+    await saveSettings({ webllmModel: null });
+  }
+
+  const loadedModel = statusRes?.loadedModel || null;
+  renderWebllmRegistry(loadedModel);
+  dialoguePanel?.onSettingsChanged();
+}
+
+function webllmMetaLabel(entry) {
+  if (!entry) return "";
+  const ctx = entry.contextWindow ? `${formatTokenCount(entry.contextWindow)} ctx` : "";
+  const tier = entry.tier ? entry.tier : "";
+  return [tier, ctx, sizeLabel(entry.approxSizeMB)].filter(Boolean).join(" · ");
+}
+
+function renderWebllmRegistry(loadedModel) {
+  const list = $("#webllm-registry");
+  if (!list) return;
+  list.innerHTML = "";
+  const models = webllmRegistry;
+  const selectedId = settings.webllmModel || models.find((m) => m.tier === "default")?.id || models[0]?.id;
+
+  for (const m of models) {
+    const li = document.createElement("li");
+    li.className = m.id === selectedId ? "selected" : "";
+    const isDownloaded = !!downloadedWebllmModels[m.id];
+    li.innerHTML = `
+      <span class="model-info">
+        <span class="model-name">${m.label}</span>
+        <small class="model-meta">${webllmMetaLabel(m)}</small>
+      </span>
+      <span class="badge ${isDownloaded ? "downloaded" : ""}">${isDownloaded ? "Downloaded" : "Not downloaded"}</span>
+    `;
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
+    const btn = document.createElement("button");
+    btn.textContent = m.id === loadedModel ? "Loaded" : isDownloaded ? "Load" : "Download";
+    btn.disabled = m.id === loadedModel;
+    btn.addEventListener("click", async () => {
+      await saveSettings({ webllmModel: m.id });
+      startWebllmDownload(m.id);
+      renderWebllmRegistry(loadedModel);
+    });
+    actions.appendChild(btn);
+    if (isDownloaded) {
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.className = "danger";
+      delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete cached weights for ${m.label}?`)) return;
+        delBtn.disabled = true;
+        const res = await sendMessage({ type: "webllm.relay", engineType: "engine.deleteModel", model: m.id });
+        if (res?.error) {
+          delBtn.disabled = false;
+          alert(`Delete failed: ${res.error.message}`);
+          return;
+        }
+        const { webllmModels } = await chrome.storage.local.get("webllmModels");
+        const next = { ...(webllmModels || {}) };
+        delete next[m.id];
+        await chrome.storage.local.set({ webllmModels: next });
+        downloadedWebllmModels = next;
+        await refreshWebllmSettings();
+      });
+      actions.appendChild(delBtn);
+    }
+    li.appendChild(actions);
+    list.appendChild(li);
+  }
+}
+
 function sizeLabel(mb) {
   if (mb >= 1000) return `~${(mb / 1000).toFixed(1)} GB`;
   return `~${mb} MB`;
@@ -368,6 +514,7 @@ function llmLoadedModel(loadedByTask) {
 }
 
 function llmModels() {
+  if (settings.provider === "webllm") return webllmRegistry;
   return registry.filter((m) => m.modality === "llm");
 }
 
@@ -413,7 +560,7 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel, { modalit
     btn.disabled = m.id === loadedModel;
     btn.addEventListener("click", async () => {
       await saveSettings({ [settingsKey]: m.id });
-      startDownload(m.id, m.task || "text-generation");
+      startOnnxDownload(m.id, m.task || "text-generation");
       renderRegistrySection(listId, task, settingsKey, loadedModel, { modality });
     });
     actions.appendChild(btn);
@@ -446,6 +593,11 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel, { modalit
 }
 
 function startDownload(modelId, task) {
+  if ((settings.provider || "onnx") === "webllm") startWebllmDownload(modelId);
+  else startOnnxDownload(modelId, task);
+}
+
+function startOnnxDownload(modelId, task) {
   $("#onnx-progress-wrap").classList.remove("hidden");
   $("#onnx-progress-label").textContent = `Loading ${modelId}…`;
   const payload = { type: "onnx.relay", engineType: "engine.load", model: modelId };
@@ -469,12 +621,39 @@ function startDownload(modelId, task) {
     });
 }
 
-function onProgress(event) {
+function startWebllmDownload(modelId) {
+  $("#webllm-progress-wrap").classList.remove("hidden");
+  $("#webllm-progress-label").textContent = `Loading ${modelId}…`;
+  sendMessage({ type: "webllm.relay", engineType: "engine.load", model: modelId })
+    .then(async (res) => {
+      if (res?.error) {
+        $("#webllm-progress-fill").style.width = "0%";
+        $("#webllm-progress-label").textContent = `✗ ${res.error.message}`;
+      } else {
+        $("#webllm-progress-wrap").classList.add("hidden");
+      }
+      await refreshWebllmSettings();
+    })
+    .catch((err) => {
+      $("#webllm-progress-fill").style.width = "0%";
+      $("#webllm-progress-label").textContent = `✗ ${err.message}`;
+    });
+}
+
+function onOnnxProgress(event) {
   const wrap = $("#onnx-progress-wrap");
   wrap.classList.remove("hidden");
   const pct = event.total ? Math.round(((event.loaded || 0) / event.total) * 100) : 0;
   $("#onnx-progress-fill").style.width = `${pct}%`;
   $("#onnx-progress-label").textContent = `${event.status || "downloading"} ${event.file || ""} ${event.total ? pct + "%" : ""}`.trim();
+}
+
+function onWebllmProgress(event) {
+  const wrap = $("#webllm-progress-wrap");
+  wrap.classList.remove("hidden");
+  const pct = event.total ? Math.round(((event.loaded || 0) / event.total) * 100) : 0;
+  $("#webllm-progress-fill").style.width = `${pct}%`;
+  $("#webllm-progress-label").textContent = `${event.status || "downloading"} ${event.file || ""} ${event.total ? pct + "%" : ""}`.trim();
 }
 
 async function testConnection() {
@@ -489,6 +668,13 @@ async function testConnection() {
         engineType: "chat.completions",
         request: { model: settings.onnxModel, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
       });
+    } else if (settings.provider === "webllm") {
+      if (!settings.webllmModel) throw new Error("Pick a model first");
+      res = await sendMessage({
+        type: "webllm.relay",
+        engineType: "chat.completions",
+        request: { model: settings.webllmModel, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+      });
     } else {
       res = await sendMessage({ type: "llm.test" });
     }
@@ -500,9 +686,15 @@ async function testConnection() {
 
 function renderModelBadge() {
   const provider = settings.provider || "onnx";
-  const model = provider === "onnx" ? settings.onnxModel : settings.model;
+  const model =
+    provider === "onnx"
+      ? settings.onnxModel
+      : provider === "webllm"
+        ? settings.webllmModel
+        : settings.model;
   const shortModel = (model || "no model").split("/").pop();
-  const deviceSuffix = provider === "onnx" && lastKnownDevice ? ` · ${lastKnownDevice}` : "";
+  const deviceSuffix =
+    (provider === "onnx" || provider === "webllm") && lastKnownDevice ? ` · ${lastKnownDevice}` : "";
   const text = `${provider} · ${shortModel}${deviceSuffix}`;
   document.querySelectorAll(".model-badge").forEach((el) => (el.textContent = text));
 }

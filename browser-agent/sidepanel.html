@@ -18,8 +18,12 @@
     <section id="onboarding" class="onboarding hidden">
       <h2>Welcome — pick an engine</h2>
       <button id="ob-onnx" class="ob-card">
-        <strong>Built-in engine</strong>
+        <strong>Built-in engine (ONNX)</strong>
         <span>No setup. Downloads a model (~0.7–2 GB) once, then runs fully offline.</span>
+      </button>
+      <button id="ob-webllm" class="ob-card">
+        <strong>Built-in engine (WebLLM)</strong>
+        <span>Faster chat on WebGPU. Downloads an MLC model once, then runs fully offline.</span>
       </button>
       <button id="ob-ollama" class="ob-card">
         <strong>Ollama</strong>
@@ -163,6 +167,7 @@
           <label for="provider-select">Provider</label>
           <select id="provider-select">
             <option value="onnx">Built-in (ONNX, runs in your browser)</option>
+            <option value="webllm">Built-in (WebLLM, WebGPU)</option>
             <option value="ollama">Ollama</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
@@ -193,6 +198,22 @@
             <div id="onnx-cache-hint" class="device-line"></div>
           </div>
 
+          <div id="webllm-settings" class="provider-block hidden">
+            <div id="webllm-device" class="device-line">Device: unknown</div>
+            <p class="hint">Requires WebGPU (Chrome/Edge 113+, Safari 18+). Full MLC catalog (~159 chat models). Vision/audio tools still use ONNX.</p>
+
+            <h3 class="onnx-section-title">Chat model (LLM)</h3>
+            <ul id="webllm-registry" class="onnx-registry webllm-registry-scroll"></ul>
+
+            <div id="webllm-progress-wrap" class="hidden">
+              <div class="progress-bar"><div id="webllm-progress-fill"></div></div>
+              <div id="webllm-progress-label"></div>
+            </div>
+            <button id="webllm-unload-btn" type="button">Unload model</button>
+            <button id="webllm-clear-cache-btn" type="button">Clear model cache</button>
+            <div id="webllm-cache-hint" class="device-line"></div>
+          </div>
+
           <div id="remote-settings" class="provider-block hidden">
             <label for="base-url">Base URL</label>
             <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
@@ -210,6 +231,12 @@
           <label for="max-tokens-input">Max tokens per reply</label>
           <input id="max-tokens-input" type="number" min="64" max="131072" step="64" placeholder="1024" />
           <p class="hint">Maximum tokens the model may generate per reply in Dialogue and automation. Reasoning models often need 4096 or more.</p>
+
+          <label class="settings-checkbox">
+            <input type="checkbox" id="enable-thinking-input" checked />
+            Enable model reasoning (thinking)
+          </label>
+          <p class="hint">When supported (Qwen3, DeepSeek-R1, etc.), models reason before answering. Thinking is collapsed by default in chat and raw output — expand “Show thinking” or the <code>reasoning</code> field to read it.</p>
 
           <h3 class="onnx-section-title">Dialogue web search (Tavily)</h3>
           <label for="tavily-api-key">Tavily API key</label>

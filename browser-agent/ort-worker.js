@@ -46,6 +46,8 @@ async function handle(msg) {
       if (task || model) return engine.unload({ task, model });
       return engine.unload();
     }
+    case "engine.unloadLlm":
+      return engine.unloadLlm();
     case "engine.clearCache":
       return engine.clearCache();
     case "engine.deleteModel":
