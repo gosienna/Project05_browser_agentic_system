@@ -2,13 +2,14 @@
 // Runs inside webllm-worker.js (Dedicated Worker).
 
 import { isQwen3ThinkingModel } from "./reasoning-content.js";
+import { enrichWebllmRegistryEntry } from "./webllm-models.js";
 
 const VENDOR_DIR = "vendor/webllm/";
 
 /** Default when onboarding or no model is picked. */
 export const DEFAULT_WEBLLM_MODEL = "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 
-/** @typedef {{ id: string, label: string, approxSizeMB: number, tier: string, contextWindow: number, quant?: string, lowResource?: boolean }} RegistryEntry */
+/** @typedef {{ id: string, label: string, approxSizeMB: number, tier: string, contextWindow: number, quant?: string, lowResource?: boolean, supportsThinking?: boolean, supportsTools?: boolean, supportsVision?: boolean, io?: string }} RegistryEntry */
 
 /** Populated from prebuiltAppConfig on first engine access. */
 /** @type {RegistryEntry[]|null} */
@@ -68,17 +69,23 @@ function humanizeModelId(modelId) {
 }
 
 function buildRegistry(webllm) {
+  const functionCallingModelIds = webllm.functionCallingModelIds || [];
   return webllm.prebuiltAppConfig.model_list
     .filter((m) => isChatModel(m.model_id))
-    .map((m) => ({
-      id: m.model_id,
-      label: humanizeModelId(m.model_id),
-      approxSizeMB: Math.round(m.vram_required_MB),
-      tier: tierForVram(m.vram_required_MB),
-      contextWindow: m.overrides?.context_window_size ?? 4096,
-      quant: quantLabel(m.model_id),
-      lowResource: !!m.low_resource_required,
-    }))
+    .map((m) =>
+      enrichWebllmRegistryEntry(
+        {
+          id: m.model_id,
+          label: humanizeModelId(m.model_id),
+          approxSizeMB: Math.round(m.vram_required_MB),
+          tier: tierForVram(m.vram_required_MB),
+          contextWindow: m.overrides?.context_window_size ?? 4096,
+          quant: quantLabel(m.model_id),
+          lowResource: !!m.low_resource_required,
+        },
+        { functionCallingModelIds }
+      )
+    )
     .sort((a, b) => a.approxSizeMB - b.approxSizeMB || a.id.localeCompare(b.id));
 }
 

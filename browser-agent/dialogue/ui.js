@@ -62,6 +62,8 @@ let setRegistry;
 let getDownloadedModels;
 let llmModels;
 let modelMetaLabel;
+let webllmPickerLabel;
+let webllmMetaLabel;
 let startDownload;
 let formatTime;
 let escapeHtml;
@@ -96,6 +98,8 @@ export function createDialoguePanel(deps) {
   getDownloadedModels = deps.getDownloadedModels;
   llmModels = deps.llmModels;
   modelMetaLabel = deps.modelMetaLabel;
+  webllmPickerLabel = deps.webllmPickerLabel;
+  webllmMetaLabel = deps.webllmMetaLabel;
   startDownload = deps.startDownload;
   formatTime = deps.formatTime;
   escapeHtml = deps.escapeHtml;
@@ -1213,6 +1217,11 @@ async function refreshDialogueModelSelect() {
   const provider = getSettings().provider || "onnx";
   let options = [];
   let selected = "";
+  const downloaded = getDownloadedModels();
+
+  function downloadedLlmModels() {
+    return llmModels().filter((m) => downloaded[m.id]);
+  }
 
   if (provider === "onnx") {
     if (getRegistry().length === 0) {
@@ -1223,11 +1232,13 @@ async function refreshDialogueModelSelect() {
         // engine may not be started yet
       }
     }
-    options = llmModels().map((m) => ({ id: m.id, label: `${m.label} (${modelMetaLabel(m)})` }));
+    const models = downloadedLlmModels();
+    options = models.map((m) => ({ id: m.id, label: `${m.label} (${modelMetaLabel(m)})` }));
+    const settingsModel = getSettings().onnxModel || "";
     selected =
-      getSettings().onnxModel ||
-      llmModels().find((m) => m.tier === "default")?.id ||
-      options[0]?.id ||
+      (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
+      models.find((m) => m.tier === "default")?.id ||
+      models[0]?.id ||
       "";
   } else if (provider === "webllm") {
     if (getRegistry().length === 0) {
@@ -1238,14 +1249,16 @@ async function refreshDialogueModelSelect() {
         // engine may not be started yet
       }
     }
-    options = llmModels().map((m) => ({
+    const models = downloadedLlmModels();
+    options = models.map((m) => ({
       id: m.id,
-      label: `${m.label} (${m.approxSizeMB >= 1000 ? `~${(m.approxSizeMB / 1000).toFixed(1)} GB` : `~${m.approxSizeMB} MB`})`,
+      label: webllmPickerLabel ? webllmPickerLabel(m) : `${m.label} (${modelMetaLabel(m)})`,
     }));
+    const settingsModel = getSettings().webllmModel || "";
     selected =
-      getSettings().webllmModel ||
-      llmModels().find((m) => m.tier === "default")?.id ||
-      options[0]?.id ||
+      (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
+      models.find((m) => m.tier === "default")?.id ||
+      models[0]?.id ||
       "";
   } else if (provider === "ollama") {
     options = await listOllamaModels();
@@ -1264,7 +1277,7 @@ async function refreshDialogueModelSelect() {
     opt.value = "";
     opt.textContent =
       provider === "onnx" || provider === "webllm"
-        ? "No models — open Settings"
+        ? "No downloaded models — open Settings"
         : provider === "ollama"
           ? "No Ollama models found"
           : "Set model in Settings";
@@ -1275,7 +1288,11 @@ async function refreshDialogueModelSelect() {
   }
 
   select.disabled = provider !== "onnx" && provider !== "webllm" && provider !== "ollama";
-  if (!options.some((o) => o.id === selected) && selected) {
+  if (
+    (provider === "ollama" || provider === "openai" || provider === "anthropic" || provider === "openai-compatible") &&
+    selected &&
+    !options.some((o) => o.id === selected)
+  ) {
     options = [{ id: selected, label: selected.split("/").pop() }, ...options];
   }
   for (const o of options) {
@@ -1290,6 +1307,14 @@ async function refreshDialogueModelSelect() {
   if (prev && options.some((o) => o.id === prev) && document.activeElement === select) {
     select.value = prev;
   }
+
+  const chosen = select.value;
+  if (provider === "onnx" && chosen && getSettings().onnxModel !== chosen) {
+    await saveSettings({ onnxModel: chosen });
+  } else if (provider === "webllm" && chosen && getSettings().webllmModel !== chosen) {
+    await saveSettings({ webllmModel: chosen });
+  }
+
   updateDialogueAttachUI();
 }
 
@@ -1336,10 +1361,13 @@ async function onDialogueModelChange(e) {
 function confirmLocalModelDownload(modelId) {
   const entry = getRegistry().find((m) => m.id === modelId);
   const label = entry?.label || modelId.split("/").pop();
+  const provider = getSettings().provider || "onnx";
   const meta = entry
-    ? entry.contextWindow
-      ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
-      : modelMetaLabel(entry)
+    ? provider === "webllm" && webllmMetaLabel
+      ? webllmMetaLabel(entry)
+      : entry.contextWindow
+        ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
+        : modelMetaLabel(entry)
     : "unknown size";
   return confirm(
     `"${label}" is not downloaded yet (${meta}).\n\nDownload it now? This uses the network and may take a few minutes.`

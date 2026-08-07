@@ -18,6 +18,7 @@ import {
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
 import { createDialoguePanel } from "./dialogue/index.js";
+import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -62,6 +63,8 @@ async function init() {
     getDownloadedModels: () => (settings.provider === "webllm" ? downloadedWebllmModels : downloadedModels),
     llmModels,
     modelMetaLabel,
+    webllmPickerLabel: formatWebllmPickerLabel,
+    webllmMetaLabel,
     startDownload,
     formatTime,
     escapeHtml,
@@ -72,6 +75,14 @@ async function init() {
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.target === "onnx-progress") onOnnxProgress(msg);
     if (msg?.target === "webllm-progress") onWebllmProgress(msg);
+    if (msg?.target === "onnx-model-ready" && msg.model) {
+      downloadedModels = { ...downloadedModels, [msg.model]: true };
+      dialoguePanel?.onSettingsChanged();
+    }
+    if (msg?.target === "webllm-model-ready" && msg.model) {
+      downloadedWebllmModels = { ...downloadedWebllmModels, [msg.model]: true };
+      dialoguePanel?.onSettingsChanged();
+    }
     if (msg?.type === "system.reload" && msg.systemId === currentSystemId) {
       reloadHomeFrame();
     }
@@ -385,10 +396,7 @@ async function refreshWebllmSettings() {
 }
 
 function webllmMetaLabel(entry) {
-  if (!entry) return "";
-  const ctx = entry.contextWindow ? `${formatTokenCount(entry.contextWindow)} ctx` : "";
-  const tier = entry.tier ? entry.tier : "";
-  return [tier, ctx, sizeLabel(entry.approxSizeMB)].filter(Boolean).join(" · ");
+  return formatWebllmRegistryMeta(entry, { sizeLabel });
 }
 
 function renderWebllmRegistry(loadedModel) {
