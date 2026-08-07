@@ -214,6 +214,41 @@
             <div id="webllm-cache-hint" class="device-line"></div>
           </div>
 
+          <div id="ollama-settings" class="provider-block hidden">
+            <div id="ollama-server-status" class="device-line">Server: checking…</div>
+            <label for="ollama-base-url">Ollama base URL</label>
+            <input id="ollama-base-url" placeholder="http://127.0.0.1:11434" />
+            <p class="hint">Recommended models from the <a href="https://ollama.com/library" target="_blank" rel="noopener">Ollama library</a>. Pulls download to the machine running Ollama. Use a custom tag (e.g. <code>llama3.2:3b</code>) when a model has multiple sizes.</p>
+
+            <label for="ollama-catalog-search">Search catalog</label>
+            <input id="ollama-catalog-search" type="search" placeholder="e.g. llama, qwen, mistral" autocomplete="off" />
+
+            <label for="ollama-catalog-filter">Filter</label>
+            <select id="ollama-catalog-filter">
+              <option value="">All models</option>
+              <option value="official">Official only</option>
+              <option value="cap:Tools">Tools</option>
+              <option value="cap:Vision">Vision</option>
+            </select>
+
+            <h3 class="onnx-section-title">Models</h3>
+            <div id="ollama-catalog-error" class="device-line hidden"></div>
+            <ul id="ollama-registry" class="onnx-registry ollama-registry-scroll"></ul>
+            <button id="ollama-load-more-btn" type="button" class="secondary-btn hidden">Load more</button>
+
+            <div id="ollama-progress-wrap" class="hidden">
+              <div class="progress-bar"><div id="ollama-progress-fill"></div></div>
+              <div id="ollama-progress-label"></div>
+            </div>
+
+            <label for="ollama-custom-pull">Pull custom model</label>
+            <div class="ollama-custom-pull-row">
+              <input id="ollama-custom-pull" placeholder="e.g. llama3.2:3b" autocomplete="off" />
+              <button id="ollama-custom-pull-btn" type="button">Pull</button>
+            </div>
+            <div id="ollama-cache-hint" class="device-line"></div>
+          </div>
+
           <div id="remote-settings" class="provider-block hidden">
             <label for="base-url">Base URL</label>
             <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />

@@ -3,6 +3,7 @@
 
 import { toAnthropicTools } from "./tools/schema.js";
 import { getMaxTokens } from "./agent-config.js";
+import { ollamaFetch } from "./ollama-models.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
@@ -213,14 +214,6 @@ async function openaiChatCompletions(request, settings) {
 }
 
 // --- ollama --------------------------------------------------------------
-
-function ollamaFetch(url, options = {}) {
-  return fetch(url, {
-    ...options,
-    // Chrome 142+ LNA: annotate loopback targets so localhost requests succeed reliably.
-    targetAddressSpace: "loopback",
-  });
-}
 
 function ollamaHttpError(baseUrl, status, detail) {
   if (status === 403) {

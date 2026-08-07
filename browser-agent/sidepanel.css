@@ -311,6 +311,9 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .onnx-registry { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .webllm-registry-scroll { max-height: min(52vh, 520px); overflow-y: auto; padding-right: 4px; }
+.ollama-registry-scroll { max-height: min(52vh, 520px); overflow-y: auto; padding-right: 4px; }
+.ollama-custom-pull-row { display: flex; gap: 6px; align-items: center; }
+.ollama-custom-pull-row input { flex: 1; min-width: 0; }
 .onnx-registry li {
   display: flex;
   justify-content: space-between;

@@ -18,6 +18,16 @@ import {
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
 import { createDialoguePanel } from "./dialogue/index.js";
+import {
+  deleteOllamaModel,
+  fetchOllamaCatalog,
+  formatOllamaCatalogMeta,
+  getInstalledVariants,
+  isOllamaModelInstalled,
+  listOllamaInstalled,
+  ollamaInstalledDownloadMap,
+  pullOllamaModel,
+} from "./ollama-models.js";
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -25,8 +35,18 @@ const $ = (sel) => document.querySelector(sel);
 let settings = {};
 let registry = [];
 let webllmRegistry = [];
+let ollamaRegistry = [];
+let ollamaInstalled = new Set();
 let downloadedModels = {};
 let downloadedWebllmModels = {};
+let ollamaCatalogSkip = 0;
+let ollamaCatalogTotal = 0;
+let ollamaCatalogSearch = "";
+let ollamaCatalogFilter = "";
+let ollamaPullAbort = null;
+let ollamaPulling = false;
+let ollamaSearchTimer = null;
+const OLLAMA_CATALOG_PAGE = 40;
 let agentPort = null;
 let editorPort = null;
 let running = false;
@@ -55,16 +75,29 @@ async function init() {
     sendMessage,
     getSettings: () => settings,
     saveSettings,
-    getRegistry: () => (settings.provider === "webllm" ? webllmRegistry : registry),
+    getRegistry: () => {
+      const p = settings.provider || "onnx";
+      if (p === "webllm") return webllmRegistry;
+      if (p === "ollama") return ollamaRegistry;
+      return registry;
+    },
     setRegistry: (models) => {
-      if (settings.provider === "webllm") webllmRegistry = models;
+      const p = settings.provider || "onnx";
+      if (p === "webllm") webllmRegistry = models;
+      else if (p === "ollama") ollamaRegistry = models;
       else registry = models;
     },
-    getDownloadedModels: () => (settings.provider === "webllm" ? downloadedWebllmModels : downloadedModels),
+    getDownloadedModels: () => {
+      const p = settings.provider || "onnx";
+      if (p === "webllm") return downloadedWebllmModels;
+      if (p === "ollama") return ollamaInstalledDownloadMap(ollamaInstalled);
+      return downloadedModels;
+    },
     llmModels,
     modelMetaLabel,
     webllmPickerLabel: formatWebllmPickerLabel,
     webllmMetaLabel,
+    ollamaMetaLabel: formatOllamaCatalogMeta,
     startDownload,
     formatTime,
     escapeHtml,
@@ -137,6 +170,7 @@ function openSettingsModal() {
   $("#settings-modal").classList.remove("hidden");
   if (settings.provider === "onnx") refreshOnnxSettings();
   if (settings.provider === "webllm") refreshWebllmSettings();
+  if (settings.provider === "ollama") refreshOllamaSettings();
 }
 
 function closeSettingsModal() {
@@ -163,7 +197,8 @@ function wireOnboarding() {
   $("#ob-ollama").addEventListener("click", async () => {
     await saveSettings({ provider: "ollama", baseUrl: "http://127.0.0.1:11434", model: "llama3.2" });
     $("#onboarding").classList.add("hidden");
-    applySettingsToForm();
+    openSettingsModal();
+    await refreshOllamaSettings();
   });
   $("#ob-api").addEventListener("click", async () => {
     await saveSettings({ provider: "openai" });
@@ -192,7 +227,7 @@ async function probeOllama() {
   } catch {
     // fall through
   }
-  label.textContent = "Not detected — install from ollama.com and pull a model first.";
+  label.textContent = "Not detected — install from ollama.com, then open Settings to pull a model.";
 }
 
 // --- Settings ---------------------------------------------------------------
@@ -249,6 +284,31 @@ function wireSettingsForm() {
     downloadedWebllmModels = {};
     await refreshWebllmSettings();
   });
+  $("#ollama-base-url").addEventListener("change", async (e) => {
+    await saveSettings({ baseUrl: e.target.value.trim() });
+    await refreshOllamaSettings();
+  });
+  $("#ollama-catalog-search").addEventListener("input", (e) => {
+    ollamaCatalogSearch = e.target.value.trim();
+    clearTimeout(ollamaSearchTimer);
+    ollamaSearchTimer = setTimeout(() => reloadOllamaCatalog(), 300);
+  });
+  $("#ollama-catalog-filter").addEventListener("change", (e) => {
+    ollamaCatalogFilter = e.target.value;
+    reloadOllamaCatalog();
+  });
+  $("#ollama-load-more-btn").addEventListener("click", () => loadMoreOllamaCatalog());
+  $("#ollama-custom-pull-btn").addEventListener("click", () => {
+    const name = $("#ollama-custom-pull")?.value?.trim();
+    if (!name) return;
+    startOllamaPull(name);
+  });
+  $("#ollama-custom-pull").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      $("#ollama-custom-pull-btn")?.click();
+    }
+  });
   $("#test-connection-btn").addEventListener("click", testConnection);
 }
 
@@ -270,22 +330,264 @@ function applySettingsToForm() {
   const provider = settings.provider || "onnx";
   const isOnnx = provider === "onnx";
   const isWebllm = provider === "webllm";
-  const isLocal = isOnnx || isWebllm;
+  const isOllama = provider === "ollama";
+  const isLocalEngine = isOnnx || isWebllm;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
-  $("#remote-settings").classList.toggle("hidden", isLocal);
+  $("#ollama-settings").classList.toggle("hidden", !isOllama);
+  $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
+  if (isOllama) {
+    const baseInput = $("#ollama-base-url");
+    if (baseInput) baseInput.value = settings.baseUrl || "http://127.0.0.1:11434";
+    refreshOllamaSettings();
+  }
   const noteEl = $("#remote-context-note");
   if (noteEl) {
-    noteEl.textContent = isLocal
+    noteEl.textContent = isLocalEngine || isOllama
       ? ""
-      : settings.provider === "ollama"
-        ? "Context-length estimate not available: the extension can't see the Ollama host machine's memory or read the served model's config from here."
-        : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
+      : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
   }
   renderModelBadge();
   dialoguePanel?.onSettingsChanged();
+}
+
+function ollamaBaseUrl() {
+  return (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+}
+
+function ollamaCatalogQueryOpts() {
+  const opts = { search: ollamaCatalogSearch, skip: ollamaCatalogSkip, limit: OLLAMA_CATALOG_PAGE };
+  if (ollamaCatalogFilter === "official") opts.modelType = "official";
+  else if (ollamaCatalogFilter.startsWith("cap:")) opts.capability = ollamaCatalogFilter.slice(4);
+  return opts;
+}
+
+async function reloadOllamaCatalog() {
+  ollamaCatalogSkip = 0;
+  ollamaRegistry = [];
+  await loadMoreOllamaCatalog(true);
+}
+
+async function loadMoreOllamaCatalog(replace = false) {
+  const errEl = $("#ollama-catalog-error");
+  const loadMoreBtn = $("#ollama-load-more-btn");
+  if (loadMoreBtn) loadMoreBtn.disabled = true;
+  try {
+    const page = await fetchOllamaCatalog(ollamaCatalogQueryOpts());
+    ollamaCatalogTotal = page.totalCount;
+    if (replace) ollamaRegistry = page.models;
+    else ollamaRegistry = [...ollamaRegistry, ...page.models];
+    ollamaCatalogSkip += page.models.length;
+    if (errEl) {
+      errEl.classList.add("hidden");
+      errEl.textContent = "";
+    }
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = `Catalog unavailable: ${err.message}. Showing locally installed models only.`;
+      errEl.classList.remove("hidden");
+    }
+    if (replace) ollamaRegistry = [];
+  } finally {
+    if (loadMoreBtn) {
+      loadMoreBtn.disabled = false;
+      const hasMore = ollamaRegistry.length < ollamaCatalogTotal;
+      loadMoreBtn.classList.toggle("hidden", !hasMore || ollamaRegistry.length === 0);
+    }
+    renderOllamaRegistry();
+  }
+}
+
+async function refreshOllamaSettings() {
+  const base = ollamaBaseUrl();
+  const statusEl = $("#ollama-server-status");
+  const hintEl = $("#ollama-cache-hint");
+  const searchInput = $("#ollama-catalog-search");
+  const filterSelect = $("#ollama-catalog-filter");
+
+  if (searchInput && searchInput.value !== ollamaCatalogSearch) searchInput.value = ollamaCatalogSearch;
+  if (filterSelect && filterSelect.value !== ollamaCatalogFilter) filterSelect.value = ollamaCatalogFilter;
+
+  const { installed, reachable, error } = await listOllamaInstalled(base);
+  ollamaInstalled = installed;
+
+  if (statusEl) {
+    if (!reachable) {
+      statusEl.textContent = `Server: not reachable — is Ollama running at ${base}?`;
+    } else if (error) {
+      statusEl.textContent = `Server: reachable but ${error}`;
+    } else {
+      const n = installed.size;
+      statusEl.textContent = n ? `Server: connected ✓ — ${n} model(s) pulled` : "Server: connected ✓ — no models pulled yet";
+    }
+  }
+  if (hintEl) {
+    hintEl.textContent = installed.size
+      ? `Active model: ${settings.model || "(none selected)"}`
+      : "Pull a model below to use Ollama with this extension.";
+  }
+
+  if (ollamaRegistry.length === 0 && ollamaCatalogSkip === 0) {
+    await reloadOllamaCatalog();
+  } else {
+    renderOllamaRegistry();
+  }
+  dialoguePanel?.onSettingsChanged();
+}
+
+function buildOllamaRegistryRows() {
+  const rows = [...ollamaRegistry];
+  const seenBases = new Set(rows.map((r) => r.id));
+  for (const name of ollamaInstalled) {
+    const base = name.split(":")[0];
+    if (!seenBases.has(base) && !seenBases.has(name)) {
+      rows.push({
+        id: name,
+        label: name,
+        description: "Installed locally (not in catalog)",
+        labels: [],
+        installedOnly: true,
+      });
+      seenBases.add(name);
+    }
+  }
+  return rows;
+}
+
+function renderOllamaRegistry() {
+  const list = $("#ollama-registry");
+  if (!list) return;
+  list.innerHTML = "";
+  const rows = buildOllamaRegistryRows();
+  const selectedId = settings.model || rows.find((m) => m.tier === "default")?.id || "";
+
+  for (const m of rows) {
+    const li = document.createElement("li");
+    const installed = isOllamaModelInstalled(ollamaInstalled, m.id);
+    const isSelected = installed && (m.id === selectedId || getInstalledVariants(ollamaInstalled, m.id).includes(selectedId));
+    li.className = isSelected || m.id === selectedId ? "selected" : "";
+
+    li.innerHTML = `
+      <span class="model-info">
+        <span class="model-name">${escapeHtml(m.label || m.id)}</span>
+        <small class="model-meta">${escapeHtml(formatOllamaCatalogMeta(m) || m.id)}</small>
+        ${m.description ? `<small class="model-context">${escapeHtml(m.description.slice(0, 120))}${m.description.length > 120 ? "…" : ""}</small>` : ""}
+      </span>
+      <span class="badge ${installed ? "downloaded" : ""}">${installed ? "Pulled" : "Not pulled"}</span>
+    `;
+
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
+    const btn = document.createElement("button");
+    if (ollamaPulling) {
+      btn.textContent = "Pulling…";
+      btn.disabled = true;
+    } else if (installed) {
+      btn.textContent = m.id === selectedId ? "Selected" : "Use";
+      btn.disabled = m.id === selectedId;
+      btn.addEventListener("click", async () => {
+        const pick = getInstalledVariants(ollamaInstalled, m.id)[0] || m.id;
+        await saveSettings({ model: pick });
+        renderOllamaRegistry();
+        renderModelBadge();
+      });
+    } else {
+      btn.textContent = "Pull";
+      btn.addEventListener("click", async () => {
+        await saveSettings({ model: m.id });
+        startOllamaPull(m.id);
+      });
+    }
+    actions.appendChild(btn);
+
+    if (installed) {
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.className = "danger";
+      delBtn.disabled = ollamaPulling;
+      delBtn.addEventListener("click", async () => {
+        const variants = getInstalledVariants(ollamaInstalled, m.id);
+        if (!variants.length) return;
+        let toDelete = variants;
+        if (variants.length > 1) {
+          const pick = prompt(
+            `Multiple variants installed:\n${variants.join("\n")}\n\nEnter the exact name to delete, or leave blank to cancel:`,
+            variants[0]
+          );
+          if (!pick || !variants.includes(pick)) return;
+          toDelete = [pick];
+        } else if (!confirm(`Delete ${variants[0]} from Ollama?`)) {
+          return;
+        }
+        delBtn.disabled = true;
+        try {
+          for (const name of toDelete) {
+            await deleteOllamaModel(ollamaBaseUrl(), name);
+          }
+          await refreshOllamaSettings();
+        } catch (err) {
+          alert(`Delete failed: ${err.message}`);
+          delBtn.disabled = false;
+        }
+      });
+      actions.appendChild(delBtn);
+    }
+
+    li.appendChild(actions);
+    list.appendChild(li);
+  }
+}
+
+function onOllamaProgress(event) {
+  const wrap = $("#ollama-progress-wrap");
+  if (!wrap) return;
+  wrap.classList.remove("hidden");
+  const pct =
+    event.total && event.completed != null ? Math.round((event.completed / event.total) * 100) : 0;
+  $("#ollama-progress-fill").style.width = `${pct}%`;
+  const status = event.status || "pulling";
+  $("#ollama-progress-label").textContent =
+    `${status} ${event.total ? pct + "%" : ""}`.trim();
+}
+
+async function startOllamaPull(modelId) {
+  if (ollamaPulling) return;
+  ollamaPulling = true;
+  ollamaPullAbort?.abort();
+  ollamaPullAbort = new AbortController();
+  const wrap = $("#ollama-progress-wrap");
+  wrap?.classList.remove("hidden");
+  $("#ollama-progress-fill").style.width = "0%";
+  $("#ollama-progress-label").textContent = `Pulling ${modelId}…`;
+  renderOllamaRegistry();
+
+  try {
+    await pullOllamaModel(ollamaBaseUrl(), modelId, {
+      signal: ollamaPullAbort.signal,
+      onProgress: onOllamaProgress,
+    });
+    const variants = getInstalledVariants(
+      (await listOllamaInstalled(ollamaBaseUrl())).installed,
+      modelId
+    );
+    await saveSettings({ model: variants[0] || modelId });
+    wrap?.classList.add("hidden");
+    await refreshOllamaSettings();
+    renderModelBadge();
+  } catch (err) {
+    if (err.name === "AbortError") {
+      $("#ollama-progress-label").textContent = "Pull cancelled.";
+    } else {
+      $("#ollama-progress-fill").style.width = "0%";
+      $("#ollama-progress-label").textContent = `✗ ${err.message}`;
+    }
+  } finally {
+    ollamaPulling = false;
+    ollamaPullAbort = null;
+    renderOllamaRegistry();
+  }
 }
 
 async function saveSettings(patch) {
@@ -523,6 +825,7 @@ function llmLoadedModel(loadedByTask) {
 
 function llmModels() {
   if (settings.provider === "webllm") return webllmRegistry;
+  if (settings.provider === "ollama") return ollamaRegistry;
   return registry.filter((m) => m.modality === "llm");
 }
 
@@ -601,7 +904,9 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel, { modalit
 }
 
 function startDownload(modelId, task) {
-  if ((settings.provider || "onnx") === "webllm") startWebllmDownload(modelId);
+  const provider = settings.provider || "onnx";
+  if (provider === "webllm") startWebllmDownload(modelId);
+  else if (provider === "ollama") startOllamaPull(modelId);
   else startOnnxDownload(modelId, task);
 }
 

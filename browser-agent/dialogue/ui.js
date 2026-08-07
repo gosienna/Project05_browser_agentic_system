@@ -64,6 +64,7 @@ let llmModels;
 let modelMetaLabel;
 let webllmPickerLabel;
 let webllmMetaLabel;
+let ollamaMetaLabel;
 let startDownload;
 let formatTime;
 let escapeHtml;
@@ -100,6 +101,7 @@ export function createDialoguePanel(deps) {
   modelMetaLabel = deps.modelMetaLabel;
   webllmPickerLabel = deps.webllmPickerLabel;
   webllmMetaLabel = deps.webllmMetaLabel;
+  ollamaMetaLabel = deps.ollamaMetaLabel;
   startDownload = deps.startDownload;
   formatTime = deps.formatTime;
   escapeHtml = deps.escapeHtml;
@@ -1261,8 +1263,13 @@ async function refreshDialogueModelSelect() {
       models[0]?.id ||
       "";
   } else if (provider === "ollama") {
-    options = await listOllamaModels();
-    selected = getSettings().model || options[0]?.id || "";
+    const all = await listOllamaModels();
+    options = all.filter((m) => downloaded[m.id]);
+    const settingsModel = getSettings().model || "";
+    selected =
+      (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
+      options[0]?.id ||
+      "";
   } else {
     const m = getSettings().model || "";
     if (m) options = [{ id: m, label: m }];
@@ -1276,10 +1283,10 @@ async function refreshDialogueModelSelect() {
     const opt = document.createElement("option");
     opt.value = "";
     opt.textContent =
-      provider === "onnx" || provider === "webllm"
-        ? "No downloaded models — open Settings"
-        : provider === "ollama"
-          ? "No Ollama models found"
+      provider === "ollama"
+        ? "No pulled models — open Settings"
+        : provider === "onnx" || provider === "webllm"
+          ? "No downloaded models — open Settings"
           : "Set model in Settings";
     select.appendChild(opt);
     select.disabled = true;
@@ -1349,6 +1356,17 @@ async function onDialogueModelChange(e) {
     }
     await saveSettings({ webllmModel: modelId });
     startDownload(modelId);
+  } else if (provider === "ollama") {
+    if (!getDownloadedModels()[modelId]) {
+      if (!confirmLocalModelDownload(modelId)) {
+        select.value = previous;
+        return;
+      }
+      await saveSettings({ model: modelId });
+      startDownload(modelId);
+    } else {
+      await saveSettings({ model: modelId });
+    }
   } else {
     await saveSettings({ model: modelId });
     const modelInput = $("#model-name");
@@ -1365,12 +1383,16 @@ function confirmLocalModelDownload(modelId) {
   const meta = entry
     ? provider === "webllm" && webllmMetaLabel
       ? webllmMetaLabel(entry)
-      : entry.contextWindow
-        ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
-        : modelMetaLabel(entry)
+      : provider === "ollama" && ollamaMetaLabel
+        ? ollamaMetaLabel(entry)
+        : entry.contextWindow
+          ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
+          : modelMetaLabel(entry)
     : "unknown size";
+  const verb = provider === "ollama" ? "pulled" : "downloaded";
+  const action = provider === "ollama" ? "Pull" : "Download";
   return confirm(
-    `"${label}" is not downloaded yet (${meta}).\n\nDownload it now? This uses the network and may take a few minutes.`
+    `"${label}" is not ${verb} yet (${meta}).\n\n${action} it now? This uses the network and may take a few minutes.`
   );
 }
 
