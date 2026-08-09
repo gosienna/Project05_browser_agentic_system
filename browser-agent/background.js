@@ -278,7 +278,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           ...settings,
           ...(msg.settings && typeof msg.settings === "object" ? msg.settings : {}),
         };
-        return callMcpTool(msg.name, msg.args || {}, { settings: merged, tabId: activeTab?.id });
+        return callMcpTool(msg.name, msg.args || {}, {
+          settings: merged,
+          tabId: activeTab?.id,
+          userQuery: msg.userQuery,
+        });
       }).then((result) => ({ result })),
       sendResponse
     );

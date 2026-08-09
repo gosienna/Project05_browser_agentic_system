@@ -1151,9 +1151,12 @@ function normalizeOutput(task, raw, options) {
     return { text };
   }
   if (task === FEATURE_EXTRACTION) {
-    const tensor = raw?.data != null ? raw : Array.isArray(raw) ? raw[0] : raw;
+    let tensor = raw;
+    if (tensor?.data == null && Array.isArray(tensor)) tensor = tensor[0];
+    if (tensor?.data == null && tensor?.pooled_output != null) tensor = tensor.pooled_output;
+    if (tensor?.data == null && tensor?.last_hidden_state != null) tensor = tensor.last_hidden_state;
     let vec = [];
-    if (tensor?.data) vec = Array.from(tensor.data);
+    if (tensor?.data != null) vec = Array.from(tensor.data);
     else if (Array.isArray(tensor)) vec = tensor.flat();
     else if (tensor?.tolist) vec = tensor.tolist().flat();
     return { embedding: vec, dims: vec.length };

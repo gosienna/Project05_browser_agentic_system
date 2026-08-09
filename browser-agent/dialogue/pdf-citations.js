@@ -31,9 +31,12 @@ export function renderCitationChips(citations, container) {
 
 export function formatSearchDocumentsDisplay(result) {
   const hits = result?.results || [];
-  if (!hits.length) return "(no document matches)";
+  if (!hits.length) {
+    if (result?.message) return result.message;
+    return "(no document matches)";
+  }
   const lines = hits.map((h, i) => {
-    const score = typeof h.score === "number" ? h.score.toFixed(3) : "?";
+    const score = typeof h.score === "number" ? h.score.toFixed(3) : "n/a";
     const preview = (h.text || "").slice(0, 240).replace(/\s+/g, " ");
     return `${i + 1}. [p.${h.page} · ${h.doc_name}] (score ${score})\n   ${preview}${h.text?.length > 240 ? "…" : ""}`;
   });

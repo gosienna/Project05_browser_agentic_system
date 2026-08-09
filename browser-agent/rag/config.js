@@ -23,6 +23,16 @@ export function resolveEmbedModel(settings, provider) {
   return settings?.ragOnnxEmbedModel || DEFAULT_ONNX_EMBED_MODEL;
 }
 
+export function normalizeEmbedModelId(model) {
+  return String(model || "").split(":")[0];
+}
+
+export function embedModelsMatch(stored, current) {
+  if (!stored || !current) return stored === current;
+  if (stored === current) return true;
+  return normalizeEmbedModelId(stored) === normalizeEmbedModelId(current);
+}
+
 export function embedFingerprint(settings) {
   const provider = resolveEmbedProvider(settings);
   const model = resolveEmbedModel(settings, provider);

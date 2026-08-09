@@ -1,9 +1,10 @@
 // Register built-in MCP tools for Dialogue (web search + browser automation).
 
 import { registerMcpTool } from "./server.js";
-import { tavilySearch } from "../dialogue/tool-runtime.js";
+import { tavilySearch, prepareSearchToolArgs } from "../dialogue/tool-runtime.js";
 import * as browserTools from "../tools/browser.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
+import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
 
 const TAB_ID_PROP = {
@@ -58,7 +59,10 @@ export function registerBuiltinMcpTools() {
       required: ["query"],
     },
     isEnabled: webSearchEnabled,
-    handler: (args, context) => tavilySearch(args, context.settings || {}),
+    handler: (args, context) => {
+      const resolved = prepareSearchToolArgs("web_search", args, context.userQuery);
+      return tavilySearch(resolved, context.settings || {});
+    },
   });
 
   registerMcpTool({
@@ -269,7 +273,7 @@ export function registerBuiltinMcpTools() {
   registerMcpTool({
     name: "search_documents",
     description:
-      "Semantic search over ingested PDF documents. Returns relevant text chunks with page numbers and citation ids for the PDF viewer.",
+      "Semantic search over selected PDF documents (check Include in RAG search in Documents). Returns relevant text chunks with page numbers and citation ids for the PDF viewer. Pass doc_ids to search specific documents.",
     groups: ["dialogue", "rag"],
     inputSchema: {
       type: "object",
@@ -278,7 +282,7 @@ export function registerBuiltinMcpTools() {
         doc_ids: {
           type: "array",
           items: { type: "string" },
-          description: "Optional document ids to restrict search",
+          description: "Optional document ids; defaults to documents checked for RAG search",
         },
         top_k: {
           type: "integer",
@@ -291,9 +295,17 @@ export function registerBuiltinMcpTools() {
     },
     isEnabled: ragToolsEnabled,
     handler: async (args, context) => {
-      const hits = await searchDocuments(args.query, context.settings || {}, {
-        docIds: args.doc_ids,
-        topK: args.top_k,
+      const resolved = prepareSearchToolArgs("search_documents", args, context.userQuery);
+      const docIds = await resolveSearchDocIds(resolved.doc_ids);
+      if (!docIds.length) {
+        return {
+          results: [],
+          message: "No documents selected for RAG search. Check documents in Dialogue or pass doc_ids.",
+        };
+      }
+      const hits = await searchDocuments(resolved.query, context.settings || {}, {
+        docIds,
+        topK: resolved.top_k,
       });
       return { results: hits.map(formatSearchHit) };
     },
@@ -336,6 +348,10 @@ export function registerBuiltinMcpTools() {
     isEnabled: ragToolsEnabled,
     handler: async (args) => {
       await ragStore.deleteDocument(args.doc_id);
+      const active = await getActiveDocIds();
+      if (active.includes(args.doc_id)) {
+        await setActiveDocIds(active.filter((id) => id !== args.doc_id));
+      }
       return { ok: true, doc_id: args.doc_id };
     },
   });

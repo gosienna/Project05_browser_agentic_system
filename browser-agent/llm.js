@@ -504,12 +504,12 @@ function errorResponse(message, type) {
   return { error: { message, type, code: null } };
 }
 
-/** Ollama /api/embeddings — used by RAG. */
+/** Ollama /api/embed — used by RAG (batch). Legacy /api/embeddings uses `prompt`, not `input`. */
 export async function ollamaEmbeddings(texts, settings, model) {
   const baseUrl = (settings?.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
   const modelId = model || settings?.ragOllamaEmbedModel || "nomic-embed-text";
   const input = Array.isArray(texts) ? texts : [texts];
-  const res = await ollamaFetch(`${baseUrl}/api/embeddings`, {
+  const res = await ollamaFetch(`${baseUrl}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: modelId, input }),
@@ -521,5 +521,5 @@ export async function ollamaEmbeddings(texts, settings, model) {
   const body = parsed.body;
   if (Array.isArray(body?.embeddings)) return body.embeddings;
   if (body?.embedding) return [body.embedding];
-  throw new Error("Ollama embeddings response missing embedding vectors.");
+  throw new Error("Ollama embed response missing embedding vectors.");
 }

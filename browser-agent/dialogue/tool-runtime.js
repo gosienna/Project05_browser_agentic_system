@@ -7,7 +7,8 @@ export const MCP_TOOL_HINT =
   "You have MCP tools available in this chat. " +
   "When you need current information, document search, or browser actions, call the appropriate tool. " +
   "For models without native tool support (ONNX and most WebLLM chat models), use: call:<tool_name>{arg:value,...} — or call:<tool_name>{}" +
-  "e.g. call:search_documents{query:influenza transmission} or call:web_search{query:today's date}.";
+  "e.g. call:search_documents{query:chronic prescription refill} or call:web_search{query:today's date}. " +
+  "For search_documents and web_search, copy the user's exact question into query (do not invent or translate it).";
 
 /**
  * Tavily Search API — basic depth (1 credit per request).
@@ -138,6 +139,7 @@ function readLooseValue(s, start) {
 
 function coerceToolArg(key, val) {
   if (key === "max_results") return Number(val) || 5;
+  if (key === "top_k") return Number(val) || 5;
   if (key === "maxChars") {
     const n = Number(val);
     return Number.isFinite(n) && n > 0 ? n : undefined;
@@ -146,14 +148,78 @@ function coerceToolArg(key, val) {
   return val;
 }
 
+function cjkChars(text) {
+  return [...String(text || "")].filter((c) => /[\u4e00-\u9fff\u3400-\u4dbf]/.test(c));
+}
+
+/** When the model's search query diverges from the user's question (common with local ONNX/WebLLM text tool calls). */
+export function shouldPreferUserSearchQuery(modelQuery, userQuery) {
+  const user = String(userQuery || "").trim();
+  const model = String(modelQuery || "").trim();
+  if (!user || !model) return false;
+  if (model === user || model.includes(user) || user.includes(model)) return false;
+
+  const userCjk = cjkChars(user);
+  if (userCjk.length >= 2) {
+    const overlap = userCjk.filter((c) => model.includes(c)).length;
+    if (overlap / userCjk.length < 0.25) return true;
+  }
+
+  const userWords = user.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  if (userWords.length >= 2) {
+    const modelLower = model.toLowerCase();
+    const overlap = userWords.filter((w) => modelLower.includes(w)).length;
+    if (overlap / userWords.length < 0.34) return true;
+  }
+
+  return false;
+}
+
+/** Prefer the user's question when the model omits or garbles the search query. */
+export function resolveSearchToolQuery(args = {}, userQuery = "", toolName = "") {
+  const user = String(userQuery || "").trim();
+  const model = String(args?.query || "").trim();
+  if (!user) return model;
+  // Local models routinely hallucinate Chinese inside search_documents args — always use the user message.
+  if (toolName === "search_documents") return user;
+  if (!model) return user;
+  if (shouldPreferUserSearchQuery(model, user)) return user;
+  return model;
+}
+
+export function prepareSearchToolArgs(toolName, args = {}, userQuery = "") {
+  if (toolName !== "search_documents" && toolName !== "web_search") return args;
+  const out = { ...args };
+  out.query = resolveSearchToolQuery(out, userQuery, toolName);
+  if (out.top_k != null) out.top_k = Number(out.top_k) || 5;
+  if (out.max_results != null) out.max_results = Number(out.max_results) || 5;
+  return out;
+}
+
+/** Normalize tool args and display text after the model emits a call. */
+export function resolveDialogueToolCalls(calls, userQuery = "") {
+  return calls.map((call) => {
+    const args = prepareSearchToolArgs(call.name, call.args || {}, userQuery);
+    const updated = { ...call, args };
+    if (call.source === "text") {
+      updated.raw = `call:${call.name}${JSON.stringify(args)}`;
+    }
+    return updated;
+  });
+}
+
 /** Parse `key:value` or JSON-ish argument strings from small-model tool text. */
 export function parseLooseToolArgs(inner) {
   const trimmed = String(inner || "").trim();
   if (!trimmed) return {};
 
-  if (trimmed.startsWith("{")) {
-    const parsed = parseLooseObjectString(trimmed);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  const parsed = parseLooseObjectString(trimmed);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const out = {};
+    for (const [key, val] of Object.entries(parsed)) {
+      out[key] = coerceToolArg(key, val);
+    }
+    return out;
   }
 
   const args = {};
@@ -295,11 +361,19 @@ export function toOpenAiToolCall(call) {
 
 /** Human-readable assistant output when the model requests tool(s). */
 export function formatAssistantToolCallDisplay(message, calls = []) {
-  const text = String(message?.content || "").trim();
-  if (text) return text;
-
   const lines = [];
-  if (Array.isArray(message?.tool_calls) && message.tool_calls.length) {
+
+  for (const c of calls) {
+    if (c.args && Object.keys(c.args).length) {
+      lines.push(`call:${c.name}${formatToolCallArgs(c.args)}`);
+    } else if (c.raw) {
+      lines.push(c.raw);
+    } else {
+      lines.push(`call:${c.name}{}`);
+    }
+  }
+
+  if (!lines.length && Array.isArray(message?.tool_calls) && message.tool_calls.length) {
     for (const tc of message.tool_calls) {
       const name = tc.function?.name || tc.name || "unknown";
       const args = tc.function?.arguments ?? tc.arguments ?? "{}";
@@ -307,10 +381,11 @@ export function formatAssistantToolCallDisplay(message, calls = []) {
     }
   }
 
-  for (const c of calls) {
-    if (c.raw) lines.push(c.raw);
-    else lines.push(`call:${c.name}${JSON.stringify(c.args || {})}`);
-  }
+  const fromCalls = [...new Set(lines)].join("\n");
+  if (fromCalls) return fromCalls;
 
-  return [...new Set(lines)].join("\n") || "(tool call)";
+  const text = String(message?.content || "").trim();
+  if (text) return text;
+
+  return "(tool call)";
 }

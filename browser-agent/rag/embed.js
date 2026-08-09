@@ -15,6 +15,45 @@ import {
 
 export { embedFingerprint, resolveEmbedModel, resolveEmbedProvider } from "./config.js";
 
+/** Normalize ONNX / WebLLM / IDB embedding values into a plain number[]. */
+export function normalizeEmbeddingVector(raw) {
+  if (raw == null) return null;
+  if (Array.isArray(raw) && raw.length) return raw;
+  if (typeof raw?.length === "number" && raw.length > 0) {
+    try {
+      const arr = Array.from(raw);
+      return arr.length ? arr : null;
+    } catch {
+      /* not array-like */
+    }
+  }
+  if (raw?.data != null) {
+    const arr = Array.from(raw.data);
+    return arr.length ? arr : null;
+  }
+  if (typeof raw?.tolist === "function") {
+    const arr = raw.tolist().flat();
+    return arr.length ? arr : null;
+  }
+  if (typeof raw === "object") {
+    const keys = Object.keys(raw)
+      .filter((k) => /^\d+$/.test(k))
+      .sort((a, b) => Number(a) - Number(b));
+    if (keys.length) return keys.map((k) => Number(raw[k]));
+  }
+  return null;
+}
+
+function requireEmbeddingVector(vec, provider, model, hint = "") {
+  const normalized = normalizeEmbeddingVector(vec);
+  if (!normalized?.length) {
+    throw new Error(
+      `Embedding model returned an empty vector (${provider}: ${model}).${hint ? ` ${hint}` : ""} Check Settings → RAG embedding model and reload the extension.`
+    );
+  }
+  return normalized;
+}
+
 async function onnxEmbed(texts, modelId) {
   await ensureOffscreenDocument();
   const embeddings = [];
@@ -30,7 +69,8 @@ async function onnxEmbed(texts, modelId) {
         throw new Error("Local ONNX engine did not respond — reload the extension and try again.");
       }
       if (response?.error) throw new Error(response.error.message);
-      embeddings.push(response.output?.embedding || []);
+      const raw = response?.output?.embedding ?? response?.output ?? response?.embedding;
+      embeddings.push(requireEmbeddingVector(raw, "onnx", modelId));
     }
   }
   return embeddings;
@@ -48,7 +88,9 @@ async function webllmEmbed(texts, modelId) {
   }
   if (response?.error) throw new Error(response.error.message);
   const sorted = [...(response.embeddings || [])].sort((a, b) => a.index - b.index);
-  return sorted.map((e) => e.embedding);
+  return sorted.map((e, i) =>
+    requireEmbeddingVector(e?.embedding, "webllm", modelId, `Missing embedding at index ${i}.`)
+  );
 }
 
 function broadcastOllamaPullProgress(event) {
@@ -84,7 +126,10 @@ async function ensureOllamaEmbedModel(settings, modelId) {
 
 async function ollamaEmbed(texts, settings, modelId) {
   await ensureOllamaEmbedModel(settings, modelId);
-  return ollamaEmbeddings(texts, settings, modelId);
+  const vectors = await ollamaEmbeddings(texts, settings, modelId);
+  return vectors.map((v, i) =>
+    requireEmbeddingVector(v, "ollama", modelId, `Missing embedding at index ${i}.`)
+  );
 }
 
 /**

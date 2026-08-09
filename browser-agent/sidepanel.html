@@ -121,7 +121,7 @@
               <label>Overlap <input type="number" id="dialogue-chunk-overlap" min="0" max="1000" step="10" /></label>
               <label class="dialogue-chunk-save"><input type="checkbox" id="dialogue-chunk-save-default" /> Save as default</label>
             </div>
-            <p class="dialogue-documents-hint">Smaller chunks = finer retrieval; larger chunks = more context per hit. Pin documents to inject matching excerpts into the system message on send (visible in Show raw). Without pinning, the model uses search_documents instead.</p>
+            <p class="dialogue-documents-hint">Smaller chunks = finer retrieval; larger chunks = more context per hit. Check documents to include them in RAG search (search_documents). Unchecked documents are not searched unless the model passes explicit doc_ids.</p>
             <div id="dialogue-docs-list" class="dialogue-docs-list"></div>
           </aside>
           <aside id="dialogue-pdf-panel" class="dialogue-pdf-panel collapsed" aria-label="PDF viewer">
@@ -331,7 +331,7 @@
             <input id="rag-chunk-size" type="number" min="200" max="2000" step="50" />
             <label for="rag-chunk-overlap">Default chunk overlap (chars)</label>
             <input id="rag-chunk-overlap" type="number" min="0" max="1000" step="10" />
-            <p class="hint">PDFs are stored in IndexedDB with embeddings for semantic search. Pin documents in Dialogue for auto-retrieve.</p>
+            <p class="hint">PDFs are stored in IndexedDB with embeddings for semantic search. In Dialogue, check documents to include them in RAG search.</p>
           </div>
 
           <button id="test-connection-btn" type="button">Test connection</button>

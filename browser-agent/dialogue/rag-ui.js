@@ -11,7 +11,6 @@ let saveSettings;
 let getSettings;
 let escapeHtml;
 let onOpenPdf;
-let onRagContextChange;
 
 function setRagStatus(text, { error = false } = {}) {
   const status = $("#dialogue-rag-status");
@@ -36,7 +35,6 @@ export function initRagUi(deps) {
   getSettings = deps.getSettings;
   escapeHtml = deps.escapeHtml;
   onOpenPdf = deps.onOpenPdf;
-  onRagContextChange = deps.onRagContextChange;
 }
 
 export function wireRagUi() {
@@ -99,7 +97,7 @@ export async function refreshDocumentsPanel() {
     row.innerHTML = `
       <label class="dialogue-doc-pin">
         <input type="checkbox" data-doc-id="${escapeHtml(doc.id)}" ${active.has(doc.id) ? "checked" : ""} />
-        Pin for auto-retrieve
+        Include in RAG search
       </label>
       <div class="dialogue-doc-meta">
         <strong>${escapeHtml(doc.name)}</strong>
@@ -118,7 +116,6 @@ export async function refreshDocumentsPanel() {
     cb.addEventListener("change", async () => {
       const ids = [...list.querySelectorAll(".dialogue-doc-pin input:checked")].map((el) => el.dataset.docId);
       await sendMessage({ type: "rag.setActiveDocs", docIds: ids });
-      onRagContextChange?.();
     });
   });
   list.querySelectorAll(".doc-view").forEach((btn) => {
@@ -237,13 +234,7 @@ async function ingestPdfFile(file) {
     setRagStatus(
       `Ingested ${file.name}: ${r.pageCount} pages, ${r.chunkCount} chunks (${r.chunkSize}/${r.chunkOverlap})`
     );
-    const activeRes = await sendMessage({ type: "rag.getActiveDocs" });
-    const pinned = activeRes?.result?.docIds || activeRes?.docIds || [];
-    if (!pinned.includes(r.docId)) {
-      await sendMessage({ type: "rag.setActiveDocs", docIds: [...pinned, r.docId] });
-    }
     await refreshDocumentsPanel();
-    onRagContextChange?.();
   } catch (err) {
     const message = err?.message || String(err);
     setRagStatus(`Ingest failed: ${message}`, { error: true });
@@ -260,37 +251,6 @@ export function syncRagChunkInputs() {
   const overlapEl = $("#dialogue-chunk-overlap");
   if (sizeEl && !sizeEl.matches(":focus")) sizeEl.value = String(s.ragChunkSize ?? DEFAULT_CHUNK_SIZE);
   if (overlapEl && !overlapEl.matches(":focus")) overlapEl.value = String(s.ragChunkOverlap ?? DEFAULT_CHUNK_OVERLAP);
-}
-
-export async function getPinnedAutoRetrieveContext(query, settings) {
-  const activeRes = await sendMessage({ type: "rag.getActiveDocs" });
-  const docIds = activeRes?.result?.docIds || activeRes?.docIds || [];
-  if (!docIds.length || !query?.trim()) return { text: "", citations: [] };
-
-  const searchRes = await sendMessage({ type: "rag.search", query, docIds, topK: 5 });
-  if (searchRes?.error) {
-    console.warn("[rag] auto-retrieve search failed:", searchRes.error);
-    return { text: "", citations: [] };
-  }
-  const hits = Array.isArray(searchRes?.result) ? searchRes.result : Array.isArray(searchRes) ? searchRes : [];
-  if (!hits.length) return { text: "", citations: [] };
-
-  const lines = hits.map(
-    (h) => `[doc: ${h.doc_name} p.${h.page}]\n${h.text}`
-  );
-  const citations = hits.map((h) => ({
-    chunk_id: h.chunk_id,
-    doc_id: h.doc_id,
-    doc_name: h.doc_name,
-    page: h.page,
-    text: h.text,
-    loc: h.loc,
-  }));
-  const text =
-    "Relevant excerpts from pinned documents:\n\n" +
-    lines.join("\n\n") +
-    "\n\nAnswer using these excerpts when applicable. Use search_documents for broader search.";
-  return { text, citations };
 }
 
 export function isRagToolsEnabled() {

@@ -18,6 +18,8 @@ import {
   formatAssistantToolCallDisplay,
   MCP_TOOL_HINT,
   normalizeAssistantToolCalls,
+  prepareSearchToolArgs,
+  resolveDialogueToolCalls,
   toOpenAiToolCall,
 } from "./tool-runtime.js";
 import {
@@ -36,7 +38,6 @@ import {
   renderCitationChips,
 } from "./pdf-citations.js";
 import {
-  getPinnedAutoRetrieveContext,
   initRagUi,
   refreshDocumentsPanel,
   syncRagChunkInputs,
@@ -98,6 +99,8 @@ let escapeHtml;
 let dialogueSystemPrompt = "";
 let dialogueToolDrafts = [];
 let dialogueTurns = [];
+/** User message text for the in-flight send (search tool query fallback). */
+let dialogueTriggerQuery = "";
 let dialogueImages = [];
 let dialogueSending = false;
 let dialogueSessionId = null;
@@ -229,7 +232,6 @@ function wire() {
     getSettings,
     escapeHtml,
     onOpenPdf: (opts) => pdfViewer?.openDoc(opts.docId),
-    onRagContextChange: notifyDialogueInputChanged,
   });
   wireRagUi();
   initDialoguePanelResize({ $ });
@@ -447,10 +449,8 @@ async function buildPendingDialogueLlmInput() {
   const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
   const text = $("#dialogue-input")?.value.trim() || "";
   const images = dialogueImages.slice();
-  const ragInject = await getPinnedAutoRetrieveContext(text, getSettings());
-
   const messages = [
-    ...buildDialogueSystemMessages(mcpToolNames, ragInject.text),
+    ...buildDialogueSystemMessages(mcpToolNames),
     ...turnsToChatMessages(dialogueTurns),
   ];
   if (text || images.length) {
@@ -791,13 +791,12 @@ async function buildDialogueTools(userTools) {
   return tools;
 }
 
-function buildDialogueSystemMessages(mcpToolNames = [], ragText = "") {
+function buildDialogueSystemMessages(mcpToolNames = []) {
   const parts = [];
   if (dialogueSystemPrompt.trim()) parts.push(dialogueSystemPrompt.trim());
   if (mcpToolNames.length) {
     parts.push(`${MCP_TOOL_HINT}\nAvailable MCP tools: ${mcpToolNames.join(", ")}`);
   }
-  if (ragText?.trim()) parts.push(ragText.trim());
   if (!parts.length) return [];
   return [{ role: "system", content: parts.join("\n\n") }];
 }
@@ -807,6 +806,7 @@ async function runDialogueTool(name, args) {
     type: "dialogue.tool.run",
     name,
     args,
+    userQuery: dialogueTriggerQuery,
     settings: dialogueMcpSettingsOverrides(),
   });
   if (!res) {
@@ -873,10 +873,13 @@ function buildDialogueRawFromCompletion(inputRaw, res) {
 }
 
 async function executeDialogueToolTurn(call, btn) {
+  const resolvedArgs = prepareSearchToolArgs(call.name, call.args || {}, dialogueTriggerQuery);
+  call.args = resolvedArgs;
+
   const toolTurn = {
     role: "tool",
     toolName: call.name,
-    args: call.args || {},
+    args: resolvedArgs,
     pending: true,
     content: "",
   };
@@ -887,7 +890,7 @@ async function executeDialogueToolTurn(call, btn) {
   let result = null;
   let errMsg = null;
   try {
-    result = await runDialogueTool(call.name, call.args || {});
+    result = await runDialogueTool(call.name, resolvedArgs);
   } catch (err) {
     errMsg = err.message;
   }
@@ -1744,9 +1747,7 @@ async function sendDialogue() {
     tools = await buildDialogueTools(userTools);
     const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
     userTurn = { role: "user", content: text, images };
-    const ragInject = await getPinnedAutoRetrieveContext(text, getSettings());
-    const systemMessages = buildDialogueSystemMessages(mcpToolNames, ragInject.text);
-    if (ragInject.citations?.length) userTurn.citations = ragInject.citations;
+    const systemMessages = buildDialogueSystemMessages(mcpToolNames);
     messages = [
       ...systemMessages,
       ...turnsToChatMessages(dialogueTurns),
@@ -1774,6 +1775,7 @@ async function sendDialogue() {
     if (!confirmLocalModelDownload(getSettings().webllmModel)) return;
   }
 
+  dialogueTriggerQuery = String(userTurn.content || "").trim();
   userTurn.raw = snapshotDialogueRawInput(messages, tools);
   dialogueTurns.push(userTurn);
   input.value = "";
@@ -1831,6 +1833,7 @@ async function sendDialogue() {
         break;
       }
 
+      calls = resolveDialogueToolCalls(calls, dialogueTriggerQuery);
       const callDisplay = formatAssistantToolCallDisplay(msg, calls);
       dialogueTurns.push({
         role: "assistant",
@@ -1847,7 +1850,7 @@ async function sendDialogue() {
         messages.push({
           role: "assistant",
           content: msg.content || null,
-          tool_calls: nativeCalls.map(toOpenAiToolCall),
+          tool_calls: nativeCalls.map((c) => toOpenAiToolCall(c)),
         });
       } else {
         messages.push({ role: "assistant", content: msg.content || callDisplay });

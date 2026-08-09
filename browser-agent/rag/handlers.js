@@ -4,8 +4,7 @@ import { ingestPdf } from "./ingest.js";
 import { searchDocuments } from "./search.js";
 import * as store from "./rag-store.js";
 import { toArrayBuffer } from "./binary.js";
-
-const ACTIVE_DOCS_KEY = "ragActiveDocIds";
+import { getActiveDocIds, setActiveDocIds, resolveSearchDocIds } from "./active-docs.js";
 
 async function resolveIngestBuffer(msg) {
   if (msg.stagingId) {
@@ -78,23 +77,25 @@ export async function handleRagMessage(msg, getSettings) {
       const doc = await store.getDocument(chunk.docId);
       return { chunk, doc };
     }
-    case "rag.deleteDocument":
+    case "rag.deleteDocument": {
       await store.deleteDocument(msg.docId);
+      const active = await getActiveDocIds();
+      if (active.includes(msg.docId)) {
+        await setActiveDocIds(active.filter((id) => id !== msg.docId));
+      }
       return { ok: true };
-    case "rag.search":
+    }
+    case "rag.search": {
+      const docIds = await resolveSearchDocIds(msg.docIds);
       return searchDocuments(msg.query, settings, {
-        docIds: msg.docIds,
+        docIds,
         topK: msg.topK ?? msg.top_k,
       });
-    case "rag.getActiveDocs": {
-      const { ragActiveDocIds } = await chrome.storage.local.get(ACTIVE_DOCS_KEY);
-      return { docIds: ragActiveDocIds || [] };
     }
-    case "rag.setActiveDocs": {
-      const docIds = Array.isArray(msg.docIds) ? msg.docIds : [];
-      await chrome.storage.local.set({ [ACTIVE_DOCS_KEY]: docIds });
-      return { docIds };
-    }
+    case "rag.getActiveDocs":
+      return { docIds: await getActiveDocIds() };
+    case "rag.setActiveDocs":
+      return { docIds: await setActiveDocIds(msg.docIds) };
     default:
       return null;
   }
