@@ -5,11 +5,12 @@
   "description": "Chrome MV3 browser agent with in-browser ONNX and WebLLM engines.",
   "type": "module",
   "scripts": {
-    "build:vendor": "node build/build-vendor.mjs && node build/build-webllm-vendor.mjs"
+    "build:vendor": "node build/build-vendor.mjs && node build/build-webllm-vendor.mjs && node build/build-pdf-vendor.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "4.2.0",
     "@mlc-ai/web-llm": "^0.2.79",
+    "pdfjs-dist": "^4.10.38",
     "esbuild": "^0.24.0"
   }
 }

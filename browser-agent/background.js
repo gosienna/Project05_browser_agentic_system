@@ -7,6 +7,8 @@ import { runSystemEditor } from "./system-editor-l2.js";
 import { runScriptEditor } from "./system-editor-l1.js";
 import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getEditableKinds, getSystem, saveConversation } from "./system-store.js";
 import { handleTabBridge } from "./tab-bridge.js";
+import { handleRagMessage } from "./rag/handlers.js";
+import { stripUnsupportedNativeTools } from "./webllm-models.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -160,6 +162,17 @@ function resolveChatModel(settings) {
   return settings.model;
 }
 
+/** Ensure async onMessage handlers always call sendResponse (avoids channel-closed errors). */
+function replyAsync(promise, sendResponse) {
+  promise
+    .then(sendResponse)
+    .catch((err) =>
+      sendResponse({
+        error: { message: err?.message || String(err), type: "engine_error", code: null },
+      })
+    );
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
@@ -186,27 +199,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === "settings.get") {
-    getSettings().then(sendResponse);
+    replyAsync(getSettings(), sendResponse);
     return true;
   }
   if (msg.type === "settings.set") {
-    setSettings(msg.patch).then(sendResponse);
+    replyAsync(setSettings(msg.patch), sendResponse);
     return true;
   }
   if (msg.type === "llm.test") {
-    getSettings()
-      .then((settings) =>
+    replyAsync(
+      getSettings().then((settings) =>
         chatCompletions(
           { model: settings.model, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
           settings
         )
-      )
-      .then(sendResponse);
+      ),
+      sendResponse
+    );
     return true;
   }
   if (msg.type === "dialogue.send") {
-    getSettings()
-      .then((settings) => {
+    replyAsync(
+      getSettings().then((settings) => {
         const model = resolveChatModel(settings);
         const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return chatCompletions(
@@ -219,13 +233,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           },
           settings
         );
-      })
-      .then(sendResponse);
+      }),
+      sendResponse
+    );
     return true;
   }
   if (msg.type === "dialogue.renderPrompt") {
-    getSettings()
-      .then((settings) => {
+    replyAsync(
+      getSettings().then((settings) => {
         const model = resolveChatModel(settings);
         const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return renderChatPromptPreview(
@@ -236,29 +251,41 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           },
           settings
         );
-      })
-      .then(sendResponse);
+      }),
+      sendResponse
+    );
     return true;
   }
   if (msg.type === "mcp.tools.list") {
-    getSettings()
-      .then((settings) => {
+    replyAsync(
+      getSettings().then((settings) => {
         const groups = Array.isArray(msg.groups) && msg.groups.length ? msg.groups : ["dialogue"];
         const merged = { ...settings, ...(msg.settings && typeof msg.settings === "object" ? msg.settings : {}) };
         return {
           tools: listMcpTools({ groups, settings: merged }),
           openAiTools: listMcpToolsOpenAi({ groups, settings: merged }),
         };
-      })
-      .then(sendResponse);
+      }),
+      sendResponse
+    );
     return true;
   }
   if (msg.type === "dialogue.tool.run") {
-    getSettings()
-      .then(async (settings) => {
+    replyAsync(
+      getSettings().then(async (settings) => {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        return callMcpTool(msg.name, msg.args || {}, { settings, tabId: activeTab?.id });
-      })
+        const merged = {
+          ...settings,
+          ...(msg.settings && typeof msg.settings === "object" ? msg.settings : {}),
+        };
+        return callMcpTool(msg.name, msg.args || {}, { settings: merged, tabId: activeTab?.id });
+      }).then((result) => ({ result })),
+      sendResponse
+    );
+    return true;
+  }
+  if (msg.type?.startsWith("rag.")) {
+    handleRagMessage(msg, getSettings)
       .then((result) => sendResponse({ result }))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
@@ -284,14 +311,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.type === "webllm.relay") {
     ensureOffscreenDocument()
-      .then(() =>
-        chrome.runtime.sendMessage({
+      .then(async () => {
+        const settings = await getSettings();
+        let request = msg.request;
+        if (msg.engineType === "chat.completions" && request) {
+          request = stripUnsupportedNativeTools(
+            { ...request, model: msg.model || request.model },
+            settings
+          );
+        }
+        return chrome.runtime.sendMessage({
           target: "webllm-engine",
           type: msg.engineType,
           model: msg.model,
-          request: msg.request,
-        })
-      )
+          request,
+        });
+      })
       .then(async (res) => {
         const loadedModel = msg.model || msg.request?.model;
         if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markWebllmModelDownloaded(loadedModel);

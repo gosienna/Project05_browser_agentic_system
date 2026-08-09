@@ -26,6 +26,36 @@ export function isWebllmToolModel(modelId) {
   return toolModelIds.has(modelId);
 }
 
+/** Whether chat.completions should include OpenAI-style `tools` for this provider/model. */
+export function supportsNativeChatTools(settings, modelId) {
+  const provider = settings?.provider || "onnx";
+  if (provider === "onnx") return false;
+  if (provider === "webllm") {
+    const id =
+      modelId ||
+      settings?.webllmModel ||
+      "";
+    return isWebllmToolModel(id);
+  }
+  return true;
+}
+
+/** Drop `tools` when the active provider/model cannot use native function calling. */
+export function stripUnsupportedNativeTools(request, settings) {
+  if (!request?.tools?.length) return request;
+  const provider = settings?.provider || "onnx";
+  const modelId =
+    request.model ||
+    (provider === "webllm"
+      ? settings?.webllmModel
+      : provider === "onnx"
+        ? settings?.onnxModel
+        : settings?.model);
+  if (supportsNativeChatTools(settings, modelId)) return request;
+  const { tools: _tools, ...rest } = request;
+  return rest;
+}
+
 /** Human-readable input → output summary. */
 export function formatWebllmIoLabel(entry = {}) {
   const modelId = entry.id || entry.model_id || "";

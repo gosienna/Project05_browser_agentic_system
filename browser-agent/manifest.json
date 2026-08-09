@@ -61,7 +61,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["vendor/transformers/*", "vendor/webllm/*"],
+      "resources": ["vendor/transformers/*", "vendor/webllm/*", "vendor/pdf/*"],
       "matches": ["<all_urls>"]
     }
   ]

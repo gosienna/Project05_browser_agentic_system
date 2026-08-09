@@ -105,9 +105,13 @@ export function normalizeChatCompletion(response, { thinkingEnabled = true } = {
   if (!response?.choices?.length) return response;
   return {
     ...response,
-    choices: response.choices.map((choice) => ({
-      ...choice,
-      message: normalizeAssistantMessage(choice?.message ?? {}, { thinkingEnabled }),
-    })),
+    choices: response.choices.map((choice) => {
+      const rawMessage = choice?.message ?? {};
+      return {
+        ...choice,
+        message: normalizeAssistantMessage(rawMessage, { thinkingEnabled }),
+        rawMessage,
+      };
+    }),
   };
 }

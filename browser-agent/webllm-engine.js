@@ -1,8 +1,10 @@
 // WebLLM chat engine: MLCEngine lifecycle and OpenAI-shaped chat.completions.
 // Runs inside webllm-worker.js (Dedicated Worker).
 
+import { resolveMaxTokens } from "./agent-config.js";
+import { estimateChatTokens, trimChatMessagesForContext } from "./context-trim.js";
 import { isQwen3ThinkingModel } from "./reasoning-content.js";
-import { enrichWebllmRegistryEntry } from "./webllm-models.js";
+import { enrichWebllmRegistryEntry, isWebllmToolModel } from "./webllm-models.js";
 
 const VENDOR_DIR = "vendor/webllm/";
 
@@ -19,6 +21,7 @@ let webllmModule = null;
 /** @type {import("@mlc-ai/web-llm").MLCEngine | null} */
 let engine = null;
 let loadedModelId = null;
+let loadedEmbedModelId = null;
 /** @type {"webgpu"|"unavailable"|null} */
 let device = null;
 let busy = false;
@@ -43,10 +46,39 @@ function appConfig(webllm) {
   return { ...webllm.prebuiltAppConfig, cacheBackend: "indexeddb" };
 }
 
+/** @type {RegistryEntry[]|null} */
+let embedRegistryCache = null;
+
 /** Embedding-only builds are not chat models. */
+function isEmbedModelRecord(m) {
+  return m?.model_type === "embedding" || (/embed/i.test(m?.model_id || "") && m?.model_type !== "vlm");
+}
+
 function isChatModel(modelId) {
   return !/embed/i.test(modelId);
 }
+
+function buildEmbedRegistry(webllm) {
+  return webllm.prebuiltAppConfig.model_list
+    .filter((m) => isEmbedModelRecord(m))
+    .map((m) => ({
+      id: m.model_id,
+      label: humanizeModelId(m.model_id),
+      approxSizeMB: Math.round(m.vram_required_MB),
+      tier: tierForVram(m.vram_required_MB),
+    }))
+    .sort((a, b) => a.approxSizeMB - b.approxSizeMB || a.id.localeCompare(b.id));
+}
+
+export async function getEmbedModelRegistry() {
+  if (embedRegistryCache) return embedRegistryCache;
+  const webllm = await loadWebLLM();
+  embedRegistryCache = buildEmbedRegistry(webllm);
+  console.log(`[webllm] embed registry: ${embedRegistryCache.length} models`);
+  return embedRegistryCache;
+}
+
+export const DEFAULT_WEBLLM_EMBED_MODEL = "snowflake-arctic-embed-s-q0f32-MLC-b4";
 
 function tierForVram(vramMB) {
   if (vramMB < 2000) return "fast";
@@ -196,7 +228,11 @@ export async function status() {
   return {
     device: probed,
     loadedModel: loadedModelId,
-    loaded: loadedModelId ? [{ task: "text-generation", model: loadedModelId }] : [],
+    loadedEmbedModel: loadedEmbedModelId,
+    loaded: [
+      ...(loadedModelId ? [{ task: "text-generation", model: loadedModelId }] : []),
+      ...(loadedEmbedModelId ? [{ task: "feature-extraction", model: loadedEmbedModelId }] : []),
+    ],
     busy,
     registry,
     cacheBackend: "indexeddb",
@@ -213,7 +249,39 @@ export async function unload() {
     }
   }
   loadedModelId = null;
+  loadedEmbedModelId = null;
   return status();
+}
+
+/**
+ * MLCEngine.reload() always unloads everything before loading the given set
+ * (see vendor bundle), so the chat model and the embedding model must be
+ * reloaded together as one array — otherwise loading one silently evicts the
+ * other even though `loadedModelId`/`loadedEmbedModelId` still claim it's resident.
+ */
+async function reloadModelSet({ chatModelId, embedModelId } = {}) {
+  const eng = await ensureEngine();
+  const targetChat = chatModelId !== undefined ? chatModelId : loadedModelId;
+  const targetEmbed = embedModelId !== undefined ? embedModelId : loadedEmbedModelId;
+  const ids = [...new Set([targetChat, targetEmbed].filter(Boolean))];
+  if (!ids.length) {
+    await eng.unload();
+    loadedModelId = null;
+    loadedEmbedModelId = null;
+    return;
+  }
+  try {
+    await eng.reload(ids);
+  } catch (err) {
+    // reload() unloads everything before loading the new set, so a failure
+    // partway through leaves actual engine state unknown — don't let stale
+    // tracking vars claim a model is resident when it may not be.
+    loadedModelId = null;
+    loadedEmbedModelId = null;
+    throw err;
+  }
+  loadedModelId = targetChat || null;
+  loadedEmbedModelId = targetEmbed || null;
 }
 
 export async function clearCache() {
@@ -236,7 +304,8 @@ export async function deleteModel(modelId) {
   if (!modelId) {
     return { error: { message: "engine.deleteModel requires a model id", type: "engine_error", code: null } };
   }
-  if (loadedModelId === modelId) await unload();
+  if (loadedModelId === modelId) await reloadModelSet({ chatModelId: null });
+  if (loadedEmbedModelId === modelId) await reloadModelSet({ embedModelId: null });
   const webllm = await loadWebLLM();
   try {
     await webllm.deleteModelInCache(modelId, appConfig(webllm));
@@ -256,20 +325,9 @@ export async function loadModel(modelId) {
 
   requestPeerUnload("onnx-engine", { type: "engine.unloadLlm" });
 
-  const eng = await ensureEngine();
-  if (loadedModelId && loadedModelId !== modelId) {
-    try {
-      await eng.unload();
-    } catch (err) {
-      console.warn("[webllm] unload before reload:", err);
-    }
-    loadedModelId = null;
-  }
-
-  loadedModelId = modelId;
   console.log(`[webllm] loading ${modelId} on WebGPU`);
   try {
-    await eng.reload(modelId);
+    await reloadModelSet({ chatModelId: modelId });
   } catch (err) {
     loadedModelId = null;
     throw err;
@@ -326,16 +384,30 @@ async function runChatCompletions(request) {
 
   busy = true;
   try {
+    const maxTokens = resolveMaxTokens(request.max_tokens);
+    const entry = await registryEntry(modelId);
+    const contextLimit = entry?.contextWindow ?? 4096;
+    const tools =
+      Array.isArray(request.tools) && request.tools.length && isWebllmToolModel(modelId)
+        ? request.tools
+        : undefined;
+
+    const trim = trimChatMessagesForContext(request.messages, tools, contextLimit, maxTokens);
+    if (trim.trimmed) {
+      console.warn(
+        `[webllm] trimmed prompt for ${modelId}: dropped ${trim.droppedTurns} older turn(s); ` +
+          `~${trim.estimatedTokens}/${trim.budget} tokens (context ${contextLimit})`
+      );
+    }
+
     const body = {
       model: modelId,
-      messages: request.messages,
+      messages: trim.messages,
       stream: false,
       temperature: request.temperature ?? 0.2,
-      max_tokens: request.max_tokens ?? 1024,
+      max_tokens: maxTokens,
     };
-    if (Array.isArray(request.tools) && request.tools.length) {
-      body.tools = request.tools;
-    }
+    if (tools?.length) body.tools = tools;
     if (isQwen3ThinkingModel(modelId)) {
       body.extra_body = { enable_thinking: request.thinkingEnabled !== false };
     }
@@ -360,10 +432,30 @@ async function runChatCompletions(request) {
         completion_tokens: 0,
         total_tokens: 0,
       },
+      ...(trim.trimmed
+        ? {
+            context_trimmed: {
+              droppedTurns: trim.droppedTurns,
+              estimatedTokens: trim.estimatedTokens,
+              contextLimit,
+            },
+          }
+        : {}),
     };
   } catch (err) {
     const message = String(err?.message || err);
     console.error(`[webllm] chat failed for ${modelId}:`, message);
+    if (/context window|ContextWindowSizeExceeded/i.test(message)) {
+      const entry = await registryEntry(modelId);
+      const contextLimit = entry?.contextWindow ?? 4096;
+      const est = estimateChatTokens(request.messages, request.tools);
+      return errorResponse(
+        `Prompt is too long for WebLLM (~${est.toLocaleString()} tokens estimated; ` +
+          `model limit ${contextLimit.toLocaleString()}). Start a new chat, unpin RAG documents, ` +
+          "or switch to the ONNX/Ollama provider for larger context.",
+        "context_exceeded"
+      );
+    }
     if (/device lost|out of memory|oom/i.test(message)) {
       loadedModelId = null;
       try {
@@ -384,4 +476,58 @@ async function runChatCompletions(request) {
 
 export function chatCompletions(request) {
   return enqueue(() => runChatCompletions(request));
+}
+
+async function isKnownEmbedModel(modelId) {
+  if (!modelId) return false;
+  const registry = await getEmbedModelRegistry();
+  return registry.some((m) => m.id === modelId);
+}
+
+async function ensureEmbedLoaded(modelId) {
+  if (!modelId) return errorResponse("No embedding model specified.", "model_not_loaded");
+  if (!(await isKnownEmbedModel(modelId))) {
+    return errorResponse(`Unknown WebLLM embedding model "${modelId}".`, "model_not_loaded");
+  }
+  if (loadedEmbedModelId !== modelId) {
+    try {
+      await reloadModelSet({ embedModelId: modelId });
+      markDownloaded(modelId);
+    } catch (err) {
+      loadedEmbedModelId = null;
+      return errorResponse(String(err?.message || err), "download_failed");
+    }
+  }
+  if (!engine) return errorResponse("WebLLM engine not ready.", "engine_error");
+  return null;
+}
+
+async function runCreateEmbeddings(request) {
+  const modelId = request?.model;
+  const loadErr = await ensureEmbedLoaded(modelId);
+  if (loadErr) return loadErr;
+
+  const input = request?.input;
+  if (input == null || (Array.isArray(input) && input.length === 0)) {
+    return errorResponse("No input provided for embeddings.", "engine_error");
+  }
+
+  busy = true;
+  try {
+    const res = await engine.embeddings.create({ model: modelId, input });
+    const data = res?.data || [];
+    return {
+      model: modelId,
+      embeddings: data.map((d) => ({ embedding: d.embedding, index: d.index })),
+      dims: data[0]?.embedding?.length ?? 0,
+    };
+  } catch (err) {
+    return errorResponse(String(err?.message || err), "engine_error");
+  } finally {
+    busy = false;
+  }
+}
+
+export function createEmbeddings(request) {
+  return enqueue(() => runCreateEmbeddings(request));
 }

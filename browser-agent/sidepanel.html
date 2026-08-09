@@ -39,6 +39,8 @@
       <section id="tab-dialogue" class="tab-panel">
         <div class="dialogue-toolbar">
           <button id="dialogue-sessions-toggle" type="button" class="secondary-btn" aria-expanded="false">Sessions</button>
+          <button id="dialogue-documents-toggle" type="button" class="secondary-btn" aria-expanded="false">Documents</button>
+          <button id="dialogue-pdf-toggle" type="button" class="secondary-btn" aria-expanded="false">PDF viewer</button>
           <button id="dialogue-new-btn" type="button" class="secondary-btn">New chat</button>
         </div>
         <div class="dialogue-layout">
@@ -67,6 +69,10 @@
                     <input type="checkbox" id="dialogue-browser-tools-enabled" checked />
                     Browser tools (MCP)
                   </label>
+                  <label class="dialogue-web-search-label">
+                    <input type="checkbox" id="dialogue-rag-tools-enabled" checked />
+                    Document search (RAG)
+                  </label>
                 </div>
                 <p id="dialogue-mcp-status" class="dialogue-mcp-status"></p>
                 <div id="dialogue-tools-list" class="dialogue-tools-list"></div>
@@ -91,6 +97,7 @@
                 </div>
                 <pre id="dialogue-preview-panel" class="dialogue-raw-panel hidden"></pre>
               </div>
+              <div id="dialogue-rag-status" class="dialogue-rag-status hidden" role="status" aria-live="polite"></div>
               <div id="dialogue-attachments" class="dialogue-attachments hidden"></div>
               <textarea id="dialogue-input" placeholder="Type a message…" rows="2"></textarea>
               <div id="dialogue-context-bar" class="dialogue-context-bar hidden" title="">
@@ -100,11 +107,26 @@
               <div class="dialogue-controls">
                 <select id="dialogue-model-select" aria-label="Chat model" title="Chat model"></select>
                 <input type="file" id="dialogue-image-input" accept="image/*" multiple class="hidden" />
+                <input type="file" id="dialogue-pdf-input" accept=".pdf,application/pdf" class="hidden" />
                 <button type="button" id="dialogue-attach-btn" class="icon-btn hidden" title="Attach image" aria-label="Attach image">🖼</button>
+                <button type="button" id="dialogue-pdf-btn" class="icon-btn" title="Attach PDF" aria-label="Attach PDF">📄</button>
                 <button type="submit" id="dialogue-send-btn">Send</button>
               </div>
             </form>
           </div>
+          <aside id="dialogue-documents-panel" class="dialogue-documents-panel collapsed" aria-label="Ingested PDF documents">
+            <div class="dialogue-documents-header">PDF documents</div>
+            <div class="dialogue-chunk-controls">
+              <label>Chunk size <input type="number" id="dialogue-chunk-size" min="200" max="2000" step="50" /></label>
+              <label>Overlap <input type="number" id="dialogue-chunk-overlap" min="0" max="1000" step="10" /></label>
+              <label class="dialogue-chunk-save"><input type="checkbox" id="dialogue-chunk-save-default" /> Save as default</label>
+            </div>
+            <p class="dialogue-documents-hint">Smaller chunks = finer retrieval; larger chunks = more context per hit. Pin documents to inject matching excerpts into the system message on send (visible in Show raw). Without pinning, the model uses search_documents instead.</p>
+            <div id="dialogue-docs-list" class="dialogue-docs-list"></div>
+          </aside>
+          <aside id="dialogue-pdf-panel" class="dialogue-pdf-panel collapsed" aria-label="PDF viewer">
+            <div id="dialogue-pdf-viewer" class="dialogue-pdf-viewer"></div>
+          </aside>
         </div>
       </section>
 
@@ -277,6 +299,40 @@
           <label for="tavily-api-key">Tavily API key</label>
           <input id="tavily-api-key" type="password" placeholder="tvly-…" autocomplete="off" />
           <p class="hint">Powers the built-in <code>web_search</code> tool in Dialogue. <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> — free tier includes 1,000 searches/month.</p>
+
+          <div id="rag-settings" class="provider-block">
+            <h3 class="onnx-section-title">RAG (PDF documents)</h3>
+            <label class="settings-checkbox">
+              <input type="checkbox" id="dialogue-rag-tools-setting" checked />
+              Enable document search tools in Dialogue
+            </label>
+            <label for="rag-embed-provider">Embedding provider</label>
+            <select id="rag-embed-provider">
+              <option value="auto">Auto (match chat provider)</option>
+              <option value="onnx">ONNX (Transformers.js)</option>
+              <option value="webllm">WebLLM</option>
+              <option value="ollama">Ollama</option>
+            </select>
+            <label for="rag-onnx-embed-model">ONNX embed model</label>
+            <select id="rag-onnx-embed-model"></select>
+            <input id="rag-onnx-embed-model-custom" class="hidden" placeholder="Custom HF model id (feature-extraction)" />
+
+            <label for="rag-webllm-embed-model">WebLLM embed model</label>
+            <select id="rag-webllm-embed-model"></select>
+
+            <label for="rag-ollama-embed-model">Ollama embed model</label>
+            <select id="rag-ollama-embed-model"></select>
+            <input id="rag-ollama-embed-model-custom" class="hidden" placeholder="Custom Ollama model tag" />
+            <button id="rag-ollama-embed-refresh-btn" type="button">Refresh installed models</button>
+
+            <p class="hint">Each document/chunk remembers which model embedded it, so switching models here doesn't break older documents — search only matches chunks embedded with the currently selected model. Re-ingest a PDF to make it searchable under a new model.</p>
+
+            <label for="rag-chunk-size">Default chunk size (chars)</label>
+            <input id="rag-chunk-size" type="number" min="200" max="2000" step="50" />
+            <label for="rag-chunk-overlap">Default chunk overlap (chars)</label>
+            <input id="rag-chunk-overlap" type="number" min="0" max="1000" step="10" />
+            <p class="hint">PDFs are stored in IndexedDB with embeddings for semantic search. Pin documents in Dialogue for auto-retrieve.</p>
+          </div>
 
           <button id="test-connection-btn" type="button">Test connection</button>
           <span id="test-connection-result"></span>

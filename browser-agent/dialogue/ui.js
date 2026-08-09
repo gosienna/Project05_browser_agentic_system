@@ -27,11 +27,36 @@ import {
   serializeDialogueRawPayload,
 } from "./raw-json-view.js";
 import { listOllamaModelsWithMeta } from "../ollama-models.js";
+import { isWebllmToolModel } from "../webllm-models.js";
+import { initPdfViewer } from "../rag/pdf-viewer.js";
+import {
+  bindPdfCitationOpener,
+  citationsFromSearchResult,
+  formatSearchDocumentsDisplay,
+  renderCitationChips,
+} from "./pdf-citations.js";
+import {
+  getPinnedAutoRetrieveContext,
+  initRagUi,
+  refreshDocumentsPanel,
+  syncRagChunkInputs,
+  wireRagUi,
+} from "./rag-ui.js";
+import { initDialoguePanelResize } from "./panel-resize.js";
+
+let pdfViewer = null;
 
 const DIALOGUE_MAX_TOOL_ROUNDS = 5;
 /** Keep tool payloads small — large HTML + local ONNX (esp. WebGPU) can OOM or crash the next inference. */
 const DIALOGUE_TOOL_RESULT_CHARS = 8000;
+const DIALOGUE_WEBLLM_TOOL_RESULT_CHARS = 3000;
 const DIALOGUE_HTML_FIELD_CHARS = 6000;
+
+function dialogueToolResultCharLimit() {
+  return (getSettings?.().provider || "onnx") === "webllm"
+    ? DIALOGUE_WEBLLM_TOOL_RESULT_CHARS
+    : DIALOGUE_TOOL_RESULT_CHARS;
+}
 
 function stringifyToolResultForLlm(toolName, result) {
   if (result == null) return "";
@@ -49,8 +74,9 @@ function stringifyToolResultForLlm(toolName, result) {
     }
   }
   const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
-  if (text.length <= DIALOGUE_TOOL_RESULT_CHARS) return text;
-  return `${text.slice(0, DIALOGUE_TOOL_RESULT_CHARS)}\n...[truncated for LLM context]`;
+  const limit = dialogueToolResultCharLimit();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n...[truncated for LLM context]`;
 }
 
 let $;
@@ -112,12 +138,16 @@ export function createDialoguePanel(deps) {
       refreshDialogueModelSelect();
       refreshDialogueSessionsList();
       refreshDialogueContextEstimate();
+      syncRagChunkInputs();
+      refreshDocumentsPanel();
     },
     onSettingsChanged() {
       refreshDialogueModelSelect();
       syncDialogueMcpTogglesFromSettings();
+      syncRagChunkInputs();
       renderDialogueToolsForm();
       refreshDialogueContextEstimate();
+      refreshDocumentsPanel();
     },
   };
 }
@@ -184,6 +214,28 @@ function wire() {
       notifyDialogueInputChanged();
     });
   }
+  const ragToolsCb = $("#dialogue-rag-tools-enabled");
+  if (ragToolsCb) {
+    ragToolsCb.addEventListener("change", (e) => {
+      saveSettings({ dialogueRagTools: e.target.checked });
+      renderDialogueToolsForm();
+      notifyDialogueInputChanged();
+    });
+  }
+  initRagUi({
+    $,
+    sendMessage,
+    saveSettings,
+    getSettings,
+    escapeHtml,
+    onOpenPdf: (opts) => pdfViewer?.openDoc(opts.docId),
+    onRagContextChange: notifyDialogueInputChanged,
+  });
+  wireRagUi();
+  initDialoguePanelResize({ $ });
+  pdfViewer = initPdfViewer($("#dialogue-pdf-viewer"), { panel: $("#dialogue-pdf-panel") });
+  bindPdfCitationOpener((opts) => pdfViewer?.openCitation(opts));
+  syncRagChunkInputs();
   wireDialogueInputPreview();
   renderDialogue();
   renderDialogueToolsForm();
@@ -395,9 +447,10 @@ async function buildPendingDialogueLlmInput() {
   const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
   const text = $("#dialogue-input")?.value.trim() || "";
   const images = dialogueImages.slice();
+  const ragInject = await getPinnedAutoRetrieveContext(text, getSettings());
 
   const messages = [
-    ...buildDialogueSystemMessages(mcpToolNames),
+    ...buildDialogueSystemMessages(mcpToolNames, ragInject.text),
     ...turnsToChatMessages(dialogueTurns),
   ];
   if (text || images.length) {
@@ -703,12 +756,19 @@ function syncDialogueMcpTogglesFromSettings() {
   if (webSearchCb) webSearchCb.checked = getSettings().dialogueWebSearch !== false;
   const browserToolsCb = $("#dialogue-browser-tools-enabled");
   if (browserToolsCb) browserToolsCb.checked = getSettings().dialogueBrowserTools !== false;
+  const ragToolsCb = $("#dialogue-rag-tools-enabled");
+  if (ragToolsCb) ragToolsCb.checked = getSettings().dialogueRagTools !== false;
+}
+
+function isDialogueRagToolsEnabled() {
+  return getSettings().dialogueRagTools !== false && $("#dialogue-rag-tools-enabled")?.checked !== false;
 }
 
 function dialogueMcpSettingsOverrides() {
   return {
     dialogueWebSearch: isDialogueWebSearchEnabled(),
     dialogueBrowserTools: isDialogueBrowserToolsEnabled(),
+    dialogueRagTools: isDialogueRagToolsEnabled(),
   };
 }
 
@@ -731,19 +791,31 @@ async function buildDialogueTools(userTools) {
   return tools;
 }
 
-function buildDialogueSystemMessages(mcpToolNames = []) {
+function buildDialogueSystemMessages(mcpToolNames = [], ragText = "") {
   const parts = [];
   if (dialogueSystemPrompt.trim()) parts.push(dialogueSystemPrompt.trim());
   if (mcpToolNames.length) {
     parts.push(`${MCP_TOOL_HINT}\nAvailable MCP tools: ${mcpToolNames.join(", ")}`);
   }
+  if (ragText?.trim()) parts.push(ragText.trim());
   if (!parts.length) return [];
   return [{ role: "system", content: parts.join("\n\n") }];
 }
 
 async function runDialogueTool(name, args) {
-  const res = await sendMessage({ type: "dialogue.tool.run", name, args });
-  if (res?.error) throw new Error(res.error);
+  const res = await sendMessage({
+    type: "dialogue.tool.run",
+    name,
+    args,
+    settings: dialogueMcpSettingsOverrides(),
+  });
+  if (!res) {
+    throw new Error("Tool runner did not respond — reload the extension and try again.");
+  }
+  if (res?.error) {
+    const err = res.error;
+    throw new Error(typeof err === "string" ? err : err?.message || String(err));
+  }
   return res.result;
 }
 
@@ -773,6 +845,9 @@ function formatToolTurnDisplay(toolName, result, error) {
       if (r.url) lines.push(`  ${r.url}`);
     }
     return lines.join("\n") || "(no results)";
+  }
+  if (toolName === "search_documents") {
+    return formatSearchDocumentsDisplay(result);
   }
   return typeof result === "string" ? result : JSON.stringify(result, null, 2);
 }
@@ -821,17 +896,51 @@ async function executeDialogueToolTurn(call, btn) {
   toolTurn.result = result;
   toolTurn.error = errMsg;
   toolTurn.content = formatToolTurnDisplay(call.name, result, errMsg);
+  if (call.name === "search_documents" && result && !errMsg) {
+    toolTurn.citations = citationsFromSearchResult(result);
+  }
   renderDialogue();
 
   const resultText = errMsg ? `Error: ${errMsg}` : stringifyToolResultForLlm(call.name, result);
   return { toolTurn, resultText };
 }
 
+function activeDialogueChatModelId() {
+  const provider = getSettings().provider || "onnx";
+  const fromSelect = $("#dialogue-model-select")?.value || "";
+  if (provider === "onnx") return fromSelect || getSettings().onnxModel || "";
+  if (provider === "webllm") return fromSelect || getSettings().webllmModel || "";
+  return fromSelect || getSettings().model || "";
+}
+
+/** Native OpenAI-style tools — only for providers/models that support them. */
+function dialogueCompletionTools(tools) {
+  if (!tools?.length) return [];
+  const provider = getSettings().provider || "onnx";
+  if (provider === "onnx") return [];
+  if (provider === "webllm") {
+    return isWebllmToolModel(activeDialogueChatModelId()) ? tools : [];
+  }
+  return tools;
+}
+
 async function dialogueChatCompletion(messages, tools) {
+  const apiTools = dialogueCompletionTools(tools);
   return sendMessage({
     type: "dialogue.send",
     messages,
-    ...(tools.length ? { tools } : {}),
+    ...(apiTools.length ? { tools: apiTools } : {}),
+  });
+}
+
+function noteWebllmContextTrim(res) {
+  const trim = res?.context_trimmed;
+  if (!trim?.droppedTurns) return;
+  dialogueTurns.push({
+    role: "assistant",
+    content:
+      `ℹ WebLLM context limit (${formatDialogueTokenCount(trim.contextLimit)} tokens): ` +
+      `dropped ${trim.droppedTurns} older message(s) from this request.`,
   });
 }
 
@@ -877,10 +986,12 @@ async function renderDialogueToolsForm() {
   const status = $("#dialogue-mcp-status");
   const webOn = isDialogueWebSearchEnabled();
   const browserOn = isDialogueBrowserToolsEnabled();
+  const ragOn = isDialogueRagToolsEnabled();
   if (status) {
     const parts = [];
     if (webOn) parts.push("web search");
     if (browserOn) parts.push("browser automation");
+    if (ragOn) parts.push("document RAG");
     status.textContent = parts.length
       ? `MCP enabled: ${parts.join(" + ")}`
       : "No MCP tools enabled — check the boxes above.";
@@ -1499,6 +1610,7 @@ function renderDialogue() {
         resultEl.className = "dialogue-tool-call-result";
         resultEl.textContent = turn.content || (turn.error ? `Error: ${turn.error}` : "");
         bubble.appendChild(resultEl);
+        if (turn.citations?.length) renderCitationChips(turn.citations, bubble);
       } else {
         const pendingEl = document.createElement("div");
         pendingEl.className = "dialogue-tool-pending";
@@ -1534,6 +1646,7 @@ function renderDialogue() {
       text.textContent = turn.content;
       bubble.appendChild(text);
     }
+    if (turn.citations?.length) renderCitationChips(turn.citations, bubble);
     if (turn.reasoning) appendDialogueThinkingBlock(bubble, turn.reasoning);
 
     if (turn.raw) appendDialogueRawPanel(bubble, turn.raw);
@@ -1631,8 +1744,11 @@ async function sendDialogue() {
     tools = await buildDialogueTools(userTools);
     const mcpToolNames = tools.map((t) => t.function?.name).filter(Boolean);
     userTurn = { role: "user", content: text, images };
+    const ragInject = await getPinnedAutoRetrieveContext(text, getSettings());
+    const systemMessages = buildDialogueSystemMessages(mcpToolNames, ragInject.text);
+    if (ragInject.citations?.length) userTurn.citations = ragInject.citations;
     messages = [
-      ...buildDialogueSystemMessages(mcpToolNames),
+      ...systemMessages,
       ...turnsToChatMessages(dialogueTurns),
       turnToMessage(userTurn),
     ];
@@ -1681,6 +1797,7 @@ async function sendDialogue() {
       const inputRaw = snapshotDialogueRawInput(messages, tools);
       const res = await dialogueChatCompletion(messages, tools);
       if (res?.error) throw new Error(res.error.message);
+      noteWebllmContextTrim(res);
       if (res.usage) {
         dialogueLastUsage = res.usage;
         renderDialogueContextBar();
@@ -1690,7 +1807,21 @@ async function sendDialogue() {
       const msg = choice.message ?? {};
       if (round === 0 && typeof res?.prompt === "string") userTurn.raw.prompt = res.prompt;
 
-      const calls = normalizeAssistantToolCalls(msg, tools);
+      let calls = normalizeAssistantToolCalls(msg, tools);
+      if (!calls.length && choice.rawMessage) {
+        const rawText = [
+          choice.rawMessage.content,
+          choice.rawMessage.thinking,
+          choice.rawMessage.reasoning,
+          choice.rawMessage.reasoning_content,
+        ]
+          .filter((x) => typeof x === "string" && x.trim())
+          .join("\n");
+        calls = normalizeAssistantToolCalls(
+          { content: rawText, tool_calls: choice.rawMessage.tool_calls },
+          tools
+        );
+      }
       if (!calls.length) {
         dialogueTurns.push({
           ...assistantTurnFromCompletion(msg, choice),
@@ -1742,6 +1873,7 @@ async function sendDialogue() {
       const inputRaw = snapshotDialogueRawInput(messages, tools);
       const res = await dialogueChatCompletion(messages, tools);
       if (res?.error) throw new Error(res.error.message);
+      noteWebllmContextTrim(res);
       if (res.usage) {
         dialogueLastUsage = res.usage;
         renderDialogueContextBar();

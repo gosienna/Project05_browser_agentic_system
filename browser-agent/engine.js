@@ -2,6 +2,7 @@
 // pipeline cache, run() for any supported task, and OpenAI-shaped chat for
 // text-generation. Intended to run inside ort-worker.js (Dedicated Worker).
 
+import { resolveMaxTokens } from "./agent-config.js";
 import { applyIndexedDbCache, clearModelCache, deleteModelFromCache, listCachedFiles } from "./model-cache.js";
 import { isQwen3ThinkingModel } from "./reasoning-content.js";
 
@@ -196,6 +197,10 @@ export const MODEL_REGISTRY = [
   { id: "Xenova/whisper-tiny", label: "Whisper tiny (multilingual)", approxSizeMB: 80, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
   { id: "Xenova/whisper-small.en", label: "Whisper small.en", approxSizeMB: 500, tier: "max", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
   { id: "onnx-community/moonshine-tiny-ONNX", label: "Moonshine tiny", approxSizeMB: 50, tier: "fast", task: "automatic-speech-recognition", pipeline_tag: "automatic-speech-recognition", modality: "audio" },
+
+  // Text embeddings (RAG)
+  { id: "Xenova/all-MiniLM-L6-v2", label: "MiniLM L6 embeddings", approxSizeMB: 25, tier: "fast", task: "feature-extraction", pipeline_tag: "feature-extraction", modality: "embedding" },
+  { id: "Xenova/bge-small-en-v1.5", label: "BGE small embeddings", approxSizeMB: 35, tier: "default", task: "feature-extraction", pipeline_tag: "feature-extraction", modality: "embedding" },
 ];
 
 /** Hugging Face pipeline_tag display names (Hub model-card taxonomy). */
@@ -206,6 +211,7 @@ export const PIPELINE_TAG_LABELS = {
   "image-to-text": "Image-to-Text",
   "image-classification": "Image Classification",
   "automatic-speech-recognition": "Automatic Speech Recognition",
+  "feature-extraction": "Feature Extraction",
 };
 
 export function pipelineTagLabel(tagOrEntry) {
@@ -218,6 +224,7 @@ export function pipelineTagLabel(tagOrEntry) {
 const DEFAULT_TOP_P = 0.9;
 const TEXT_GENERATION = "text-generation";
 const IMAGE_TEXT_TO_TEXT = "image-text-to-text";
+const FEATURE_EXTRACTION = "feature-extraction";
 const LLM_TASKS = [TEXT_GENERATION, IMAGE_TEXT_TO_TEXT];
 
 let device = null; // "webgpu" | "wasm", probed once and cached
@@ -889,7 +896,7 @@ async function invokeMinistral(entry, input, options) {
   }
 
   const inputs = await processor(prompt, images, { add_special_tokens: false });
-  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
   const temperature = options.temperature ?? 0.2;
   const outputs = await model.generate({
     ...inputs,
@@ -928,7 +935,7 @@ async function invokeGemma4(entry, input, options) {
 
   // Transformers.js: processor(text, images?, audio?, opts) — pass null when unused.
   const inputs = await processor(prompt, images, null, { add_special_tokens: false });
-  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
   const temperature = options.temperature ?? 0.2;
   const outputs = await model.generate({
     ...inputs,
@@ -1002,7 +1009,7 @@ async function invokeTextLlm(pipe, input, options, entry) {
     throw new Error("Text-generation pipeline is missing model or tokenizer");
   }
 
-  const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+  const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
   const temperature = options.temperature ?? 0.2;
   const tools = options?.tools?.length ? options.tools : undefined;
   const templateExtra = templateThinkingExtra(entry?.id ?? entry?.model, options.enable_thinking !== false);
@@ -1066,7 +1073,7 @@ async function invokeTextLlm(pipe, input, options, entry) {
 
 async function invokePipeline(pipe, task, input, options) {
   if (task === IMAGE_TEXT_TO_TEXT) {
-    const maxNewTokens = options.max_new_tokens ?? options.max_tokens ?? 512;
+    const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
     const temperature = options.temperature ?? 0.2;
     const tools = options?.tools?.length ? options.tools : undefined;
     const prompt = renderChatPrompt(pipe, input, tools);
@@ -1093,6 +1100,9 @@ async function invokePipeline(pipe, task, input, options) {
   }
   if (task === "automatic-speech-recognition") {
     return pipe(input, options);
+  }
+  if (task === FEATURE_EXTRACTION) {
+    return pipe(input, { pooling: "mean", normalize: true });
   }
   // image-to-text and other VisionEncoderDecoder-style pipelines
   return pipe(input, options);
@@ -1139,6 +1149,14 @@ function normalizeOutput(task, raw, options) {
   if (task === "automatic-speech-recognition") {
     const text = typeof raw === "string" ? raw : raw?.text ?? "";
     return { text };
+  }
+  if (task === FEATURE_EXTRACTION) {
+    const tensor = raw?.data != null ? raw : Array.isArray(raw) ? raw[0] : raw;
+    let vec = [];
+    if (tensor?.data) vec = Array.from(tensor.data);
+    else if (Array.isArray(tensor)) vec = tensor.flat();
+    else if (tensor?.tolist) vec = tensor.tolist().flat();
+    return { embedding: vec, dims: vec.length };
   }
   return raw;
 }
@@ -1197,7 +1215,7 @@ async function runChatCompletions(request) {
     model: modelId,
     input: request.messages,
     options: {
-      max_new_tokens: request.max_tokens ?? 512,
+      max_new_tokens: resolveMaxTokens(request.max_tokens),
       temperature: request.temperature ?? 0.2,
       enable_thinking: thinkingEnabled,
       ...(Array.isArray(request.tools) && request.tools.length ? { tools: request.tools } : {}),

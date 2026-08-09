@@ -17,6 +17,7 @@ import {
 } from "./system-store.js";
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
+import { chatCompletions, renderChatPromptPreview } from "./llm.js";
 import { createDialoguePanel } from "./dialogue/index.js";
 import {
   deleteOllamaModel,
@@ -25,10 +26,16 @@ import {
   getInstalledVariants,
   isOllamaModelInstalled,
   listOllamaInstalled,
+  listOllamaModelsWithMeta,
   ollamaInstalledDownloadMap,
   pullOllamaModel,
 } from "./ollama-models.js";
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
+import {
+  DEFAULT_ONNX_EMBED_MODEL,
+  DEFAULT_WEBLLM_EMBED_MODEL,
+  DEFAULT_OLLAMA_EMBED_MODEL,
+} from "./rag/config.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -135,7 +142,55 @@ async function init() {
   await refreshSystems();
 }
 
-function sendMessage(msg) {
+function resolveChatModel(settings) {
+  const provider = settings?.provider || "onnx";
+  if (provider === "onnx") return settings.onnxModel;
+  if (provider === "webllm") return settings.webllmModel;
+  return settings.model;
+}
+
+/** Remote providers can run for minutes; call Ollama/OpenAI/Anthropic from the panel to avoid MV3 message timeouts. */
+function isRemoteLlmProvider(provider) {
+  return (
+    provider === "ollama" ||
+    provider === "openai" ||
+    provider === "anthropic" ||
+    provider === "openai-compatible"
+  );
+}
+
+async function sendMessage(msg) {
+  const provider = settings?.provider || "onnx";
+  if (isRemoteLlmProvider(provider)) {
+    if (msg?.type === "dialogue.send") {
+      const model = resolveChatModel(settings);
+      const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
+      return chatCompletions(
+        {
+          model,
+          messages: msg.messages,
+          ...(tools ? { tools } : {}),
+          temperature: settings.temperature ?? 0.2,
+          max_tokens: getMaxTokens(settings),
+        },
+        settings
+      );
+    }
+    if (msg?.type === "dialogue.renderPrompt") {
+      const model = resolveChatModel(settings);
+      const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
+      return renderChatPromptPreview(
+        { model, messages: msg.messages, ...(tools ? { tools } : {}) },
+        settings
+      );
+    }
+    if (msg?.type === "llm.test") {
+      return chatCompletions(
+        { model: settings.model, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+        settings
+      );
+    }
+  }
   return chrome.runtime.sendMessage(msg);
 }
 
@@ -171,6 +226,7 @@ function openSettingsModal() {
   if (settings.provider === "onnx") refreshOnnxSettings();
   if (settings.provider === "webllm") refreshWebllmSettings();
   if (settings.provider === "ollama") refreshOllamaSettings();
+  refreshRagEmbedModelOptions();
 }
 
 function closeSettingsModal() {
@@ -262,6 +318,19 @@ function wireSettingsForm() {
     saveSettings({ enableThinking: e.target.checked });
   });
   $("#tavily-api-key").addEventListener("change", (e) => saveSettings({ tavilyApiKey: e.target.value.trim() }));
+  const ragToolsSetting = $("#dialogue-rag-tools-setting");
+  if (ragToolsSetting) ragToolsSetting.addEventListener("change", (e) => saveSettings({ dialogueRagTools: e.target.checked }));
+  $("#rag-embed-provider").addEventListener("change", (e) => saveSettings({ ragEmbedProvider: e.target.value }));
+  wireEmbedModelSelect($("#rag-onnx-embed-model"), $("#rag-onnx-embed-model-custom"), (modelId) =>
+    saveSettings({ ragOnnxEmbedModel: modelId })
+  );
+  $("#rag-webllm-embed-model").addEventListener("change", (e) => saveSettings({ ragWebllmEmbedModel: e.target.value }));
+  wireEmbedModelSelect($("#rag-ollama-embed-model"), $("#rag-ollama-embed-model-custom"), (modelId) =>
+    saveSettings({ ragOllamaEmbedModel: modelId })
+  );
+  $("#rag-ollama-embed-refresh-btn")?.addEventListener("click", () => refreshRagEmbedModelOptions());
+  $("#rag-chunk-size").addEventListener("change", (e) => saveSettings({ ragChunkSize: Number(e.target.value) || 800 }));
+  $("#rag-chunk-overlap").addEventListener("change", (e) => saveSettings({ ragChunkOverlap: Number(e.target.value) || 120 }));
   $("#onnx-unload-btn").addEventListener("click", async () => {
     await sendMessage({ type: "onnx.relay", engineType: "engine.unload" });
     await refreshOnnxSettings();
@@ -326,6 +395,13 @@ function applySettingsToForm() {
   if (webSearchCb) webSearchCb.checked = settings.dialogueWebSearch !== false;
   const browserToolsCb = $("#dialogue-browser-tools-enabled");
   if (browserToolsCb) browserToolsCb.checked = settings.dialogueBrowserTools !== false;
+  const ragToolsSetting = $("#dialogue-rag-tools-setting");
+  if (ragToolsSetting) ragToolsSetting.checked = settings.dialogueRagTools !== false;
+  $("#rag-embed-provider").value = settings.ragEmbedProvider || "auto";
+  // Embed model <select>s are populated (and their values set) by refreshRagEmbedModelOptions(),
+  // since assigning .value before their <option>s exist would silently no-op.
+  $("#rag-chunk-size").value = settings.ragChunkSize ?? 800;
+  $("#rag-chunk-overlap").value = settings.ragChunkOverlap ?? 120;
 
   const provider = settings.provider || "onnx";
   const isOnnx = provider === "onnx";
@@ -335,6 +411,7 @@ function applySettingsToForm() {
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
   $("#ollama-settings").classList.toggle("hidden", !isOllama);
+  $("#rag-settings")?.classList.toggle("hidden", !(isOnnx || isWebllm || isOllama));
   $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
@@ -695,6 +772,98 @@ async function refreshWebllmSettings() {
   const loadedModel = statusRes?.loadedModel || null;
   renderWebllmRegistry(loadedModel);
   dialoguePanel?.onSettingsChanged();
+}
+
+// --- RAG embed model pickers -------------------------------------------------
+
+const CUSTOM_EMBED_MODEL_VALUE = "__custom__";
+
+/** Fill a <select> with known embed models for one provider; falls back to a "Custom…" entry + companion text input when allowed. */
+function renderEmbedModelSelect(select, models, currentValue, { allowCustom = true } = {}) {
+  if (!select) return;
+  select.innerHTML = "";
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.approxSizeMB ? `${m.label || m.id} (${sizeLabel(m.approxSizeMB)})` : m.label || m.id;
+    select.appendChild(opt);
+  }
+  const known = new Set(models.map((m) => m.id));
+  if (allowCustom) {
+    const opt = document.createElement("option");
+    opt.value = CUSTOM_EMBED_MODEL_VALUE;
+    opt.textContent = "Custom…";
+    select.appendChild(opt);
+  }
+  const hasCurrent = known.has(currentValue);
+  select.value = hasCurrent ? currentValue : allowCustom ? CUSTOM_EMBED_MODEL_VALUE : models[0]?.id || "";
+
+  const customInput = document.getElementById(`${select.id}-custom`);
+  if (!customInput) return;
+  const showCustom = select.value === CUSTOM_EMBED_MODEL_VALUE;
+  customInput.classList.toggle("hidden", !showCustom);
+  if (showCustom) customInput.value = hasCurrent ? "" : currentValue || "";
+}
+
+/** Wire a "provider select + custom text input" pair: selecting "Custom…" reveals the input, and either one saves on change. */
+function wireEmbedModelSelect(select, customInput, onSave) {
+  if (!select) return;
+  select.addEventListener("change", (e) => {
+    const v = e.target.value;
+    if (v === CUSTOM_EMBED_MODEL_VALUE) {
+      customInput?.classList.remove("hidden");
+      customInput?.focus();
+      return;
+    }
+    customInput?.classList.add("hidden");
+    onSave(v);
+  });
+  customInput?.addEventListener("change", (e) => {
+    const v = e.target.value.trim();
+    if (v) onSave(v);
+  });
+}
+
+/** Single-entry fallback so a <select> never ends up fully empty when a provider is unreachable. */
+function fallbackEmbedModelList(modelId) {
+  return modelId ? [{ id: modelId, label: modelId }] : [];
+}
+
+/** Populate the ONNX/WebLLM/Ollama embed-model <select>s in Settings → RAG. Best-effort per provider — one failing (e.g. Ollama not running) shouldn't block the others. */
+async function refreshRagEmbedModelOptions() {
+  await Promise.all([
+    (async () => {
+      const current = settings.ragOnnxEmbedModel || DEFAULT_ONNX_EMBED_MODEL;
+      try {
+        const res = await sendMessage({ type: "onnx.relay", engineType: "engine.models", task: "feature-extraction" });
+        renderEmbedModelSelect($("#rag-onnx-embed-model"), res?.models || [], current);
+      } catch (err) {
+        console.warn("[rag] failed to load ONNX embed model list:", err);
+        renderEmbedModelSelect($("#rag-onnx-embed-model"), fallbackEmbedModelList(current), current);
+      }
+    })(),
+    (async () => {
+      const current = settings.ragWebllmEmbedModel || DEFAULT_WEBLLM_EMBED_MODEL;
+      try {
+        const res = await sendMessage({ type: "webllm.relay", engineType: "engine.embedModels" });
+        renderEmbedModelSelect($("#rag-webllm-embed-model"), res?.models || [], current, { allowCustom: false });
+      } catch (err) {
+        console.warn("[rag] failed to load WebLLM embed model list:", err);
+        renderEmbedModelSelect($("#rag-webllm-embed-model"), fallbackEmbedModelList(current), current, { allowCustom: false });
+      }
+    })(),
+    (async () => {
+      const current = settings.ragOllamaEmbedModel || DEFAULT_OLLAMA_EMBED_MODEL;
+      try {
+        const installed = await listOllamaModelsWithMeta(ollamaBaseUrl());
+        const embedModels = installed.filter((m) => (m.capabilities || []).map((c) => String(c).toLowerCase()).includes("embedding"));
+        renderEmbedModelSelect($("#rag-ollama-embed-model"), embedModels, current);
+      } catch (err) {
+        console.warn("[rag] failed to load Ollama embed model list:", err);
+        renderEmbedModelSelect($("#rag-ollama-embed-model"), fallbackEmbedModelList(current), current);
+      }
+    })(),
+  ]);
 }
 
 function webllmMetaLabel(entry) {

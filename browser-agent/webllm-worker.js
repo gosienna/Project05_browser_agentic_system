@@ -39,8 +39,12 @@ async function handle(msg) {
       return engine.deleteModel(msg.model || msg.request?.model);
     case "engine.models":
       return { models: await engine.modelsForTask() };
+    case "engine.embedModels":
+      return { models: await engine.getEmbedModelRegistry() };
     case "engine.contextEstimate":
       return engine.getContextEstimate(msg.model || msg.request?.model);
+    case "embeddings.create":
+      return engine.createEmbeddings(msg.request);
     default:
       return {
         error: {

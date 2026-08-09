@@ -2,11 +2,12 @@
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 
-/** Prepended to the Dialogue system prompt when MCP tools are available (helps local ONNX models). */
+/** Prepended to the Dialogue system prompt when MCP tools are available (helps local ONNX / non-Hermes WebLLM models). */
 export const MCP_TOOL_HINT =
   "You have MCP tools available in this chat. " +
-  "When you need current information or browser actions, call the appropriate tool. " +
-  "For local ONNX models, use: call:<tool_name>{arg:value,...} — e.g. call:web_search{query:today's date} or call:modify_element{selector:h1,styles:{fontSize:2.5rem,color:red}}.";
+  "When you need current information, document search, or browser actions, call the appropriate tool. " +
+  "For models without native tool support (ONNX and most WebLLM chat models), use: call:<tool_name>{arg:value,...} — or call:<tool_name>{}" +
+  "e.g. call:search_documents{query:influenza transmission} or call:web_search{query:today's date}.";
 
 /**
  * Tavily Search API — basic depth (1 credit per request).
@@ -173,43 +174,61 @@ export function parseLooseToolArgs(inner) {
   return { query: trimmed };
 }
 
+function isAllowedToolName(_name, allowed) {
+  // Empty allowlist → accept any parsed name (execute step validates via MCP registry).
+  return !allowed.size || allowed.has(_name);
+}
+
 /**
  * Parse tool calls embedded in assistant text (common with local ONNX models).
- * e.g. `call:web_search{query:weather in Sydney}`
+ * e.g. `call:web_search{query:weather in Sydney}` or `call:get_page_html` (no braces).
  */
-export function parseTextToolCalls(text, toolNames = []) {
+/** Parse text tool calls; optionally restrict to toolNames when the list is non-empty. */
+export function parseTextToolCalls(text, toolNames = [], { strictAllowlist = false } = {}) {
   const calls = [];
   if (!text || typeof text !== "string") return calls;
 
   const allowed = new Set(toolNames.filter(Boolean));
+  const seen = new Set();
+
+  const pushCall = (name, args, raw) => {
+    if (!name || seen.has(name)) return;
+    if (strictAllowlist && allowed.size && !allowed.has(name)) return;
+    seen.add(name);
+    calls.push({
+      id: `textcall_${calls.length}_${Date.now()}`,
+      name,
+      args,
+      raw: raw ?? `call:${name}${JSON.stringify(args || {})}`,
+      source: "text",
+    });
+  };
+
   const re = /call:\s*([a-zA-Z0-9_-]+)\s*\{/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const name = m[1];
-    if (allowed.size && !allowed.has(name)) continue;
     const openIdx = m.index + m[0].length - 1;
     const br = extractBalancedBraces(text, openIdx);
     if (!br) continue;
-    calls.push({
-      id: `textcall_${calls.length}_${Date.now()}`,
-      name,
-      args: parseLooseToolArgs(br.inner),
-      raw: text.slice(m.index, br.end),
-      source: "text",
-    });
+    pushCall(name, parseLooseToolArgs(br.inner), text.slice(m.index, br.end));
     re.lastIndex = br.end;
   }
 
-  if (!calls.length && allowed.size) {
-    const simple = /^\s*([a-zA-Z0-9_-]+)\s*\{([\s\S]+)\}\s*$/.exec(text.trim());
-    if (simple && allowed.has(simple[1])) {
-      calls.push({
-        id: `textcall_0_${Date.now()}`,
-        name: simple[1],
-        args: parseLooseToolArgs(simple[2]),
-        raw: text.trim(),
-        source: "text",
-      });
+  // call:tool_name with no argument block (common in thinking output).
+  const noBraceRe = /(?:^|\n)\s*call:\s*([a-zA-Z0-9_-]+)\s*(?=\n|$)/g;
+  while ((m = noBraceRe.exec(text)) !== null) {
+    pushCall(m[1], {}, `call:${m[1]}`);
+  }
+
+  if (!calls.length) {
+    const trimmed = text.trim();
+    const whole = /^\s*call:\s*([a-zA-Z0-9_-]+)\s*$/s.exec(trimmed);
+    if (whole) pushCall(whole[1], {}, trimmed);
+
+    const simple = /^\s*([a-zA-Z0-9_-]+)\s*\{([\s\S]+)\}\s*$/.exec(trimmed);
+    if (simple && (!strictAllowlist || isAllowedToolName(simple[1], allowed))) {
+      pushCall(simple[1], parseLooseToolArgs(simple[2]), trimmed);
     }
   }
 
@@ -217,19 +236,32 @@ export function parseTextToolCalls(text, toolNames = []) {
 }
 
 function parseNativeToolCall(tc) {
+  const fn = tc?.function || {};
+  const name = fn.name || tc?.name;
   let args = {};
-  try {
-    args = JSON.parse(tc.function?.arguments || "{}");
-  } catch {
-    args = {};
+  const rawArgs = fn.arguments ?? tc?.arguments;
+  if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+    args = rawArgs;
+  } else if (typeof rawArgs === "string" && rawArgs.trim()) {
+    try {
+      args = JSON.parse(rawArgs);
+    } catch {
+      args = {};
+    }
   }
   return {
-    id: tc.id || `call_${Math.random().toString(36).slice(2, 9)}`,
-    name: tc.function?.name,
+    id: tc?.id || `call_${Math.random().toString(36).slice(2, 9)}`,
+    name,
     args,
     raw: null,
     source: "native",
   };
+}
+
+function assistantTextForToolParsing(message) {
+  return [message?.content, message?.reasoning, message?.thinking, message?.reasoning_content]
+    .filter((x) => typeof x === "string" && x.trim())
+    .join("\n");
 }
 
 /** OpenAI tool_calls plus text-embedded calls from models without native tool support. */
@@ -241,7 +273,13 @@ export function normalizeAssistantToolCalls(message, tools = []) {
   if (native.length) return native;
 
   const names = tools.map((t) => t.function?.name).filter(Boolean);
-  return parseTextToolCalls(message?.content || "", names);
+  return parseTextToolCalls(assistantTextForToolParsing(message), names, { strictAllowlist: false });
+}
+
+function formatToolCallArgs(args) {
+  if (args == null) return "{}";
+  if (typeof args === "string") return args.startsWith("{") ? args : `{${args}}`;
+  return JSON.stringify(args);
 }
 
 export function toOpenAiToolCall(call) {
@@ -263,9 +301,9 @@ export function formatAssistantToolCallDisplay(message, calls = []) {
   const lines = [];
   if (Array.isArray(message?.tool_calls) && message.tool_calls.length) {
     for (const tc of message.tool_calls) {
-      const name = tc.function?.name || "unknown";
-      const args = tc.function?.arguments || "{}";
-      lines.push(`call:${name}${args.startsWith("{") ? args : `{${args}}`}`);
+      const name = tc.function?.name || tc.name || "unknown";
+      const args = tc.function?.arguments ?? tc.arguments ?? "{}";
+      lines.push(`call:${name}${formatToolCallArgs(args)}`);
     }
   }
 

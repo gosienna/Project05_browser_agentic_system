@@ -18,9 +18,14 @@ export function getMaxSteps(settings) {
   return Math.min(MAX_MAX_STEPS, Math.max(MIN_MAX_STEPS, Math.floor(n)));
 }
 
-/** Read max generated tokens per LLM reply, with fallback/clamping. */
-export function getMaxTokens(settings) {
-  const n = Number(settings?.maxTokens);
+/** Clamp a numeric max-tokens value to the allowed range. */
+export function resolveMaxTokens(value) {
+  const n = Number(value);
   if (!Number.isFinite(n)) return DEFAULT_MAX_TOKENS;
   return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, Math.floor(n)));
+}
+
+/** Read max generated tokens per LLM reply from user settings, with fallback/clamping. */
+export function getMaxTokens(settings) {
+  return resolveMaxTokens(settings?.maxTokens);
 }

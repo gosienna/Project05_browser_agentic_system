@@ -1,0 +1,101 @@
+// Background message handlers for RAG (PDF ingest, search, blobs).
+
+import { ingestPdf } from "./ingest.js";
+import { searchDocuments } from "./search.js";
+import * as store from "./rag-store.js";
+import { toArrayBuffer } from "./binary.js";
+
+const ACTIVE_DOCS_KEY = "ragActiveDocIds";
+
+async function resolveIngestBuffer(msg) {
+  if (msg.stagingId) {
+    const staged = await store.takeStagingPdf(msg.stagingId);
+    if (!staged) {
+      throw new Error("Staged PDF not found — attach the file again.");
+    }
+    const buffer = toArrayBuffer(staged.buffer);
+    if (!buffer?.byteLength) {
+      throw new Error("Staged PDF bytes were empty or corrupted — attach the file again.");
+    }
+    return { buffer, name: staged.name || msg.name };
+  }
+
+  const buffer = toArrayBuffer(msg.buffer) ?? toArrayBuffer(msg.bufferBase64);
+  if (!buffer?.byteLength) {
+    throw new Error(
+      "PDF file bytes were not received. Reload the extension and attach the PDF again."
+    );
+  }
+  return { buffer, name: msg.name };
+}
+
+function broadcastProgress(payload) {
+  chrome.runtime.sendMessage({ target: "rag-progress", ...payload }).catch(() => {});
+}
+
+export async function handleRagMessage(msg, getSettings) {
+  const settings = await getSettings();
+
+  switch (msg.type) {
+    case "rag.ingest": {
+      const { buffer, name } = await resolveIngestBuffer(msg);
+      const pages = Array.isArray(msg.pages) ? msg.pages : null;
+      const pageCount = Number(msg.pageCount) || pages?.length || 0;
+      if (!pages?.length) {
+        throw new Error(
+          "PDF text extraction missing — reload the extension and attach the PDF again."
+        );
+      }
+      return ingestPdf({
+        name: name || msg.name || "document.pdf",
+        buffer,
+        pages,
+        pageCount,
+        settings,
+        chunkSize: msg.chunkSize,
+        chunkOverlap: msg.chunkOverlap,
+        onProgress: (p) => broadcastProgress({ docId: p.docId, ...p }),
+      });
+    }
+    case "rag.listDocuments":
+      return store.listDocuments();
+    case "rag.getPdfBlob": {
+      const doc = await store.getDocument(msg.docId);
+      if (!doc) throw new Error(`Document "${msg.docId}" not found.`);
+      const blobRow = await store.getPdfBlob(msg.docId);
+      if (!blobRow?.blob) throw new Error(`PDF blob missing for "${msg.docId}".`);
+      return {
+        docId: msg.docId,
+        name: doc.name,
+        pageCount: doc.pageCount,
+        blob: blobRow.blob,
+        sizeBytes: blobRow.sizeBytes,
+      };
+    }
+    case "rag.getChunk": {
+      const chunk = await store.getChunk(msg.chunkId);
+      if (!chunk) throw new Error(`Chunk "${msg.chunkId}" not found.`);
+      const doc = await store.getDocument(chunk.docId);
+      return { chunk, doc };
+    }
+    case "rag.deleteDocument":
+      await store.deleteDocument(msg.docId);
+      return { ok: true };
+    case "rag.search":
+      return searchDocuments(msg.query, settings, {
+        docIds: msg.docIds,
+        topK: msg.topK ?? msg.top_k,
+      });
+    case "rag.getActiveDocs": {
+      const { ragActiveDocIds } = await chrome.storage.local.get(ACTIVE_DOCS_KEY);
+      return { docIds: ragActiveDocIds || [] };
+    }
+    case "rag.setActiveDocs": {
+      const docIds = Array.isArray(msg.docIds) ? msg.docIds : [];
+      await chrome.storage.local.set({ [ACTIVE_DOCS_KEY]: docIds });
+      return { docIds };
+    }
+    default:
+      return null;
+  }
+}

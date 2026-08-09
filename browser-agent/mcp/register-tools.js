@@ -3,6 +3,8 @@
 import { registerMcpTool } from "./server.js";
 import { tavilySearch } from "../dialogue/tool-runtime.js";
 import * as browserTools from "../tools/browser.js";
+import { searchDocuments, formatSearchHit } from "../rag/search.js";
+import * as ragStore from "../rag/rag-store.js";
 
 const TAB_ID_PROP = {
   type: "integer",
@@ -15,6 +17,10 @@ function webSearchEnabled(settings) {
 
 function browserToolsEnabled(settings) {
   return settings.dialogueBrowserTools !== false;
+}
+
+function ragToolsEnabled(settings) {
+  return settings.dialogueRagTools !== false;
 }
 
 async function resolveTabId(args, context) {
@@ -258,5 +264,79 @@ export function registerBuiltinMcpTools() {
     },
     isEnabled: browserToolsEnabled,
     handler: (args) => browserTools.wait(args),
+  });
+
+  registerMcpTool({
+    name: "search_documents",
+    description:
+      "Semantic search over ingested PDF documents. Returns relevant text chunks with page numbers and citation ids for the PDF viewer.",
+    groups: ["dialogue", "rag"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        doc_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional document ids to restrict search",
+        },
+        top_k: {
+          type: "integer",
+          description: "Number of chunks to return (1-20, default 5)",
+          minimum: 1,
+          maximum: 20,
+        },
+      },
+      required: ["query"],
+    },
+    isEnabled: ragToolsEnabled,
+    handler: async (args, context) => {
+      const hits = await searchDocuments(args.query, context.settings || {}, {
+        docIds: args.doc_ids,
+        topK: args.top_k,
+      });
+      return { results: hits.map(formatSearchHit) };
+    },
+  });
+
+  registerMcpTool({
+    name: "list_documents",
+    description: "List ingested PDF documents (metadata only).",
+    groups: ["dialogue", "rag"],
+    inputSchema: { type: "object", properties: {} },
+    isEnabled: ragToolsEnabled,
+    handler: async () => {
+      const docs = await ragStore.listDocuments();
+      return {
+        documents: docs.map((d) => ({
+          doc_id: d.id,
+          name: d.name,
+          page_count: d.pageCount,
+          chunk_count: d.chunkCount,
+          size_bytes: d.sizeBytes,
+          chunk_size: d.chunkSize,
+          chunk_overlap: d.chunkOverlap,
+          embed_provider: d.embedProvider,
+          embed_model: d.embedModel,
+          created_at: d.createdAt,
+        })),
+      };
+    },
+  });
+
+  registerMcpTool({
+    name: "delete_document",
+    description: "Delete an ingested PDF and all its chunks from local storage.",
+    groups: ["dialogue", "rag"],
+    inputSchema: {
+      type: "object",
+      properties: { doc_id: { type: "string", description: "Document id to delete" } },
+      required: ["doc_id"],
+    },
+    isEnabled: ragToolsEnabled,
+    handler: async (args) => {
+      await ragStore.deleteDocument(args.doc_id);
+      return { ok: true, doc_id: args.doc_id };
+    },
   });
 }

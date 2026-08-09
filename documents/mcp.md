@@ -75,6 +75,9 @@ Registered at startup:
 |------|-------|---------|---------------|
 | `web_search` | dialogue, network | Tavily via [`dialogue/tool-runtime.js`](../browser-agent/dialogue/tool-runtime.js) | `dialogueWebSearch !== false` |
 | `read_page`, `get_links`, `list_tabs`, `open_tab`, `navigate`, `click`, `type_text`, `scroll`, `fetch_url`, `wait` | dialogue, browser | [`tools.js`](../browser-agent/tools.js) | `dialogueBrowserTools !== false` |
+| `search_documents`, `list_documents`, `delete_document` | dialogue, rag | [`rag/search.js`](../browser-agent/rag/search.js), [`rag/rag-store.js`](../browser-agent/rag/rag-store.js) | `dialogueRagTools !== false` |
+
+See [`documents/rag.md`](rag.md) for PDF ingest, embedding backends, and the citation-linked PDF viewer.
 
 Browser tools use a `withTabId` wrapper: resolve `tabId` from args → context → active tab in the current window.
 

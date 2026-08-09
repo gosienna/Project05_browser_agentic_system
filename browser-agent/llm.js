@@ -2,9 +2,10 @@
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
 import { toAnthropicTools } from "./tools/schema.js";
-import { getMaxTokens } from "./agent-config.js";
+import { getMaxTokens, resolveMaxTokens } from "./agent-config.js";
 import { ollamaFetch } from "./ollama-models.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
+import { stripUnsupportedNativeTools } from "./webllm-models.js";
 
 const ONNX_OFFSCREEN_URL = "offscreen.html";
 let offscreenReadyPromise = null;
@@ -25,7 +26,8 @@ function finalizeChatCompletion(response, settings) {
 }
 
 export async function chatCompletions(request, settings) {
-  const req = withThinkingRequest(request, settings);
+  const req = stripUnsupportedNativeTools(withThinkingRequest(request, settings), settings);
+  if (req.max_tokens == null) req.max_tokens = getMaxTokens(settings);
   const provider = settings?.provider || "onnx";
   let response;
   switch (provider) {
@@ -178,10 +180,11 @@ async function webllmChatCompletions(request, settings) {
   }
 
   try {
+    const payload = stripUnsupportedNativeTools({ ...request, model }, settings);
     const response = await chrome.runtime.sendMessage({
       target: "webllm-engine",
       type: "chat.completions",
-      request: { ...request, model },
+      request: payload,
     });
     if (!response) {
       return errorResponse("WebLLM engine did not respond (offscreen document may have been evicted).", "engine_error");
@@ -252,12 +255,14 @@ function toOllamaChatMessages(messages) {
 }
 
 function buildOllamaNativeChatBody(model, request) {
+  const options = { temperature: request.temperature };
+  if (request.max_tokens != null) options.num_predict = request.max_tokens;
   const body = {
     model,
     messages: toOllamaChatMessages(request.messages),
     stream: false,
     think: request.thinkingEnabled !== false,
-    options: { temperature: request.temperature },
+    options,
   };
   if (request.tools?.length) body.tools = request.tools;
   return body;
@@ -268,10 +273,17 @@ function ollamaAssistantMessage(msg) {
   const out = { role: "assistant", content: msg.content ?? "" };
   const reasoning = msg.thinking ?? msg.reasoning ?? msg.reasoning_content;
   if (typeof reasoning === "string" && reasoning.trim()) out.reasoning = reasoning.trim();
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) out.tool_calls = msg.tool_calls;
   return out;
 }
 
 function ollamaChatCompletionFromNative(body, model) {
+  const message = ollamaAssistantMessage(body.message);
+  const finishReason = message.tool_calls?.length
+    ? "tool_calls"
+    : body.done
+      ? "stop"
+      : "length";
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,
     object: "chat.completion",
@@ -280,8 +292,8 @@ function ollamaChatCompletionFromNative(body, model) {
     choices: [
       {
         index: 0,
-        message: ollamaAssistantMessage(body.message),
-        finish_reason: body.done ? "stop" : "length",
+        message,
+        finish_reason: finishReason,
       },
     ],
     usage: {
@@ -321,11 +333,6 @@ async function ollamaFetchRenderedPrompt(baseUrl, model, request) {
   }
 }
 
-function attachOllamaPrompt(response, prompt) {
-  if (typeof prompt === "string" && prompt.length > 0) response.prompt = prompt;
-  return response;
-}
-
 async function ollamaChatCompletions(request, settings) {
   const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
   const model = request.model || settings.model || "llama3.2";
@@ -335,7 +342,6 @@ async function ollamaChatCompletions(request, settings) {
     stream: false,
     think: request.thinkingEnabled !== false,
   };
-  const promptPromise = ollamaFetchRenderedPrompt(baseUrl, model, request);
 
   // Prefer Ollama's OpenAI-compatible shim; fall back to native /api/chat on any failure.
   try {
@@ -354,8 +360,7 @@ async function ollamaChatCompletions(request, settings) {
           "engine_error"
         );
       } else {
-        const prompt = await promptPromise;
-        return attachOllamaPrompt(parsed.body, prompt);
+        return parsed.body;
       }
     }
   } catch (err) {
@@ -375,8 +380,7 @@ async function ollamaChatCompletions(request, settings) {
     }
     const body = parsed.body;
     if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
-    const prompt = await promptPromise;
-    return attachOllamaPrompt(ollamaChatCompletionFromNative(body, model), prompt);
+    return ollamaChatCompletionFromNative(body, model);
   } catch (err) {
     return errorResponse(
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
@@ -443,7 +447,7 @@ async function anthropicChatCompletions(request, settings) {
         system: system || undefined,
         messages,
         ...(tools ? { tools } : {}),
-        max_tokens: request.max_tokens ?? getMaxTokens(settings),
+        max_tokens: request.max_tokens,
         temperature: request.temperature,
       }),
     });
@@ -498,4 +502,24 @@ async function anthropicChatCompletions(request, settings) {
 
 function errorResponse(message, type) {
   return { error: { message, type, code: null } };
+}
+
+/** Ollama /api/embeddings — used by RAG. */
+export async function ollamaEmbeddings(texts, settings, model) {
+  const baseUrl = (settings?.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const modelId = model || settings?.ragOllamaEmbedModel || "nomic-embed-text";
+  const input = Array.isArray(texts) ? texts : [texts];
+  const res = await ollamaFetch(`${baseUrl}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: modelId, input }),
+  });
+  const parsed = await readJsonResponse(res);
+  if (!res.ok) {
+    throw new Error(ollamaHttpError(baseUrl, res.status, parsed.body?.error || parsed.error));
+  }
+  const body = parsed.body;
+  if (Array.isArray(body?.embeddings)) return body.embeddings;
+  if (body?.embedding) return [body.embedding];
+  throw new Error("Ollama embeddings response missing embedding vectors.");
 }
