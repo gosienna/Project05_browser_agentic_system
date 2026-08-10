@@ -1,6 +1,7 @@
 import { runAgent } from "./agent.js";
 import { getMaxTokens } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
+import { resolveChatModel } from "./llm-providers.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools/browser.js";
 import { runSystemEditor } from "./system-editor-l2.js";
@@ -155,14 +156,6 @@ async function markWebllmModelDownloaded(modelId) {
   await chrome.storage.local.set({ webllmModels: { ...(webllmModels || {}), [modelId]: true } });
 }
 
-function resolveChatModel(settings) {
-  const provider = settings?.provider || "onnx";
-  if (provider === "onnx") return settings.onnxModel;
-  if (provider === "webllm") return settings.webllmModel;
-  return settings.model;
-}
-
-/** Ensure async onMessage handlers always call sendResponse (avoids channel-closed errors). */
 function replyAsync(promise, sendResponse) {
   promise
     .then(sendResponse)
@@ -210,7 +203,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     replyAsync(
       getSettings().then((settings) =>
         chatCompletions(
-          { model: settings.model, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+          { model: resolveChatModel(settings), messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
           settings
         )
       ),

@@ -18,6 +18,18 @@ import {
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
 import { chatCompletions, renderChatPromptPreview } from "./llm.js";
+import {
+  getThinkingHintForSettings,
+  isRemoteLlmProvider,
+  NVIDIA_NIM_BASE_URL,
+  providerSupportsThinkingToggle,
+  resolveChatModel,
+} from "./llm-providers.js";
+import {
+  DEFAULT_NVIDIA_NIM_MODEL,
+  listNvidiaNimModels,
+  nvidiaNimModelLabel,
+} from "./nvidia-nim-models.js";
 import { createDialoguePanel } from "./dialogue/index.js";
 import {
   deleteOllamaModel,
@@ -142,26 +154,14 @@ async function init() {
   await refreshSystems();
 }
 
-function resolveChatModel(settings) {
-  const provider = settings?.provider || "onnx";
-  if (provider === "onnx") return settings.onnxModel;
-  if (provider === "webllm") return settings.webllmModel;
-  return settings.model;
-}
-
-/** Remote providers can run for minutes; call Ollama/OpenAI/Anthropic from the panel to avoid MV3 message timeouts. */
-function isRemoteLlmProvider(provider) {
-  return (
-    provider === "ollama" ||
-    provider === "openai" ||
-    provider === "anthropic" ||
-    provider === "openai-compatible"
-  );
+/** Remote providers can run for minutes; call from the panel to avoid MV3 message timeouts. */
+function isPanelRemoteLlmProvider(provider) {
+  return isRemoteLlmProvider(provider);
 }
 
 async function sendMessage(msg) {
   const provider = settings?.provider || "onnx";
-  if (isRemoteLlmProvider(provider)) {
+  if (isPanelRemoteLlmProvider(provider)) {
     if (msg?.type === "dialogue.send") {
       const model = resolveChatModel(settings);
       const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
@@ -186,7 +186,7 @@ async function sendMessage(msg) {
     }
     if (msg?.type === "llm.test") {
       return chatCompletions(
-        { model: settings.model, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+        { model: resolveChatModel(settings), messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
         settings
       );
     }
@@ -219,10 +219,29 @@ function wireSettingsModal() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#settings-modal").classList.contains("hidden")) closeSettingsModal();
   });
+  document.querySelectorAll(".settings-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => switchSettingsTab(btn.dataset.settingsTab));
+  });
 }
 
-function openSettingsModal() {
+function switchSettingsTab(tabId) {
+  const tab = tabId === "dialogue" ? "dialogue" : "llm";
+  document.querySelectorAll(".settings-tab-btn").forEach((btn) => {
+    const active = btn.dataset.settingsTab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll(".settings-tab-panel").forEach((panel) => {
+    const active = panel.id === `settings-tab-${tab}`;
+    panel.classList.toggle("active", active);
+    panel.hidden = !active;
+  });
+}
+
+function openSettingsModal(tabId) {
   $("#settings-modal").classList.remove("hidden");
+  switchSettingsTab(tabId || "llm");
+  applyThinkingToggleUi();
   if (settings.provider === "onnx") refreshOnnxSettings();
   if (settings.provider === "webllm") refreshWebllmSettings();
   if (settings.provider === "ollama") refreshOllamaSettings();
@@ -292,7 +311,12 @@ function wireSettingsForm() {
   $("#provider-select").addEventListener("change", async (e) => {
     const prev = settings.provider || "onnx";
     const next = e.target.value;
-    await saveSettings({ provider: next });
+    const patch = { provider: next };
+    if (next === "nvidia-nim") {
+      patch.baseUrl = NVIDIA_NIM_BASE_URL;
+      if (!settings.model) patch.model = DEFAULT_NVIDIA_NIM_MODEL;
+    }
+    await saveSettings(patch);
     if (prev === "onnx" && next !== "onnx") {
       await sendMessage({ type: "onnx.relay", engineType: "engine.unloadLlm" });
     }
@@ -302,8 +326,19 @@ function wireSettingsForm() {
     applySettingsToForm();
   });
   $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value }));
-  $("#api-key").addEventListener("change", (e) => saveSettings({ apiKey: e.target.value }));
-  $("#model-name").addEventListener("change", (e) => saveSettings({ model: e.target.value }));
+  $("#api-key").addEventListener("change", (e) => saveSettings({ apiKey: e.target.value.trim() }));
+  $("#model-name").addEventListener("change", (e) => {
+    saveSettings({ model: e.target.value });
+    applyThinkingToggleUi();
+  });
+  $("#nvidia-model-select")?.addEventListener("change", (e) => {
+    const model = e.target.value;
+    saveSettings({ model });
+    const modelInput = $("#model-name");
+    if (modelInput) modelInput.value = model;
+    applyThinkingToggleUi();
+    dialoguePanel?.onSettingsChanged();
+  });
   $("#max-steps-input").addEventListener("change", (e) => {
     const n = Math.min(100, Math.max(1, Math.floor(Number(e.target.value)) || DEFAULT_MAX_STEPS));
     e.target.value = n;
@@ -315,6 +350,10 @@ function wireSettingsForm() {
     saveSettings({ maxTokens: n });
   });
   $("#enable-thinking-input")?.addEventListener("change", (e) => {
+    if (!providerSupportsThinkingToggle(settings.provider || "onnx")) {
+      e.target.checked = false;
+      return;
+    }
     saveSettings({ enableThinking: e.target.checked });
   });
   $("#tavily-api-key").addEventListener("change", (e) => saveSettings({ tavilyApiKey: e.target.value.trim() }));
@@ -381,15 +420,54 @@ function wireSettingsForm() {
   $("#test-connection-btn").addEventListener("click", testConnection);
 }
 
+function renderNvidiaModelSelect() {
+  const select = $("#nvidia-model-select");
+  if (!select) return;
+  const current = settings.model || DEFAULT_NVIDIA_NIM_MODEL;
+  select.innerHTML = "";
+  for (const m of listNvidiaNimModels()) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `${m.label} (${m.id})`;
+    select.appendChild(opt);
+  }
+  if (current && !listNvidiaNimModels().some((m) => m.id === current)) {
+    const opt = document.createElement("option");
+    opt.value = current;
+    opt.textContent = `${nvidiaNimModelLabel(current)} (${current})`;
+    select.prepend(opt);
+  }
+  select.value = current;
+  const modelInput = $("#model-name");
+  if (modelInput) modelInput.value = current;
+}
+
+function applyThinkingToggleUi() {
+  const provider = settings.provider || "onnx";
+  const available = providerSupportsThinkingToggle(provider);
+  const cb = $("#enable-thinking-input");
+  const wrap = $("#enable-thinking-wrap");
+  const hint = $("#enable-thinking-hint");
+  if (!cb || !hint) return;
+
+  cb.disabled = !available;
+  wrap?.classList.toggle("settings-checkbox--disabled", !available);
+  if (available) cb.checked = settings.enableThinking !== false;
+  hint.textContent = getThinkingHintForSettings(settings);
+}
+
 function applySettingsToForm() {
   $("#provider-select").value = settings.provider || "onnx";
   $("#base-url").value = settings.baseUrl || "";
   $("#api-key").value = settings.apiKey || "";
   $("#model-name").value = settings.model || "";
+  renderNvidiaModelSelect();
   $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
   $("#max-tokens-input").value = getMaxTokens(settings);
   const thinkingCb = $("#enable-thinking-input");
-  if (thinkingCb) thinkingCb.checked = settings.enableThinking !== false;
+  if (thinkingCb && providerSupportsThinkingToggle(settings.provider || "onnx")) {
+    thinkingCb.checked = settings.enableThinking !== false;
+  }
   $("#tavily-api-key").value = settings.tavilyApiKey || "";
   const webSearchCb = $("#dialogue-web-search-enabled");
   if (webSearchCb) webSearchCb.checked = settings.dialogueWebSearch !== false;
@@ -407,12 +485,23 @@ function applySettingsToForm() {
   const isOnnx = provider === "onnx";
   const isWebllm = provider === "webllm";
   const isOllama = provider === "ollama";
+  const isNvidiaNim = provider === "nvidia-nim";
   const isLocalEngine = isOnnx || isWebllm;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
   $("#ollama-settings").classList.toggle("hidden", !isOllama);
   $("#rag-settings")?.classList.toggle("hidden", !(isOnnx || isWebllm || isOllama));
   $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
+  $("#nvidia-base-url-line")?.classList.toggle("hidden", !isNvidiaNim);
+  $("#remote-base-url-wrap")?.classList.toggle("hidden", isNvidiaNim);
+  $("#nvidia-model-select")?.classList.toggle("hidden", !isNvidiaNim);
+  $("#nvidia-model-label")?.classList.toggle("hidden", !isNvidiaNim);
+  $("#remote-model-label")?.classList.toggle("hidden", isNvidiaNim);
+  $("#model-name")?.classList.toggle("hidden", isNvidiaNim);
+  const apiKeyInput = $("#api-key");
+  if (apiKeyInput) {
+    apiKeyInput.placeholder = isNvidiaNim ? "nvapi-…" : "(not needed for Ollama)";
+  }
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
   if (isOllama) {
@@ -424,8 +513,11 @@ function applySettingsToForm() {
   if (noteEl) {
     noteEl.textContent = isLocalEngine || isOllama
       ? ""
-      : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
+      : isNvidiaNim
+        ? "NVIDIA NIM uses OpenAI-compatible chat completions. Reasoning is controlled for GLM, Qwen3, and DeepSeek models."
+        : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
   }
+  applyThinkingToggleUi();
   renderModelBadge();
   dialoguePanel?.onSettingsChanged();
 }
@@ -1140,7 +1232,11 @@ function onWebllmProgress(event) {
 
 async function testConnection() {
   const out = $("#test-connection-result");
-  out.textContent = "Testing…";
+  const provider = settings.provider || "onnx";
+  out.textContent =
+    provider === "nvidia-nim"
+      ? "Testing… (GLM and other NIM models can take 60+ seconds)"
+      : "Testing…";
   try {
     let res;
     if ((settings.provider || "onnx") === "onnx") {

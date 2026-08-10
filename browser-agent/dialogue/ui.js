@@ -29,6 +29,7 @@ import {
   serializeDialogueRawPayload,
 } from "./raw-json-view.js";
 import { listOllamaModelsWithMeta } from "../ollama-models.js";
+import { DEFAULT_NVIDIA_NIM_MODEL, listNvidiaNimModels } from "../nvidia-nim-models.js";
 import { isWebllmToolModel } from "../webllm-models.js";
 import { initPdfViewer } from "../rag/pdf-viewer.js";
 import {
@@ -1384,6 +1385,10 @@ async function refreshDialogueModelSelect() {
       (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
       options[0]?.id ||
       "";
+  } else if (provider === "nvidia-nim") {
+    options = listNvidiaNimModels().map((m) => ({ id: m.id, label: m.label }));
+    const settingsModel = getSettings().model || "";
+    selected = settingsModel || DEFAULT_NVIDIA_NIM_MODEL;
   } else {
     const m = getSettings().model || "";
     if (m) options = [{ id: m, label: m }];
@@ -1408,9 +1413,14 @@ async function refreshDialogueModelSelect() {
     return;
   }
 
-  select.disabled = provider !== "onnx" && provider !== "webllm" && provider !== "ollama";
+  select.disabled =
+    provider !== "onnx" && provider !== "webllm" && provider !== "ollama" && provider !== "nvidia-nim";
   if (
-    (provider === "ollama" || provider === "openai" || provider === "anthropic" || provider === "openai-compatible") &&
+    (provider === "ollama" ||
+      provider === "openai" ||
+      provider === "anthropic" ||
+      provider === "openai-compatible" ||
+      provider === "nvidia-nim") &&
     selected &&
     !options.some((o) => o.id === selected)
   ) {

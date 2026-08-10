@@ -3,6 +3,13 @@
 
 import { toAnthropicTools } from "./tools/schema.js";
 import { getMaxTokens, resolveMaxTokens } from "./agent-config.js";
+import {
+  isNvidiaNimProvider,
+  providerRequiresApiKey,
+  REMOTE_LLM_FETCH_TIMEOUT_MS,
+  resolveChatModel,
+  resolveLlmBaseUrl,
+} from "./llm-providers.js";
 import { ollamaFetch } from "./ollama-models.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 import { stripUnsupportedNativeTools } from "./webllm-models.js";
@@ -39,6 +46,7 @@ export async function chatCompletions(request, settings) {
       break;
     case "openai":
     case "openai-compatible":
+    case "nvidia-nim":
       response = await openaiChatCompletions(req, settings);
       break;
     case "ollama":
@@ -195,24 +203,127 @@ async function webllmChatCompletions(request, settings) {
   }
 }
 
-// --- openai / openai-compatible -----------------------------------------
+// --- openai / openai-compatible / nvidia-nim -----------------------------
+
+/** Map internal thinkingEnabled → provider-specific request fields (never send thinkingEnabled itself). */
+function buildOpenAiCompatibleBody(request, settings, baseUrl) {
+  const { thinkingEnabled, ...apiRequest } = request;
+  const body = { ...apiRequest, model: request.model || resolveChatModel(settings) };
+  if (!isNvidiaNimProvider(settings?.provider, baseUrl)) return body;
+
+  const model = (body.model || "").toLowerCase();
+  const enabled = thinkingEnabled !== false;
+  if (model.includes("glm") || model.startsWith("z-ai/")) {
+    return {
+      ...body,
+      chat_template_kwargs: { enable_thinking: enabled, clear_thinking: false },
+    };
+  }
+  if (model.includes("qwen3") || model.includes("deepseek")) {
+    return {
+      ...body,
+      chat_template_kwargs: {
+        enable_thinking: enabled,
+        ...(model.includes("deepseek") ? { thinking: enabled } : {}),
+      },
+    };
+  }
+  return body;
+}
+
+async function readOpenAiCompatibleResponse(res) {
+  const text = await res.text();
+  if (!text) return { error: `empty response (HTTP ${res.status})` };
+  try {
+    return { body: JSON.parse(text) };
+  } catch {
+    return { error: text.trim().slice(0, 240) };
+  }
+}
+
+function openAiCompatibleErrorMessage(body, status, fallback) {
+  if (typeof body === "string") return body;
+  if (body?.error?.message) return body.error.message;
+  if (body?.detail) return String(body.detail);
+  if (body?.message) return String(body.message);
+  if (typeof body?.error === "string") return body.error;
+  return fallback;
+}
+
+function openAiFetchErrorMessage(err, baseUrl, settings) {
+  const host = (() => {
+    try {
+      return new URL(baseUrl).host;
+    } catch {
+      return baseUrl || "the API host";
+    }
+  })();
+  if (err?.name === "AbortError") {
+    const model = resolveChatModel(settings) || "";
+    const slowHint = /glm|nemotron|550b|120b/i.test(model)
+      ? " Large NVIDIA models like GLM-5.2 can take 60+ seconds."
+      : "";
+    return `Request timed out after ${Math.round(REMOTE_LLM_FETCH_TIMEOUT_MS / 1000)}s.${slowHint} Keep the side panel open and try again.`;
+  }
+  const msg = err?.message || String(err);
+  if (/failed to fetch/i.test(msg)) {
+    const provider = settings?.provider || "onnx";
+    if (provider === "nvidia-nim" && !(settings?.apiKey || "").trim()) {
+      return "Network request failed — add your NVIDIA API key (nvapi-…) in Settings and reload the extension.";
+    }
+    if (!baseUrl) {
+      return "Network request failed — no Base URL configured in Settings.";
+    }
+    return `Network request failed reaching ${host}. Check your internet connection, API key, and reload the extension after updates.`;
+  }
+  return msg;
+}
 
 async function openaiChatCompletions(request, settings) {
-  const baseUrl = (settings.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
+  const baseUrl = resolveLlmBaseUrl(settings);
+  const provider = settings?.provider || "onnx";
+  const apiKey = (settings?.apiKey || "").trim();
+  const model = request.model || resolveChatModel(settings);
+
+  if (!baseUrl) {
+    return errorResponse("No Base URL configured — set it in Settings.", "engine_error");
+  }
+  if (!model) {
+    return errorResponse("No model selected — pick a model in Settings.", "engine_error");
+  }
+  if (providerRequiresApiKey(provider) && !apiKey) {
+    const label = provider === "nvidia-nim" ? "NVIDIA API key (nvapi-…)" : "API key";
+    return errorResponse(`${label} required — add it in Settings.`, "engine_error");
+  }
+
+  const payload = buildOpenAiCompatibleBody({ ...request, model }, settings, baseUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REMOTE_LLM_FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       },
-      body: JSON.stringify({ ...request, model: request.model || settings.model }),
+      body: JSON.stringify(payload),
+      signal: controller.signal,
     });
-    const body = await res.json();
-    if (!res.ok) return errorResponse(body?.error?.message || `HTTP ${res.status}`, "engine_error");
-    return body;
+    const parsed = await readOpenAiCompatibleResponse(res);
+    if (!res.ok) {
+      const detail = parsed.body
+        ? openAiCompatibleErrorMessage(parsed.body, res.status, `HTTP ${res.status}`)
+        : parsed.error || `HTTP ${res.status}`;
+      return errorResponse(detail, "engine_error");
+    }
+    if (parsed.error || !parsed.body) {
+      return errorResponse(parsed.error || `empty response (HTTP ${res.status})`, "engine_error");
+    }
+    return parsed.body;
   } catch (err) {
-    return errorResponse(err.message, "engine_error");
+    return errorResponse(openAiFetchErrorMessage(err, baseUrl, settings), "engine_error");
+  } finally {
+    clearTimeout(timer);
   }
 }
 

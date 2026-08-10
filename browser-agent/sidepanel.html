@@ -185,12 +185,18 @@
           <h2>Settings</h2>
           <button id="settings-close-btn" type="button" class="icon-btn" aria-label="Close">✕</button>
         </div>
-        <div id="tab-settings" class="modal-body">
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button type="button" class="settings-tab-btn active" data-settings-tab="llm" role="tab" aria-selected="true" aria-controls="settings-tab-llm">LLM</button>
+          <button type="button" class="settings-tab-btn" data-settings-tab="dialogue" role="tab" aria-selected="false" aria-controls="settings-tab-dialogue">Dialogue</button>
+        </div>
+        <div class="modal-body">
+          <div id="settings-tab-llm" class="settings-tab-panel active" role="tabpanel" aria-label="LLM inference">
           <label for="provider-select">Provider</label>
           <select id="provider-select">
             <option value="onnx">Built-in (ONNX, runs in your browser)</option>
             <option value="webllm">Built-in (WebLLM, WebGPU)</option>
             <option value="ollama">Ollama</option>
+            <option value="nvidia-nim">NVIDIA NIM</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
             <option value="openai-compatible">OpenAI-compatible / custom</option>
@@ -272,12 +278,17 @@
           </div>
 
           <div id="remote-settings" class="provider-block hidden">
-            <label for="base-url">Base URL</label>
-            <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
+            <div id="nvidia-base-url-line" class="device-line hidden">Endpoint: https://integrate.api.nvidia.com/v1</div>
+            <div id="remote-base-url-wrap">
+              <label for="base-url">Base URL</label>
+              <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
+            </div>
             <label for="api-key">API key</label>
             <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
-            <label for="model-name">Model</label>
-            <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5" />
+            <label for="nvidia-model-select" id="nvidia-model-label" class="hidden">Model</label>
+            <select id="nvidia-model-select" class="hidden" aria-label="NVIDIA NIM model"></select>
+            <label for="model-name" id="remote-model-label">Model</label>
+            <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5, z-ai/glm-5.2" />
             <p id="remote-context-note" class="hint"></p>
           </div>
 
@@ -289,13 +300,18 @@
           <input id="max-tokens-input" type="number" min="64" max="131072" step="64" placeholder="1024" />
           <p class="hint">Maximum tokens the model may generate per reply in Dialogue and automation. Reasoning models often need 4096 or more.</p>
 
-          <label class="settings-checkbox">
+          <label class="settings-checkbox" id="enable-thinking-wrap">
             <input type="checkbox" id="enable-thinking-input" checked />
             Enable model reasoning (thinking)
           </label>
-          <p class="hint">When supported (Qwen3, DeepSeek-R1, etc.), models reason before answering. Thinking is collapsed by default in chat and raw output — expand “Show thinking” or the <code>reasoning</code> field to read it.</p>
+          <p id="enable-thinking-hint" class="hint"></p>
 
-          <h3 class="onnx-section-title">Dialogue web search (Tavily)</h3>
+          <button id="test-connection-btn" type="button">Test connection</button>
+          <span id="test-connection-result"></span>
+          </div>
+
+          <div id="settings-tab-dialogue" class="settings-tab-panel" role="tabpanel" aria-label="Dialogue integrations" hidden>
+          <h3 class="onnx-section-title">Web search (Tavily)</h3>
           <label for="tavily-api-key">Tavily API key</label>
           <input id="tavily-api-key" type="password" placeholder="tvly-…" autocomplete="off" />
           <p class="hint">Powers the built-in <code>web_search</code> tool in Dialogue. <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a> — free tier includes 1,000 searches/month.</p>
@@ -333,9 +349,7 @@
             <input id="rag-chunk-overlap" type="number" min="0" max="1000" step="10" />
             <p class="hint">PDFs are stored in IndexedDB with embeddings for semantic search. In Dialogue, check documents to include them in RAG search.</p>
           </div>
-
-          <button id="test-connection-btn" type="button">Test connection</button>
-          <span id="test-connection-result"></span>
+          </div>
         </div>
       </div>
     </div>
