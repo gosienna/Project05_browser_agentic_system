@@ -45,7 +45,10 @@
         </div>
         <div class="dialogue-layout">
           <aside id="dialogue-sessions-panel" class="dialogue-sessions-panel collapsed" aria-label="Stored dialogue sessions">
-            <div class="dialogue-sessions-header">Saved chats</div>
+            <div class="dialogue-sessions-header">
+              <span>Saved chats</span>
+              <button id="dialogue-sessions-clear-btn" type="button" class="secondary-btn" title="Delete all saved chats">Clear all</button>
+            </div>
             <div id="dialogue-sessions-list" class="dialogue-sessions-list"></div>
           </aside>
           <div class="dialogue-main">
@@ -196,6 +199,7 @@
             <option value="onnx">Built-in (ONNX, runs in your browser)</option>
             <option value="webllm">Built-in (WebLLM, WebGPU)</option>
             <option value="ollama">Ollama</option>
+            <option value="gemini">Google Gemini</option>
             <option value="nvidia-nim">NVIDIA NIM</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
@@ -279,6 +283,7 @@
 
           <div id="remote-settings" class="provider-block hidden">
             <div id="nvidia-base-url-line" class="device-line hidden">Endpoint: https://integrate.api.nvidia.com/v1</div>
+            <div id="gemini-base-url-line" class="device-line hidden">Endpoint: https://generativelanguage.googleapis.com/v1beta</div>
             <div id="remote-base-url-wrap">
               <label for="base-url">Base URL</label>
               <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
@@ -287,6 +292,24 @@
             <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
             <label for="nvidia-model-select" id="nvidia-model-label" class="hidden">Model</label>
             <select id="nvidia-model-select" class="hidden" aria-label="NVIDIA NIM model"></select>
+            <label for="gemini-model-select" id="gemini-model-label" class="hidden">Model</label>
+            <select id="gemini-model-select" class="hidden" aria-label="Gemini model"></select>
+            <div id="gemini-model-catalog-wrap" class="hidden">
+              <div class="gemini-catalog-toolbar">
+                <h3 class="onnx-section-title">Available models</h3>
+                <button id="gemini-refresh-models-btn" type="button" class="secondary-btn">Refresh from API</button>
+              </div>
+              <p class="hint">Standard-tier paid pricing (USD per 1M tokens). Thinking tokens bill at the output rate. This extension sends text chat only; models may accept image/video/audio when wired.</p>
+              <div id="gemini-catalog-error" class="device-line hidden"></div>
+              <ul id="gemini-model-catalog" class="onnx-registry gemini-model-catalog"></ul>
+            </div>
+            <label for="openai-model-select" id="openai-model-label" class="hidden">Model</label>
+            <select id="openai-model-select" class="hidden" aria-label="OpenAI model"></select>
+            <div id="openai-model-catalog-wrap" class="hidden">
+              <h3 class="onnx-section-title">Current flagship chat models (recommended)</h3>
+              <p class="hint">Standard-tier pricing (USD per 1M tokens). Reasoning uses <code>reasoning_effort</code> on the API (not exposed in Settings yet). Function/tool calling via chat completions is supported.</p>
+              <ul id="openai-model-catalog" class="onnx-registry gemini-model-catalog"></ul>
+            </div>
             <label for="model-name" id="remote-model-label">Model</label>
             <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5, z-ai/glm-5.2" />
             <p id="remote-context-note" class="hint"></p>
@@ -311,6 +334,10 @@
           </div>
 
           <div id="settings-tab-dialogue" class="settings-tab-panel" role="tabpanel" aria-label="Dialogue integrations" hidden>
+          <label for="dialogue-max-tool-rounds-input">Max tool rounds per message</label>
+          <input id="dialogue-max-tool-rounds-input" type="number" min="1" max="30" step="1" placeholder="5" />
+          <p class="hint">Caps LLM → tool → LLM loops in Dialogue before stopping. Increase if multi-step tool use hits “tool round limit”. Default 5.</p>
+
           <h3 class="onnx-section-title">Web search (Tavily)</h3>
           <label for="tavily-api-key">Tavily API key</label>
           <input id="tavily-api-key" type="password" placeholder="tvly-…" autocomplete="off" />

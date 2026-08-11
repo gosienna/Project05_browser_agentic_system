@@ -66,6 +66,69 @@ export function registerBuiltinMcpTools() {
   });
 
   registerMcpTool({
+    name: "browser_snapshot",
+    description:
+      "Capture accessibility snapshot of the current page, this is better than screenshot. Returns YAML with element refs like [ref=e5]. Use refs as the target in browser_click.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        target: {
+          type: "string",
+          description: "Optional element ref from a prior snapshot (e.g. e5) to snapshot a subtree; omit for full page",
+        },
+        depth: { type: "integer", description: "Limit the depth of the snapshot tree" },
+        boxes: {
+          type: "boolean",
+          description: "Include each element's bounding box as [box=x,y,width,height]",
+        },
+        maxChars: {
+          type: "integer",
+          description: "Max snapshot characters to return (default 14000; omit or use ≤0 for default)",
+        },
+      },
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.browser_snapshot(args)),
+  });
+
+  registerMcpTool({
+    name: "browser_click",
+    description:
+      "Perform click on a web page. Pass target as a ref from browser_snapshot (e.g. e5) or a CSS selector.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        target: {
+          type: "string",
+          description: "Element ref from browser_snapshot (e.g. e5) or a CSS selector",
+        },
+        element: {
+          type: "string",
+          description: "Human-readable element description (optional)",
+        },
+        doubleClick: { type: "boolean", description: "Whether to perform a double click instead of a single click" },
+        button: {
+          type: "string",
+          enum: ["left", "right", "middle"],
+          description: "Button to click, defaults to left",
+        },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: ["Alt", "Control", "Meta", "Shift"] },
+          description: "Modifier keys to press",
+        },
+      },
+      required: ["target"],
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.browser_click(args)),
+  });
+
+  registerMcpTool({
     name: "read_page",
     description: "Return visible text from a browser tab.",
     groups: ["dialogue", "browser"],
@@ -195,6 +258,34 @@ export function registerBuiltinMcpTools() {
   });
 
   registerMcpTool({
+    name: "download_file",
+    description:
+      "Download a file from a URL directly to the user's Downloads folder (e.g. PDFs that would open inline when clicked). Prefer this over click for saving files. Returns { ok, filename, fileSize } when complete.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "HTTP(S) URL of the file to download" },
+        filename: {
+          type: "string",
+          description: "Optional filename (relative to Downloads); omit to use server/URL name",
+        },
+        saveAs: {
+          type: "boolean",
+          description: "If true, show the system Save As dialog (default false)",
+        },
+        timeoutMs: {
+          type: "integer",
+          description: "Max wait for download to finish in ms (default 120000, max 300000)",
+        },
+      },
+      required: ["url"],
+    },
+    isEnabled: browserToolsEnabled,
+    handler: (args) => browserTools.download_file(args),
+  });
+
+  registerMcpTool({
     name: "get_page_html",
     description:
       "Return raw HTML from a live browser tab (after JS rendering). Omit selector for full document; pass selector for one element's outerHTML. Use before modify_element to pick selectors. Changes are not persisted — reload reverts the page.",
@@ -239,7 +330,7 @@ export function registerBuiltinMcpTools() {
   registerMcpTool({
     name: "execute_script",
     description:
-      "Run a JavaScript function in the tab (isolated world: DOM access yes, page JS variables no). script is a function source string; args is an optional array passed to it. Return value must be JSON-serializable. Example: highlight download links — script \"() => { const sel = 'a[download], a[href$=\\\\\".pdf\\\\\"]'; let n = 0; document.querySelectorAll(sel).forEach(el => { el.style.outline = '3px solid red'; n++; }); return { highlighted: n }; }\"",
+      "Run a JavaScript function in the tab (MAIN world: DOM access yes, page JS globals visible). script is a function source string; args is an optional array passed to it. Return value must be JSON-serializable. Empty matches return [] or {count:0}, not null. Example: highlight download links — script \"() => { const sel = 'a[download], a[href$=\\\\\".pdf\\\\\"]'; let n = 0; document.querySelectorAll(sel).forEach(el => { el.style.outline = '3px solid red'; n++; }); return { highlighted: n }; }\"",
     groups: ["dialogue", "browser"],
     inputSchema: {
       type: "object",

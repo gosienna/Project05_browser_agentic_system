@@ -378,6 +378,20 @@ button:disabled { opacity: 0.5; cursor: default; }
 .onnx-registry button.danger { background: #fdeef4; color: #c2185b; border-color: #f3b8d0; }
 .onnx-registry button.danger:hover:not(:disabled) { background: #f9d8e6; }
 
+.gemini-catalog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.gemini-catalog-toolbar .onnx-section-title { margin: 0; }
+.gemini-model-catalog .badge.preview { background: #fff3e0; color: #e65100; }
+.gemini-model-catalog .badge.stable { background: #e8f0fe; color: #1a4fb0; }
+.gemini-model-catalog .badge.flagship { background: #f3e5f5; color: #6a1b9a; }
+.gemini-model-catalog .badge.balanced { background: #e8f0fe; color: #1a4fb0; }
+.gemini-model-catalog .badge.economy { background: #e8f5e9; color: #2e7d32; }
+
 .progress-bar { height: 6px; background: #eee; border-radius: 999px; overflow: hidden; }
 #onnx-progress-fill { height: 100%; width: 0%; background: #2557d6; transition: width 0.2s; }
 #onnx-progress-label { font-size: 11px; color: #666; margin-top: 2px; }

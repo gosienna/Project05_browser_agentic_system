@@ -16,7 +16,12 @@ import {
   updateSystemEditorConfig,
 } from "./system-store.js";
 import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
-import { DEFAULT_MAX_STEPS, DEFAULT_MAX_TOKENS, getMaxTokens } from "./agent-config.js";
+import {
+  DEFAULT_MAX_STEPS,
+  DEFAULT_MAX_TOKENS,
+  getDialogueMaxToolRounds,
+  getMaxTokens,
+} from "./agent-config.js";
 import { chatCompletions, renderChatPromptPreview } from "./llm.js";
 import {
   getThinkingHintForSettings,
@@ -24,7 +29,24 @@ import {
   NVIDIA_NIM_BASE_URL,
   providerSupportsThinkingToggle,
   resolveChatModel,
+  resolveLlmBaseUrl,
 } from "./llm-providers.js";
+import {
+  DEFAULT_GEMINI_MODEL,
+  fetchGeminiModelsFromApi,
+  formatGeminiPickerLabel,
+  geminiModelLabel,
+  listGeminiModels,
+  migrateGeminiModelSettings,
+  resolveGeminiModel,
+} from "./gemini-models.js";
+import {
+  DEFAULT_OPENAI_MODEL,
+  formatOpenAiPickerLabel,
+  listOpenAiFlagshipModels,
+  openAiModelLabel,
+  resolveOpenAiModel,
+} from "./openai-models.js";
 import {
   DEFAULT_NVIDIA_NIM_MODEL,
   listNvidiaNimModels,
@@ -81,6 +103,10 @@ init();
 
 async function init() {
   settings = await sendMessage({ type: "settings.get" });
+  const geminiPatch = migrateGeminiModelSettings(settings);
+  if (geminiPatch) {
+    settings = await saveSettings(geminiPatch);
+  }
   wireTabs();
   wireOnboarding();
   wireSettingsForm();
@@ -276,7 +302,7 @@ function wireOnboarding() {
     await refreshOllamaSettings();
   });
   $("#ob-api").addEventListener("click", async () => {
-    await saveSettings({ provider: "openai" });
+    await saveSettings({ provider: "openai", model: DEFAULT_OPENAI_MODEL });
     $("#onboarding").classList.add("hidden");
     applySettingsToForm();
     openSettingsModal();
@@ -316,6 +342,14 @@ function wireSettingsForm() {
       patch.baseUrl = NVIDIA_NIM_BASE_URL;
       if (!settings.model) patch.model = DEFAULT_NVIDIA_NIM_MODEL;
     }
+    if (next === "gemini") {
+      const resolved = resolveGeminiModel(settings.model || DEFAULT_GEMINI_MODEL);
+      patch.model = resolved.model;
+    }
+    if (next === "openai") {
+      const resolved = resolveOpenAiModel(settings.model || DEFAULT_OPENAI_MODEL);
+      patch.model = resolved.model;
+    }
     await saveSettings(patch);
     if (prev === "onnx" && next !== "onnx") {
       await sendMessage({ type: "onnx.relay", engineType: "engine.unloadLlm" });
@@ -325,7 +359,7 @@ function wireSettingsForm() {
     }
     applySettingsToForm();
   });
-  $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value }));
+  $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value.trim() }));
   $("#api-key").addEventListener("change", (e) => saveSettings({ apiKey: e.target.value.trim() }));
   $("#model-name").addEventListener("change", (e) => {
     saveSettings({ model: e.target.value });
@@ -339,6 +373,25 @@ function wireSettingsForm() {
     applyThinkingToggleUi();
     dialoguePanel?.onSettingsChanged();
   });
+  $("#gemini-model-select")?.addEventListener("change", (e) => {
+    const model = e.target.value;
+    saveSettings({ model });
+    const modelInput = $("#model-name");
+    if (modelInput) modelInput.value = model;
+    applyThinkingToggleUi();
+    renderGeminiModelCatalog();
+    dialoguePanel?.onSettingsChanged();
+  });
+  $("#openai-model-select")?.addEventListener("change", (e) => {
+    const model = e.target.value;
+    saveSettings({ model });
+    const modelInput = $("#model-name");
+    if (modelInput) modelInput.value = model;
+    applyThinkingToggleUi();
+    renderOpenAiModelCatalog();
+    dialoguePanel?.onSettingsChanged();
+  });
+  $("#gemini-refresh-models-btn")?.addEventListener("click", () => refreshGeminiModelsFromApi());
   $("#max-steps-input").addEventListener("change", (e) => {
     const n = Math.min(100, Math.max(1, Math.floor(Number(e.target.value)) || DEFAULT_MAX_STEPS));
     e.target.value = n;
@@ -348,6 +401,11 @@ function wireSettingsForm() {
     const n = getMaxTokens({ maxTokens: e.target.value });
     e.target.value = n;
     saveSettings({ maxTokens: n });
+  });
+  $("#dialogue-max-tool-rounds-input")?.addEventListener("change", (e) => {
+    const n = getDialogueMaxToolRounds({ dialogueMaxToolRounds: e.target.value });
+    e.target.value = n;
+    saveSettings({ dialogueMaxToolRounds: n });
   });
   $("#enable-thinking-input")?.addEventListener("change", (e) => {
     if (!providerSupportsThinkingToggle(settings.provider || "onnx")) {
@@ -420,6 +478,187 @@ function wireSettingsForm() {
   $("#test-connection-btn").addEventListener("click", testConnection);
 }
 
+function renderGeminiModelSelect() {
+  const select = $("#gemini-model-select");
+  if (!select) return;
+  const current = settings.model || DEFAULT_GEMINI_MODEL;
+  select.innerHTML = "";
+  for (const m of listGeminiModels()) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = formatGeminiPickerLabel(m);
+    select.appendChild(opt);
+  }
+  if (current && !listGeminiModels().some((m) => m.id === current)) {
+    const opt = document.createElement("option");
+    opt.value = current;
+    opt.textContent = `${geminiModelLabel(current)} (${current})`;
+    select.prepend(opt);
+  }
+  select.value = current;
+  const modelInput = $("#model-name");
+  if (modelInput) modelInput.value = current;
+  renderGeminiModelCatalog();
+}
+
+function renderGeminiModelCatalog() {
+  const list = $("#gemini-model-catalog");
+  if (!list) return;
+  list.innerHTML = "";
+  const selected = settings.model || DEFAULT_GEMINI_MODEL;
+
+  for (const m of listGeminiModels()) {
+    const li = document.createElement("li");
+    li.className = m.id === selected ? "selected" : "";
+
+    const caps = [
+      m.thinking ? "Thinking" : "No thinking",
+      m.tools ? "Tools" : "No tools",
+      `In: ${m.inputs}`,
+      `Out: ${m.output}`,
+    ].join(" · ");
+
+    li.innerHTML = `
+      <span class="model-info">
+        <span class="model-name">${escapeHtml(m.label)} <code>${escapeHtml(m.id)}</code></span>
+        <small class="model-meta">${escapeHtml(`${m.priceIn} in · ${m.priceOut} out /1M`)}</small>
+        <small class="model-context">${escapeHtml(caps)}</small>
+        ${m.priceNote ? `<small class="model-context">${escapeHtml(m.priceNote)}</small>` : ""}
+      </span>
+      <span class="badge ${m.tier}">${m.tier}</span>
+    `;
+
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
+    const btn = document.createElement("button");
+    btn.textContent = m.id === selected ? "Selected" : "Use";
+    btn.disabled = m.id === selected;
+    btn.addEventListener("click", async () => {
+      await saveSettings({ model: m.id });
+      const select = $("#gemini-model-select");
+      if (select) select.value = m.id;
+      const modelInput = $("#model-name");
+      if (modelInput) modelInput.value = m.id;
+      applyThinkingToggleUi();
+      renderGeminiModelCatalog();
+      renderModelBadge();
+      dialoguePanel?.onSettingsChanged();
+    });
+    actions.appendChild(btn);
+    li.appendChild(actions);
+    list.appendChild(li);
+  }
+}
+
+function renderOpenAiModelSelect() {
+  const select = $("#openai-model-select");
+  if (!select) return;
+  const current = resolveOpenAiModel(settings.model || DEFAULT_OPENAI_MODEL).model;
+  select.innerHTML = "";
+  for (const m of listOpenAiFlagshipModels()) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = formatOpenAiPickerLabel(m);
+    select.appendChild(opt);
+  }
+  if (current && !listOpenAiFlagshipModels().some((m) => m.id === current)) {
+    const opt = document.createElement("option");
+    opt.value = current;
+    opt.textContent = `${openAiModelLabel(current)} (${current})`;
+    select.prepend(opt);
+  }
+  select.value = current;
+  const modelInput = $("#model-name");
+  if (modelInput) modelInput.value = current;
+  renderOpenAiModelCatalog();
+}
+
+function renderOpenAiModelCatalog() {
+  const list = $("#openai-model-catalog");
+  if (!list) return;
+  list.innerHTML = "";
+  const selected = resolveOpenAiModel(settings.model || DEFAULT_OPENAI_MODEL).model;
+
+  for (const m of listOpenAiFlagshipModels()) {
+    const li = document.createElement("li");
+    li.className = m.id === selected ? "selected" : "";
+
+    const caps = [
+      m.thinking ? "Thinking" : "No thinking",
+      m.tools ? "Tools" : "No tools",
+      `In: ${m.inputs}`,
+      `Out: ${m.output}`,
+    ].join(" · ");
+
+    li.innerHTML = `
+      <span class="model-info">
+        <span class="model-name">${escapeHtml(m.label)} <code>${escapeHtml(m.id)}</code></span>
+        ${m.description ? `<small class="model-context">${escapeHtml(m.description)}</small>` : ""}
+        <small class="model-meta">${escapeHtml(`${m.priceIn} in · ${m.priceOut} out /1M`)}</small>
+        <small class="model-context">${escapeHtml(caps)}</small>
+        ${m.priceNote ? `<small class="model-context">${escapeHtml(m.priceNote)}</small>` : ""}
+      </span>
+      <span class="badge ${m.tier}">${m.tier}</span>
+    `;
+
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
+    const btn = document.createElement("button");
+    btn.textContent = m.id === selected ? "Selected" : "Use";
+    btn.disabled = m.id === selected;
+    btn.addEventListener("click", async () => {
+      await saveSettings({ model: m.id });
+      const select = $("#openai-model-select");
+      if (select) select.value = m.id;
+      const modelInput = $("#model-name");
+      if (modelInput) modelInput.value = m.id;
+      applyThinkingToggleUi();
+      renderOpenAiModelCatalog();
+      renderModelBadge();
+      dialoguePanel?.onSettingsChanged();
+    });
+    actions.appendChild(btn);
+    li.appendChild(actions);
+    list.appendChild(li);
+  }
+}
+
+async function refreshGeminiModelsFromApi() {
+  const errEl = $("#gemini-catalog-error");
+  const btn = $("#gemini-refresh-models-btn");
+  const apiKey = (settings.apiKey || $("#api-key")?.value || "").trim();
+  if (!apiKey) {
+    if (errEl) {
+      errEl.textContent = "Add your Gemini API key above, then refresh.";
+      errEl.classList.remove("hidden");
+    }
+    return;
+  }
+  if (errEl) errEl.classList.add("hidden");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Refreshing…";
+  }
+  try {
+    await fetchGeminiModelsFromApi(apiKey);
+    renderGeminiModelSelect();
+    if (errEl) {
+      errEl.textContent = `Loaded ${listGeminiModels().length} generateContent models from API.`;
+      errEl.classList.remove("hidden");
+    }
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = err.message || String(err);
+      errEl.classList.remove("hidden");
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Refresh from API";
+    }
+  }
+}
+
 function renderNvidiaModelSelect() {
   const select = $("#nvidia-model-select");
   if (!select) return;
@@ -458,12 +697,16 @@ function applyThinkingToggleUi() {
 
 function applySettingsToForm() {
   $("#provider-select").value = settings.provider || "onnx";
-  $("#base-url").value = settings.baseUrl || "";
+  $("#base-url").value = resolveLlmBaseUrl(settings) || "";
   $("#api-key").value = settings.apiKey || "";
   $("#model-name").value = settings.model || "";
   renderNvidiaModelSelect();
+  renderGeminiModelSelect();
+  renderOpenAiModelSelect();
   $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
   $("#max-tokens-input").value = getMaxTokens(settings);
+  const toolRoundsInput = $("#dialogue-max-tool-rounds-input");
+  if (toolRoundsInput) toolRoundsInput.value = getDialogueMaxToolRounds(settings);
   const thinkingCb = $("#enable-thinking-input");
   if (thinkingCb && providerSupportsThinkingToggle(settings.provider || "onnx")) {
     thinkingCb.checked = settings.enableThinking !== false;
@@ -486,6 +729,8 @@ function applySettingsToForm() {
   const isWebllm = provider === "webllm";
   const isOllama = provider === "ollama";
   const isNvidiaNim = provider === "nvidia-nim";
+  const isGemini = provider === "gemini";
+  const isOpenAi = provider === "openai";
   const isLocalEngine = isOnnx || isWebllm;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
@@ -493,14 +738,27 @@ function applySettingsToForm() {
   $("#rag-settings")?.classList.toggle("hidden", !(isOnnx || isWebllm || isOllama));
   $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
   $("#nvidia-base-url-line")?.classList.toggle("hidden", !isNvidiaNim);
-  $("#remote-base-url-wrap")?.classList.toggle("hidden", isNvidiaNim);
+  $("#gemini-base-url-line")?.classList.toggle("hidden", !isGemini);
+  $("#remote-base-url-wrap")?.classList.toggle("hidden", isNvidiaNim || isGemini);
   $("#nvidia-model-select")?.classList.toggle("hidden", !isNvidiaNim);
   $("#nvidia-model-label")?.classList.toggle("hidden", !isNvidiaNim);
-  $("#remote-model-label")?.classList.toggle("hidden", isNvidiaNim);
-  $("#model-name")?.classList.toggle("hidden", isNvidiaNim);
+  $("#gemini-model-select")?.classList.toggle("hidden", !isGemini);
+  $("#gemini-model-label")?.classList.toggle("hidden", !isGemini);
+  $("#gemini-model-catalog-wrap")?.classList.toggle("hidden", !isGemini);
+  $("#openai-model-select")?.classList.toggle("hidden", !isOpenAi);
+  $("#openai-model-label")?.classList.toggle("hidden", !isOpenAi);
+  $("#openai-model-catalog-wrap")?.classList.toggle("hidden", !isOpenAi);
+  $("#remote-model-label")?.classList.toggle("hidden", isNvidiaNim || isGemini || isOpenAi);
+  $("#model-name")?.classList.toggle("hidden", isNvidiaNim || isGemini || isOpenAi);
   const apiKeyInput = $("#api-key");
   if (apiKeyInput) {
-    apiKeyInput.placeholder = isNvidiaNim ? "nvapi-…" : "(not needed for Ollama)";
+    apiKeyInput.placeholder = isNvidiaNim
+      ? "nvapi-…"
+      : isGemini
+        ? "AIza…"
+        : isOpenAi
+          ? "sk-…"
+          : "(not needed for Ollama)";
   }
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
@@ -515,8 +773,14 @@ function applySettingsToForm() {
       ? ""
       : isNvidiaNim
         ? "NVIDIA NIM uses OpenAI-compatible chat completions. Reasoning is controlled for GLM, Qwen3, and DeepSeek models."
-        : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
+        : isGemini
+          ? "Gemini uses the Google generateContent API. See the model catalog below for pricing, thinking, tools, and I/O types."
+          : isOpenAi
+            ? "OpenAI uses chat completions. See the flagship model catalog below for pricing, thinking, tools, and I/O types."
+            : "Context-length estimate not available for remote providers — check the provider's docs for this model's context window.";
   }
+  if (isGemini) renderGeminiModelCatalog();
+  if (isOpenAi) renderOpenAiModelCatalog();
   applyThinkingToggleUi();
   renderModelBadge();
   dialoguePanel?.onSettingsChanged();
@@ -1236,7 +1500,9 @@ async function testConnection() {
   out.textContent =
     provider === "nvidia-nim"
       ? "Testing… (GLM and other NIM models can take 60+ seconds)"
-      : "Testing…";
+      : provider === "gemini"
+        ? "Testing…"
+        : "Testing…";
   try {
     let res;
     if ((settings.provider || "onnx") === "onnx") {

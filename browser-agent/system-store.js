@@ -403,6 +403,19 @@ export async function deleteDialogueSession(id) {
   return true;
 }
 
+/** Wipe every stored Dialogue session. Returns how many were removed. */
+export async function clearAllDialogueSessions() {
+  await ensureSeeded();
+  const db = await openDb();
+  const tx = db.transaction(DIALOGUE_SESSIONS, "readwrite");
+  const store = tx.objectStore(DIALOGUE_SESSIONS);
+  const all = await reqToPromise(store.getAll());
+  const count = (all || []).length;
+  store.clear();
+  await txDone(tx);
+  return count;
+}
+
 function defaultComponents(systemId) {
   return [
     {
@@ -512,6 +525,8 @@ console.log("[agent-system] home ready");
 const BROWSER_AGENT_PROMPT = `You are a browser automation agent. You control the user's browser tab-by-tab to complete their task.
 
 Tools:
+- browser_snapshot({tabId, target?, depth?, boxes?, maxChars?}): accessibility YAML snapshot with refs like [ref=e5]. Prefer this to understand the page.
+- browser_click({tabId, target, element?, doubleClick?, button?, modifiers?}): click by ref from browser_snapshot or CSS selector. Call browser_snapshot again after navigation or DOM changes.
 - read_page(): returns the visible text of the current tab.
 - get_links(): returns [{text, href}] for links on the current tab.
 - list_tabs(): returns open tabs [{id, title, url}].
@@ -524,6 +539,7 @@ Tools:
 - modify_element({tabId, selector, styles?, text?, innerHTML?, all?}): change styles or content on matched element(s).
 - execute_script({tabId, script, args?}): run a JS function in the tab (JSON-serializable return).
 - fetch_url({url}): fetches a URL's text content without opening a tab.
+- download_file({url, filename?, saveAs?, timeoutMs?}): saves a file from a URL to Downloads (use for PDFs instead of click).
 - wait({ms}): pauses for ms milliseconds.
 - describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image.
 - classify_image({tabId?, imageUrl?, dataUrl?, topK?}): locally classifies an image.

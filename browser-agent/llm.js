@@ -1,7 +1,7 @@
 // Internal protocol: every provider is consumed through the OpenAI
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
-import { toAnthropicTools } from "./tools/schema.js";
+import { toAnthropicTools, toGeminiTools } from "./tools/schema.js";
 import { getMaxTokens, resolveMaxTokens } from "./agent-config.js";
 import {
   isNvidiaNimProvider,
@@ -10,6 +10,7 @@ import {
   resolveChatModel,
   resolveLlmBaseUrl,
 } from "./llm-providers.js";
+import { geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
 import { ollamaFetch } from "./ollama-models.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 import { stripUnsupportedNativeTools } from "./webllm-models.js";
@@ -54,6 +55,9 @@ export async function chatCompletions(request, settings) {
       break;
     case "anthropic":
       response = await anthropicChatCompletions(req, settings);
+      break;
+    case "gemini":
+      response = await geminiChatCompletions(req, settings);
       break;
     default:
       return errorResponse(`Unknown provider "${provider}"`, "engine_error");
@@ -271,6 +275,9 @@ function openAiFetchErrorMessage(err, baseUrl, settings) {
     if (provider === "nvidia-nim" && !(settings?.apiKey || "").trim()) {
       return "Network request failed — add your NVIDIA API key (nvapi-…) in Settings and reload the extension.";
     }
+    if (provider === "gemini" && !(settings?.apiKey || "").trim()) {
+      return "Network request failed — add your Gemini API key in Settings and reload the extension.";
+    }
     if (!baseUrl) {
       return "Network request failed — no Base URL configured in Settings.";
     }
@@ -292,7 +299,12 @@ async function openaiChatCompletions(request, settings) {
     return errorResponse("No model selected — pick a model in Settings.", "engine_error");
   }
   if (providerRequiresApiKey(provider) && !apiKey) {
-    const label = provider === "nvidia-nim" ? "NVIDIA API key (nvapi-…)" : "API key";
+    const label =
+      provider === "nvidia-nim"
+        ? "NVIDIA API key (nvapi-…)"
+        : provider === "gemini"
+          ? "Gemini API key"
+          : "API key";
     return errorResponse(`${label} required — add it in Settings.`, "engine_error");
   }
 
@@ -497,6 +509,252 @@ async function ollamaChatCompletions(request, settings) {
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
       "engine_error"
     );
+  }
+}
+
+// --- gemini --------------------------------------------------------------
+
+function appendGeminiContent(contents, role, parts) {
+  if (!parts.length) return;
+  const last = contents[contents.length - 1];
+  if (last?.role === role) {
+    last.parts.push(...parts);
+    return;
+  }
+  contents.push({ role, parts });
+}
+
+function parseToolResultObject(content) {
+  if (content == null || content === "") return {};
+  if (typeof content === "object") return content;
+  if (typeof content !== "string") return { result: String(content) };
+  try {
+    const parsed = JSON.parse(content);
+    return parsed && typeof parsed === "object" ? parsed : { result: content };
+  } catch {
+    return { result: content };
+  }
+}
+
+function buildToolCallNameMap(messages) {
+  const map = new Map();
+  for (const m of messages || []) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (tc.id && tc.function?.name) map.set(tc.id, tc.function.name);
+      }
+    }
+  }
+  return map;
+}
+
+function toGeminiContents(messages) {
+  const contents = [];
+  const systemParts = [];
+  const toolCallNames = buildToolCallNameMap(messages);
+
+  for (const m of messages || []) {
+    if (m.role === "system") {
+      if (typeof m.content === "string" && m.content.trim()) systemParts.push(m.content.trim());
+      continue;
+    }
+
+    if (m.role === "tool") {
+      const name = m.tool_name || toolCallNames.get(m.tool_call_id) || "tool";
+      const part = {
+        functionResponse: {
+          name,
+          response: parseToolResultObject(m.content),
+          ...(m.tool_call_id ? { id: m.tool_call_id } : {}),
+        },
+      };
+      appendGeminiContent(contents, "user", [part]);
+      continue;
+    }
+
+    if (m.role === "assistant") {
+      const parts = [];
+      if (typeof m.content === "string" && m.content.trim()) parts.push({ text: m.content });
+      if (Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+          let args = {};
+          try {
+            args = JSON.parse(tc.function?.arguments || "{}");
+          } catch {
+            args = {};
+          }
+          const call = {
+            name: tc.function?.name || "tool",
+            args,
+          };
+          if (tc.id) call.id = tc.id;
+          parts.push({ functionCall: call });
+        }
+      }
+      appendGeminiContent(contents, "model", parts);
+      continue;
+    }
+
+    const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+    appendGeminiContent(contents, "user", [{ text }]);
+  }
+
+  return {
+    contents,
+    systemInstruction: systemParts.length ? { parts: [{ text: systemParts.join("\n\n") }] } : undefined,
+  };
+}
+
+function buildGeminiGenerationConfig(request, model) {
+  const config = {
+    temperature: request.temperature ?? 0.2,
+    maxOutputTokens: resolveMaxTokens(request.max_tokens),
+  };
+  if (!geminiModelSupportsThinking(model)) return config;
+
+  const enabled = request.thinkingEnabled !== false;
+  config.thinkingConfig = enabled
+    ? { includeThoughts: true, thinkingBudget: -1 }
+    : { includeThoughts: false, thinkingBudget: 0 };
+  return config;
+}
+
+function geminiAssistantFromParts(parts) {
+  const message = { role: "assistant", content: "" };
+  const tool_calls = [];
+  const reasoningParts = [];
+
+  for (const part of parts || []) {
+    if (typeof part.text === "string") {
+      if (part.thought) reasoningParts.push(part.text);
+      else message.content += part.text;
+    }
+    const fnCall = part.functionCall || part.function_call;
+    if (fnCall?.name) {
+      tool_calls.push({
+        id: fnCall.id || `call_${crypto.randomUUID()}`,
+        type: "function",
+        function: {
+          name: fnCall.name,
+          arguments: JSON.stringify(fnCall.args && typeof fnCall.args === "object" ? fnCall.args : {}),
+        },
+      });
+    }
+  }
+
+  message.content = message.content.trim();
+  if (!message.content) message.content = null;
+  if (reasoningParts.length) message.reasoning = reasoningParts.join("\n\n").trim();
+  if (tool_calls.length) message.tool_calls = tool_calls;
+  return message;
+}
+
+function geminiChatCompletionFromBody(body, model) {
+  const candidate = body.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  const message = geminiAssistantFromParts(parts);
+  const finishReason = message.tool_calls?.length
+    ? "tool_calls"
+    : candidate?.finishReason === "MAX_TOKENS"
+      ? "length"
+      : "stop";
+  const usage = body.usageMetadata || {};
+
+  return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message, finish_reason: finishReason }],
+    usage: {
+      prompt_tokens: usage.promptTokenCount ?? 0,
+      completion_tokens: usage.candidatesTokenCount ?? 0,
+      total_tokens: usage.totalTokenCount ?? 0,
+    },
+  };
+}
+
+function geminiErrorMessage(body, status) {
+  if (typeof body === "string") return body;
+  if (body?.error?.message) return body.error.message;
+  if (Array.isArray(body?.error?.details) && body.error.details[0]?.message) {
+    return body.error.details[0].message;
+  }
+  return `HTTP ${status}`;
+}
+
+function geminiUnavailableModelMessage(model, bodyMessage) {
+  const msg = bodyMessage || "";
+  if (/no longer available/i.test(msg)) {
+    const { model: replacement, migratedFrom } = resolveGeminiModel(model);
+    if (migratedFrom) {
+      return `${msg} Switched recommendation: use "${replacement}" in Settings (replaces ${migratedFrom}).`;
+    }
+    return `${msg} Try "${replacement}" or refresh the model list in Settings.`;
+  }
+  return msg;
+}
+
+async function geminiChatCompletions(request, settings) {
+  const baseUrl = resolveLlmBaseUrl(settings).replace(/\/$/, "");
+  const apiKey = (settings?.apiKey || "").trim();
+  const resolved = resolveGeminiModel(request.model || resolveChatModel(settings));
+  const model = resolved.model;
+
+  if (!apiKey) {
+    return errorResponse("Gemini API key required — add it in Settings.", "engine_error");
+  }
+  if (!model) {
+    return errorResponse("No model selected — pick a model in Settings.", "engine_error");
+  }
+
+  const { contents, systemInstruction } = toGeminiContents(request.messages);
+  if (!contents.length) {
+    return errorResponse("No messages to send.", "engine_error");
+  }
+
+  const body = {
+    contents,
+    generationConfig: buildGeminiGenerationConfig(request, model),
+  };
+  if (systemInstruction) body.systemInstruction = systemInstruction;
+
+  const tools = toGeminiTools(request.tools);
+  if (tools) {
+    body.tools = tools;
+    body.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REMOTE_LLM_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const parsed = await readOpenAiCompatibleResponse(res);
+    if (!res.ok) {
+      const detail = parsed.body
+        ? geminiUnavailableModelMessage(model, geminiErrorMessage(parsed.body, res.status))
+        : parsed.error || `HTTP ${res.status}`;
+      return errorResponse(detail, "engine_error");
+    }
+    if (parsed.error || !parsed.body) {
+      return errorResponse(parsed.error || `empty response (HTTP ${res.status})`, "engine_error");
+    }
+    if (parsed.body.error) {
+      return errorResponse(geminiErrorMessage(parsed.body, res.status), "engine_error");
+    }
+    return geminiChatCompletionFromBody(parsed.body, model);
+  } catch (err) {
+    return errorResponse(openAiFetchErrorMessage(err, baseUrl, settings), "engine_error");
+  } finally {
+    clearTimeout(timer);
   }
 }
 

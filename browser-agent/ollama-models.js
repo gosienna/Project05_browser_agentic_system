@@ -94,6 +94,15 @@ export const OLLAMA_MODEL_REGISTRY = [
     approxSizeMB: 8000,
   },
   {
+    id: "gemma4",
+    label: "Gemma 4",
+    description: "Google Gemma 4 — thinking, vision, and audio; default tag is e4b.",
+    labels: ["E2B", "E4B", "12B", "26B", "31B"],
+    capability: "Thinking",
+    modelType: "official",
+    approxSizeMB: 9600,
+  },
+  {
     id: "phi3",
     label: "Phi 3",
     description: "Microsoft Phi-3 small language models.",

@@ -74,12 +74,21 @@ Registered at startup:
 | Tool | Group | Handler | Settings gate |
 |------|-------|---------|---------------|
 | `web_search` | dialogue, network | Tavily via [`dialogue/tool-runtime.js`](../browser-agent/dialogue/tool-runtime.js) | `dialogueWebSearch !== false` |
-| `read_page`, `get_links`, `list_tabs`, `open_tab`, `navigate`, `click`, `type_text`, `scroll`, `fetch_url`, `wait` | dialogue, browser | [`tools.js`](../browser-agent/tools.js) | `dialogueBrowserTools !== false` |
+| `browser_snapshot`, `browser_click` | dialogue, browser | [`tools/a11y/`](../browser-agent/tools/a11y/) | `dialogueBrowserTools !== false` |
+| `read_page`, `get_links`, `list_tabs`, `open_tab`, `navigate`, `click`, `type_text`, `scroll`, `fetch_url`, `download_file`, `get_page_html`, `modify_element`, `execute_script`, `wait` | dialogue, browser | [`tools/browser.js`](../browser-agent/tools/browser.js) | `dialogueBrowserTools !== false` |
 | `search_documents`, `list_documents`, `delete_document` | dialogue, rag | [`rag/search.js`](../browser-agent/rag/search.js), [`rag/rag-store.js`](../browser-agent/rag/rag-store.js) | `dialogueRagTools !== false` |
 
 See [`documents/rag.md`](rag.md) for PDF ingest, embedding backends, and the citation-linked PDF viewer.
 
 Browser tools use a `withTabId` wrapper: resolve `tabId` from args → context → active tab in the current window.
+
+### Ref-based interaction (`browser_snapshot` + `browser_click`)
+
+1. Model calls `browser_snapshot` → receives YAML with `[ref=e3]`, `[ref=e5]`, etc.
+2. Model calls `browser_click` with `target: "e5"` (or a CSS selector).
+3. After navigation or DOM updates, model calls `browser_snapshot` again — refs from an old snapshot are rejected as stale.
+
+Refs are stored as `data-ba-ref` attributes on the live page; a per-tab generation counter in the background invalidates refs after each new snapshot.
 
 ---
 

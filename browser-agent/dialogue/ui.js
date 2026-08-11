@@ -1,6 +1,7 @@
 // Dialogue tab: chat UI, sessions, tool loop, and Tavily web search.
 
 import {
+  clearAllDialogueSessions,
   deleteDialogueSession,
   getDialogueSession,
   listDialogueSessions,
@@ -29,6 +30,14 @@ import {
   serializeDialogueRawPayload,
 } from "./raw-json-view.js";
 import { listOllamaModelsWithMeta } from "../ollama-models.js";
+import { getDialogueMaxToolRounds } from "../agent-config.js";
+import { DEFAULT_GEMINI_MODEL, formatGeminiPickerLabel, listGeminiModels, resolveGeminiModel } from "../gemini-models.js";
+import {
+  DEFAULT_OPENAI_MODEL,
+  formatOpenAiPickerLabel,
+  listOpenAiFlagshipModels,
+  resolveOpenAiModel,
+} from "../openai-models.js";
 import { DEFAULT_NVIDIA_NIM_MODEL, listNvidiaNimModels } from "../nvidia-nim-models.js";
 import { isWebllmToolModel } from "../webllm-models.js";
 import { initPdfViewer } from "../rag/pdf-viewer.js";
@@ -48,11 +57,11 @@ import { initDialoguePanelResize } from "./panel-resize.js";
 
 let pdfViewer = null;
 
-const DIALOGUE_MAX_TOOL_ROUNDS = 5;
 /** Keep tool payloads small — large HTML + local ONNX (esp. WebGPU) can OOM or crash the next inference. */
 const DIALOGUE_TOOL_RESULT_CHARS = 8000;
 const DIALOGUE_WEBLLM_TOOL_RESULT_CHARS = 3000;
 const DIALOGUE_HTML_FIELD_CHARS = 6000;
+const DIALOGUE_SNAPSHOT_FIELD_CHARS = 6000;
 
 function dialogueToolResultCharLimit() {
   return (getSettings?.().provider || "onnx") === "webllm"
@@ -72,6 +81,18 @@ function stringifyToolResultForLlm(toolName, result) {
         truncatedForContext: true,
         totalChars: html.length,
         shownChars: DIALOGUE_HTML_FIELD_CHARS,
+      };
+    }
+  }
+  if (toolName === "browser_snapshot" && result && typeof result === "object" && typeof result.snapshot === "string") {
+    const snapshot = result.snapshot;
+    if (snapshot.length > DIALOGUE_SNAPSHOT_FIELD_CHARS) {
+      payload = {
+        ...result,
+        snapshot: snapshot.slice(0, DIALOGUE_SNAPSHOT_FIELD_CHARS),
+        truncatedForContext: true,
+        totalChars: snapshot.length,
+        shownChars: DIALOGUE_SNAPSHOT_FIELD_CHARS,
       };
     }
   }
@@ -156,16 +177,45 @@ export function createDialoguePanel(deps) {
   };
 }
 
+function setDialogueToolbarBtnActive(id, active) {
+  const btn = $(id);
+  if (btn) btn.classList.toggle("active", active);
+}
+
+function syncDialogueToolbarHighlights() {
+  setDialogueToolbarBtnActive(
+    "#dialogue-sessions-toggle",
+    !$("#dialogue-sessions-panel")?.classList.contains("collapsed")
+  );
+  setDialogueToolbarBtnActive(
+    "#dialogue-documents-toggle",
+    !$("#dialogue-documents-panel")?.classList.contains("collapsed")
+  );
+  setDialogueToolbarBtnActive(
+    "#dialogue-pdf-toggle",
+    !$("#dialogue-pdf-panel")?.classList.contains("collapsed")
+  );
+  setDialogueToolbarBtnActive("#dialogue-system-toggle", !$("#dialogue-system-wrap")?.classList.contains("hidden"));
+  setDialogueToolbarBtnActive("#dialogue-tools-toggle", !$("#dialogue-tools-wrap")?.classList.contains("hidden"));
+  setDialogueToolbarBtnActive(
+    "#dialogue-preview-toggle",
+    !$("#dialogue-preview-wrap")?.classList.contains("hidden")
+  );
+}
+
 function wire() {
   $("#dialogue-sessions-toggle").addEventListener("click", () => {
     const panel = $("#dialogue-sessions-panel");
     const collapsed = panel.classList.toggle("collapsed");
     $("#dialogue-sessions-toggle").setAttribute("aria-expanded", String(!collapsed));
+    syncDialogueToolbarHighlights();
     if (!collapsed) refreshDialogueSessionsList();
   });
   $("#dialogue-new-btn").addEventListener("click", () => startNewDialogueSession());
+  $("#dialogue-sessions-clear-btn").addEventListener("click", () => clearAllDialogueSessionsUi());
   $("#dialogue-system-toggle").addEventListener("click", () => {
     $("#dialogue-system-wrap").classList.toggle("hidden");
+    syncDialogueToolbarHighlights();
   });
   $("#dialogue-system-input").addEventListener("input", (e) => {
     dialogueSystemPrompt = e.target.value;
@@ -174,6 +224,7 @@ function wire() {
   $("#dialogue-tools-toggle").addEventListener("click", () => {
     const wrap = $("#dialogue-tools-wrap");
     wrap.classList.toggle("hidden");
+    syncDialogueToolbarHighlights();
     if (!wrap.classList.contains("hidden")) renderDialogueToolsForm();
   });
   $("#dialogue-tools-add-btn").addEventListener("click", () => {
@@ -233,10 +284,14 @@ function wire() {
     getSettings,
     escapeHtml,
     onOpenPdf: (opts) => pdfViewer?.openDoc(opts.docId),
+    syncToolbarHighlights: syncDialogueToolbarHighlights,
   });
   wireRagUi();
   initDialoguePanelResize({ $ });
-  pdfViewer = initPdfViewer($("#dialogue-pdf-viewer"), { panel: $("#dialogue-pdf-panel") });
+  pdfViewer = initPdfViewer($("#dialogue-pdf-viewer"), {
+    panel: $("#dialogue-pdf-panel"),
+    onPanelChange: syncDialogueToolbarHighlights,
+  });
   bindPdfCitationOpener((opts) => pdfViewer?.openCitation(opts));
   syncRagChunkInputs();
   wireDialogueInputPreview();
@@ -244,6 +299,7 @@ function wire() {
   renderDialogueToolsForm();
   refreshDialogueModelSelect();
   refreshDialogueSessionsList();
+  syncDialogueToolbarHighlights();
 }
 
 async function refreshDialogueSessionsList() {
@@ -256,6 +312,8 @@ async function refreshDialogueSessionsList() {
     console.error("[dialogue] list sessions failed", err);
   }
   list.innerHTML = "";
+  const clearBtn = $("#dialogue-sessions-clear-btn");
+  if (clearBtn) clearBtn.disabled = items.length === 0;
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "dialogue-sessions-empty";
@@ -370,6 +428,17 @@ async function deleteDialogueSessionUi(id, title) {
     else await refreshDialogueSessionsList();
   } catch (err) {
     console.error("[dialogue] delete session failed", err);
+  }
+}
+
+async function clearAllDialogueSessionsUi() {
+  if (dialogueSending) return;
+  if (!confirm("Delete all saved chats? This cannot be undone.")) return;
+  try {
+    await clearAllDialogueSessions();
+    startNewDialogueSession();
+  } catch (err) {
+    console.error("[dialogue] clear all sessions failed", err);
   }
 }
 
@@ -663,6 +732,7 @@ function wireDialogueInputPreview() {
     wrap.classList.toggle("hidden");
     const open = !wrap.classList.contains("hidden");
     toggle.textContent = open ? "Hide raw" : "Show raw";
+    syncDialogueToolbarHighlights();
     if (open) refreshDialogueInputPreview();
   });
 
@@ -1389,6 +1459,14 @@ async function refreshDialogueModelSelect() {
     options = listNvidiaNimModels().map((m) => ({ id: m.id, label: m.label }));
     const settingsModel = getSettings().model || "";
     selected = settingsModel || DEFAULT_NVIDIA_NIM_MODEL;
+  } else if (provider === "gemini") {
+    options = listGeminiModels().map((m) => ({ id: m.id, label: formatGeminiPickerLabel(m) }));
+    const settingsModel = getSettings().model || "";
+    selected = resolveGeminiModel(settingsModel || DEFAULT_GEMINI_MODEL).model;
+  } else if (provider === "openai") {
+    options = listOpenAiFlagshipModels().map((m) => ({ id: m.id, label: formatOpenAiPickerLabel(m) }));
+    const settingsModel = getSettings().model || "";
+    selected = resolveOpenAiModel(settingsModel || DEFAULT_OPENAI_MODEL).model;
   } else {
     const m = getSettings().model || "";
     if (m) options = [{ id: m, label: m }];
@@ -1414,13 +1492,19 @@ async function refreshDialogueModelSelect() {
   }
 
   select.disabled =
-    provider !== "onnx" && provider !== "webllm" && provider !== "ollama" && provider !== "nvidia-nim";
+    provider !== "onnx" &&
+    provider !== "webllm" &&
+    provider !== "ollama" &&
+    provider !== "nvidia-nim" &&
+    provider !== "gemini" &&
+    provider !== "openai";
   if (
     (provider === "ollama" ||
       provider === "openai" ||
       provider === "anthropic" ||
       provider === "openai-compatible" ||
-      provider === "nvidia-nim") &&
+      provider === "nvidia-nim" ||
+      provider === "gemini") &&
     selected &&
     !options.some((o) => o.id === selected)
   ) {
@@ -1804,7 +1888,8 @@ async function sendDialogue() {
   let gotAssistantReply = false;
 
   try {
-    for (let round = 0; round < DIALOGUE_MAX_TOOL_ROUNDS; round++) {
+    const maxToolRounds = getDialogueMaxToolRounds(getSettings());
+    for (let round = 0; round < maxToolRounds; round++) {
       btn.textContent = round === 0 ? "Sending…" : "Thinking…";
       const inputRaw = snapshotDialogueRawInput(messages, tools);
       const res = await dialogueChatCompletion(messages, tools);

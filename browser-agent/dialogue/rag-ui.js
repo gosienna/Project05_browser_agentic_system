@@ -11,6 +11,7 @@ let saveSettings;
 let getSettings;
 let escapeHtml;
 let onOpenPdf;
+let syncToolbarHighlights;
 
 function setRagStatus(text, { error = false } = {}) {
   const status = $("#dialogue-rag-status");
@@ -35,6 +36,7 @@ export function initRagUi(deps) {
   getSettings = deps.getSettings;
   escapeHtml = deps.escapeHtml;
   onOpenPdf = deps.onOpenPdf;
+  syncToolbarHighlights = deps.syncToolbarHighlights;
 }
 
 export function wireRagUi() {
@@ -49,12 +51,14 @@ export function wireRagUi() {
     const panel = $("#dialogue-documents-panel");
     const collapsed = panel?.classList.toggle("collapsed");
     $("#dialogue-documents-toggle")?.setAttribute("aria-expanded", String(!collapsed));
+    syncToolbarHighlights?.();
     if (!collapsed) refreshDocumentsPanel();
   });
   $("#dialogue-pdf-toggle")?.addEventListener("click", () => {
     const panel = $("#dialogue-pdf-panel");
     const collapsed = panel?.classList.toggle("collapsed");
     $("#dialogue-pdf-toggle")?.setAttribute("aria-expanded", String(!collapsed));
+    syncToolbarHighlights?.();
   });
   $("#dialogue-chunk-save-default")?.addEventListener("change", () => {});
 }
@@ -140,6 +144,7 @@ function revealDocumentsUi() {
   const panel = $("#dialogue-documents-panel");
   panel?.classList.remove("collapsed");
   $("#dialogue-documents-toggle")?.setAttribute("aria-expanded", "true");
+  syncToolbarHighlights?.();
 }
 
 async function ingestPdfFile(file) {

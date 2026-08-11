@@ -4,6 +4,8 @@ import { getMaxSteps } from "./agent-config.js";
 const SYSTEM_PROMPT = `You are a browser automation agent. You control the user's browser tab-by-tab to complete their task.
 
 Tools:
+- browser_snapshot({tabId, target?, depth?, boxes?, maxChars?}): accessibility YAML snapshot with refs like [ref=e5]. Prefer this to understand the page.
+- browser_click({tabId, target, element?, doubleClick?, button?, modifiers?}): click by ref from browser_snapshot or CSS selector. Call browser_snapshot again after navigation or DOM changes.
 - read_page(): returns the visible text of the current tab.
 - get_links(): returns [{text, href}] for links on the current tab.
 - list_tabs(): returns open tabs [{id, title, url}].
@@ -16,6 +18,7 @@ Tools:
 - modify_element({tabId, selector, styles?, text?, innerHTML?, all?}): change styles or content on matched element(s).
 - execute_script({tabId, script, args?}): run a JS function in the tab; return value must be JSON-serializable.
 - fetch_url({url}): fetches a URL's text content without opening a tab.
+- download_file({url, filename?, saveAs?, timeoutMs?}): saves a file from a URL to Downloads (use for PDFs instead of click).
 - wait({ms}): pauses for ms milliseconds.
 - describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image (screenshot of tabId, or imageUrl/dataUrl). Returns {caption, model}.
 - classify_image({tabId?, imageUrl?, dataUrl?, topK?}): locally classifies an image. Returns {labels:[{label,score}], model}.
@@ -107,6 +110,10 @@ async function runTool(tools, name, args, ctx) {
   if (name === "get_page_html") {
     const n = Number(effectiveArgs.maxChars);
     if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_PAGE_HTML_CHARS;
+  }
+  if (name === "browser_snapshot") {
+    const n = Number(effectiveArgs.maxChars);
+    if (!Number.isFinite(n) || n <= 0) effectiveArgs.maxChars = DEFAULT_READ_PAGE_CHARS;
   }
   return fn(effectiveArgs);
 }

@@ -6,6 +6,24 @@ Browser-side tools invoked by the agent loop (`agent.js`). Each tool takes a sin
 
 ## Tool Reference
 
+### `browser_snapshot({ tabId, target?, depth?, boxes?, maxChars = 14000 })`
+Capture an accessibility-style YAML snapshot of the page (Playwright MCP-inspired).
+- Injects [`tools/a11y/injected.js`](../browser-agent/tools/a11y/injected.js) and walks the DOM for roles, names, and states
+- Assigns `data-ba-ref="eN"` on interactable elements; YAML lines include `[ref=eN]`
+- Returns `{ url, title, snapshot, refCount, generation }` (truncates `snapshot` when over `maxChars`)
+- Optional `target`: ref from a prior snapshot to capture a subtree only
+- Optional `boxes`: append `[box=x,y,width,height]` per element
+- Dialogue further caps the `snapshot` field in the LLM transcript (~6k chars)
+
+**Workflow:** call `browser_snapshot` → use a ref in `browser_click` → call `browser_snapshot` again after the page changes.
+
+### `browser_click({ tabId, target, element?, doubleClick?, button?, modifiers? })`
+Click an element by ref or CSS selector.
+- `target`: `e5` from `browser_snapshot`, or any CSS selector
+- Ref clicks validate the page generation counter; stale refs return a clear error
+- Returns `{ ok: true }` or `{ ok: false, error }` — does **not** auto-include a new snapshot
+- Supports `doubleClick`, `button` (`left`/`right`/`middle`), and keyboard `modifiers`
+
 ### `read_page({ tabId, maxChars = 14000 })`
 Returns the visible text of the current tab.
 - Runs `document.body.innerText` via `chrome.scripting.executeScript`
@@ -75,8 +93,10 @@ Structured DOM manipulation on a tab.
 Runs a JavaScript function in the tab (same semantics as sandbox `executeInTab`).
 - `script`: function source string, e.g. `"() => document.title"` or `"(x) => x + 1"`
 - `args`: optional array passed to the function
-- Runs in isolated world — DOM read/write works; page JS variables do not
-- Return value must be JSON-serializable
+- Runs in the page **MAIN** world (MV3 blocks `eval` in the isolated world, which previously caused silent `null` returns)
+- DOM read/write works; page JS globals are visible
+- Return value must be JSON-serializable (`[]` or `{ count: 0 }` when nothing matches — not `null`)
+- On sites with strict CSP (`unsafe-eval` blocked), may error instead of running — use `get_links`, `modify_element`, or `browser_snapshot` instead
 
 **Example — highlight download controls:**
 ```js
@@ -100,6 +120,15 @@ Fetches a URL's text content without opening a tab.
 - Plain `fetch(url)` — no browser rendering, no cookies/session from open tabs
 - Strips `<script>`/`<style>` blocks and all HTML tags, collapses whitespace
 - Truncates result to `maxChars` (default 12,000)
+
+### `download_file({ url, filename?, saveAs = false, timeoutMs = 120000 })`
+Downloads a file from a URL to the user's **Downloads** folder (Chrome downloads API).
+- Use instead of `click` when a link would open inline (e.g. PDFs served as `application/pdf`)
+- `url`: required HTTP(S) URL
+- `filename`: optional path relative to Downloads (e.g. `papers/report.pdf`)
+- `saveAs`: if `true`, shows the system Save As dialog
+- Waits for the download to complete (default timeout 120s, max 300s)
+- Returns `{ ok: true, downloadId, filename, url, fileSize }` or `{ ok: false, error }`
 
 ### `wait({ ms = 1000 })`
 Pauses execution.
@@ -140,6 +169,7 @@ Shared helper for all `chrome.scripting.executeScript` calls. Runs `func` in the
 
 | Category | Tools | Mechanism |
 |----------|-------|-----------|
+| **Accessibility snapshot / ref click** | `browser_snapshot`, `browser_click` | Injected [`tools/a11y/`](../browser-agent/tools/a11y/) script + background YAML renderer |
 | **Page inspection/interaction** | `read_page`, `get_links`, `click`, `type_text`, `scroll` | `chrome.scripting.executeScript()` — injects and runs a function inside the tab's page context |
 | **Page HTML / DOM manipulation** | `get_page_html`, `modify_element`, `execute_script` | Same `executeScript` path via internal `runInTab()` |
 | **Tab management** | `list_tabs`, `open_tab`, `navigate` | `chrome.tabs.*` API — no script injection needed |

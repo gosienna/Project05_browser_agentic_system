@@ -66,17 +66,19 @@ function pdfToggleButton() {
  * @param {HTMLElement} root
  * @param {{ panel?: HTMLElement }} [options]
  */
-export function initPdfViewer(root, { panel: panelEl } = {}) {
+export function initPdfViewer(root, { panel: panelEl, onPanelChange } = {}) {
   const panel = panelEl || root.closest(".dialogue-pdf-panel");
 
   function openPanel() {
     panel?.classList.remove("collapsed");
     pdfToggleButton()?.setAttribute("aria-expanded", "true");
+    onPanelChange?.();
   }
 
   function closePanel() {
     panel?.classList.add("collapsed");
     pdfToggleButton()?.setAttribute("aria-expanded", "false");
+    onPanelChange?.();
   }
 
   const state = {

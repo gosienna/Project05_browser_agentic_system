@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browser Agent",
   "version": "0.1.0",
-  "description": "AI agent that reads and acts on your browser tabs. Runs fully local (ONNX or WebLLM) or via Ollama/OpenAI/Anthropic.",
+  "description": "AI agent that reads and acts on your browser tabs. Runs fully local (ONNX or WebLLM) or via Ollama/Gemini/OpenAI/Anthropic.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -16,7 +16,8 @@
     "activeTab",
     "sidePanel",
     "offscreen",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "downloads"
   ],
   "declarative_net_request": {
     "rule_resources": [
@@ -30,6 +31,7 @@
   "host_permissions": [
     "<all_urls>",
     "https://integrate.api.nvidia.com/*",
+    "https://generativelanguage.googleapis.com/*",
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*"
   ],

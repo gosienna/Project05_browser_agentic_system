@@ -2,6 +2,7 @@ import { runAgent } from "./agent.js";
 import { getMaxTokens } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { resolveChatModel } from "./llm-providers.js";
+import { migrateGeminiModelSettings } from "./gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools/browser.js";
 import { runSystemEditor } from "./system-editor-l2.js";
@@ -29,7 +30,12 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function getSettings() {
   const { settings } = await chrome.storage.local.get("settings");
-  return settings || {};
+  const current = settings || {};
+  const geminiPatch = migrateGeminiModelSettings(current);
+  if (!geminiPatch) return current;
+  const next = { ...current, ...geminiPatch };
+  await chrome.storage.local.set({ settings: next });
+  return next;
 }
 
 async function setSettings(patch) {

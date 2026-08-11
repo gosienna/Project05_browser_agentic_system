@@ -220,6 +220,12 @@
   gap: 6px;
   flex-shrink: 0;
 }
+.dialogue-toolbar .secondary-btn.active,
+.dialogue-input-toolbar .secondary-btn.active {
+  background: #2557d6;
+  border-color: #2557d6;
+  color: #fff;
+}
 .dialogue-web-search-label {
   display: flex;
   align-items: center;
@@ -368,9 +374,21 @@ body.dialogue-panel-resizing {
   flex-shrink: 0;
 }
 .dialogue-sessions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.dialogue-sessions-header > span {
   font-size: 11px;
   font-weight: 600;
   color: #666;
+}
+.dialogue-sessions-header .secondary-btn {
+  align-self: auto;
+  padding: 2px 8px;
+  font-size: 10px;
   flex-shrink: 0;
 }
 .dialogue-sessions-list {
@@ -732,7 +750,7 @@ body.dialogue-panel-resizing {
   }
   .dialogue-documents-header { color: #aaa; }
   .dialogue-documents-hint { color: #999; }
-  .dialogue-sessions-header { color: #aaa; }
+  .dialogue-sessions-header > span { color: #aaa; }
   .dialogue-session-item { background: #26262c; border-color: #3a3a42; }
   .dialogue-session-item.active { background: #2a2f3d; border-color: #3b6ef5; }
   .dialogue-session-main:hover { background: #2a2f3d; }
@@ -789,6 +807,12 @@ body.dialogue-panel-resizing {
   .dialogue-tool-json-label { color: #aaa; }
   .dialogue-tool-card .dialogue-raw-json-root { background: #1a1a1f; border-color: #3a3a42; color: #ddd; }
   .dialogue-mcp-toggles { border-bottom-color: #3a3a42; }
+  .dialogue-toolbar .secondary-btn.active,
+  .dialogue-input-toolbar .secondary-btn.active {
+    background: #3b6ef5;
+    border-color: #3b6ef5;
+    color: #fff;
+  }
   .dialogue-mcp-status { color: #aaa; }
   .dialogue-attachment img, .dialogue-bubble-images img { border-color: #3a3a42; }
   .dialogue-attachment .remove-attachment { background: #26262c; border-color: #3a3a42; color: #ccc; }

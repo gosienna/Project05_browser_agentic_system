@@ -3,6 +3,7 @@
 // string/object result suitable for feeding back into the chat transcript.
 
 import { ensureOffscreenDocument } from "../llm.js";
+export { browser_snapshot, browser_click } from "./a11y/index.js";
 
 const DEFAULT_PAGE_HTML_CHARS = 14000;
 const MODIFY_ELEMENT_MAX = 100;
@@ -86,18 +87,39 @@ export async function modify_element({ tabId, selector, styles, text, innerHTML,
   );
 }
 
+/** Eval user function source in the page MAIN world (MV3 blocks eval in ISOLATED). */
+function runUserScriptInPage(source, callArgs) {
+  if (typeof source !== "string" || !source.trim()) {
+    return { __executeScriptError: "empty script" };
+  }
+  try {
+    const fn = (0, eval)(`(${source})`);
+    if (typeof fn !== "function") {
+      return { __executeScriptError: "script must evaluate to a function" };
+    }
+    return fn(...(Array.isArray(callArgs) ? callArgs : []));
+  } catch (e) {
+    return { __executeScriptError: e?.message || String(e) };
+  }
+}
+
 export async function execute_script({ tabId, script, args = [] }) {
   if (typeof script !== "string" || !script.trim()) {
     throw new Error("execute_script requires a non-empty script string");
   }
-  return runInTab(
-    tabId,
-    (source, callArgs) => {
-      const fn = (0, eval)(`(${source})`);
-      return fn(...callArgs);
-    },
-    [script, Array.isArray(args) ? args : []]
-  );
+  const id = requireTabId(tabId);
+  await assertRunnableTab(id);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: id },
+    world: "MAIN",
+    injectImmediately: true,
+    func: runUserScriptInPage,
+    args: [script, Array.isArray(args) ? args : []],
+  });
+  if (result && typeof result === "object" && "__executeScriptError" in result) {
+    throw new Error(`execute_script failed: ${result.__executeScriptError}`);
+  }
+  return result;
 }
 
 export async function get_links({ tabId }) {
@@ -174,6 +196,41 @@ export async function fetch_url({ url, maxChars = 12000 }) {
   const text = await res.text();
   const stripped = text.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   return truncate(stripped, maxChars, 12000);
+}
+
+/** Save a remote file to the user's Downloads folder via chrome.downloads (not inline view). */
+export async function download_file({ url, filename, saveAs = false, timeoutMs = 120000 } = {}) {
+  if (!url || typeof url !== "string") {
+    return { ok: false, error: "url is required" };
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, error: `Invalid URL: ${url}` };
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return { ok: false, error: "Only http/https URLs are supported" };
+  }
+
+  const options = {
+    url: parsed.href,
+    saveAs: !!saveAs,
+    conflictAction: "uniquify",
+  };
+  if (filename && typeof filename === "string" && filename.trim()) {
+    options.filename = filename.trim();
+  }
+
+  let downloadId;
+  try {
+    downloadId = await startChromeDownload(options);
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+
+  const timeout = Math.min(Math.max(Number(timeoutMs) || 120000, 5000), 300000);
+  return waitForChromeDownload(downloadId, timeout);
 }
 
 export function wait({ ms = 1000 }) {
@@ -304,6 +361,19 @@ function requireTabId(tabId) {
   return tabId;
 }
 
+async function assertRunnableTab(tabId) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    throw new Error(`Tab ${tabId} not found`);
+  }
+  const url = tab.url || "";
+  if (/^(chrome|chrome-extension|edge|about|devtools):/i.test(url)) {
+    throw new Error(`Cannot run browser tools on restricted page: ${url}`);
+  }
+}
+
 function normalizeMaxChars(maxChars, defaultMax) {
   const n = Number(maxChars);
   if (!Number.isFinite(n) || n <= 0) return defaultMax;
@@ -316,4 +386,67 @@ function truncate(str, maxChars, defaultMax) {
   if (str.length <= limit) return str;
   const kept = str.slice(0, limit);
   return `${kept}\n...[truncated — ${str.length.toLocaleString()} chars total, showing first ${limit.toLocaleString()}]`;
+}
+
+function startChromeDownload(options) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(options, (downloadId) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(downloadId);
+    });
+  });
+}
+
+function searchChromeDownload(downloadId) {
+  return new Promise((resolve) => {
+    chrome.downloads.search({ id: downloadId }, (items) => resolve(items?.[0] || null));
+  });
+}
+
+function waitForChromeDownload(downloadId, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      resolve(result);
+    };
+
+    const finishFromItem = (item) => {
+      if (!item) {
+        finish({ ok: false, downloadId, error: "Download not found" });
+        return;
+      }
+      if (item.state === "complete") {
+        finish({
+          ok: true,
+          downloadId,
+          filename: item.filename,
+          url: item.url,
+          totalBytes: item.totalBytes,
+          fileSize: item.fileSize,
+        });
+      } else if (item.state === "interrupted") {
+        finish({ ok: false, downloadId, error: item.error || "Download interrupted" });
+      }
+    };
+
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId) return;
+      if (delta.state?.current === "complete" || delta.state?.current === "interrupted") {
+        searchChromeDownload(downloadId).then(finishFromItem);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      finish({ ok: false, downloadId, error: "Download timed out" });
+    }, timeoutMs);
+
+    chrome.downloads.onChanged.addListener(onChanged);
+    searchChromeDownload(downloadId).then((item) => {
+      if (item?.state === "complete" || item?.state === "interrupted") finishFromItem(item);
+    });
+  });
 }

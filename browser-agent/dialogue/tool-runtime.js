@@ -6,8 +6,11 @@ const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 export const MCP_TOOL_HINT =
   "You have MCP tools available in this chat. " +
   "When you need current information, document search, or browser actions, call the appropriate tool. " +
+  "For page interaction, prefer browser_snapshot to see element refs, then browser_click with target set to a ref (e.g. e5). " +
+  "After clicks or navigation, call browser_snapshot again for an updated page view. " +
+  "To save a file (e.g. PDF) to Downloads instead of opening it in the browser, use download_file with the file URL. " +
   "For models without native tool support (ONNX and most WebLLM chat models), use: call:<tool_name>{arg:value,...} — or call:<tool_name>{}" +
-  "e.g. call:search_documents{query:chronic prescription refill} or call:web_search{query:today's date}. " +
+  "e.g. call:browser_snapshot{} or call:browser_click{target:e5} or call:search_documents{query:chronic prescription refill}. " +
   "For search_documents and web_search, copy the user's exact question into query (do not invent or translate it).";
 
 /**

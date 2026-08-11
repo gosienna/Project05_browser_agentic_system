@@ -1,8 +1,11 @@
 // LLM provider ids, defaults, and thinking-toggle availability for Settings UI.
 
+import { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE_URL, geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
 import { DEFAULT_NVIDIA_NIM_MODEL } from "./nvidia-nim-models.js";
+import { DEFAULT_OPENAI_MODEL, resolveOpenAiModel } from "./openai-models.js";
 
 export const NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1";
+export { GEMINI_API_BASE_URL };
 export const REMOTE_LLM_FETCH_TIMEOUT_MS = 180_000;
 
 const REMOTE_LLM_PROVIDERS = new Set([
@@ -11,6 +14,7 @@ const REMOTE_LLM_PROVIDERS = new Set([
   "anthropic",
   "openai-compatible",
   "nvidia-nim",
+  "gemini",
 ]);
 
 export function isRemoteLlmProvider(provider) {
@@ -41,6 +45,8 @@ export function resolveLlmBaseUrl(settings) {
   switch (provider) {
     case "nvidia-nim":
       return NVIDIA_NIM_BASE_URL;
+    case "gemini":
+      return GEMINI_API_BASE_URL;
     case "openai":
       return trimmed || "https://api.openai.com/v1";
     case "anthropic":
@@ -58,11 +64,13 @@ export function resolveChatModel(settings) {
   if (provider === "onnx") return settings?.onnxModel;
   if (provider === "webllm") return settings?.webllmModel;
   if (provider === "nvidia-nim") return settings?.model || DEFAULT_NVIDIA_NIM_MODEL;
+  if (provider === "gemini") return resolveGeminiModel(settings?.model || DEFAULT_GEMINI_MODEL).model;
+  if (provider === "openai") return resolveOpenAiModel(settings?.model || DEFAULT_OPENAI_MODEL).model;
   return settings?.model;
 }
 
 export function providerRequiresApiKey(provider) {
-  return provider === "openai" || provider === "anthropic" || provider === "nvidia-nim";
+  return provider === "openai" || provider === "anthropic" || provider === "nvidia-nim" || provider === "gemini";
 }
 
 export function nvidiaModelSupportsThinking(model) {
@@ -106,6 +114,12 @@ export function getProviderThinkingMeta(provider) {
         hint:
           "Mapped to chat_template_kwargs for GLM, Qwen3, and DeepSeek models on NVIDIA NIM. Other NIM models ignore this.",
       };
+    case "gemini":
+      return {
+        available: true,
+        hint:
+          "Mapped to generationConfig.thinkingConfig for Gemini 2.5+ models (includeThoughts and thinkingBudget). Other Gemini models ignore this.",
+      };
     case "openai":
       return {
         available: false,
@@ -137,6 +151,9 @@ export function getThinkingHintForSettings(settings) {
   const provider = settings?.provider || "onnx";
   const meta = getProviderThinkingMeta(provider);
   if (provider === "nvidia-nim" && settings?.model && !nvidiaModelSupportsThinking(settings.model)) {
+    return `${meta.hint} The selected model may not support thinking control.`;
+  }
+  if (provider === "gemini" && settings?.model && !geminiModelSupportsThinking(settings.model)) {
     return `${meta.hint} The selected model may not support thinking control.`;
   }
   return meta.hint;

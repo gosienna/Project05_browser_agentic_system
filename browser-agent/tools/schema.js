@@ -227,3 +227,14 @@ export function toGemmaFunctionDeclarations(tools) {
     })),
   };
 }
+
+/** OpenAI tools → Gemini generateContent `tools` array. */
+export function toGeminiTools(tools) {
+  const declarations = (tools || []).map((t) => ({
+    name: t.function.name,
+    description: t.function.description || "",
+    parameters: t.function.parameters || { type: "object", properties: {} },
+  }));
+  if (!declarations.length) return undefined;
+  return [{ functionDeclarations: declarations }];
+}
