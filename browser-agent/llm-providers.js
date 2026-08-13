@@ -5,6 +5,7 @@ import { DEFAULT_NVIDIA_NIM_MODEL } from "./nvidia-nim-models.js";
 import { DEFAULT_OPENAI_MODEL, resolveOpenAiModel } from "./openai-models.js";
 
 export const NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1";
+export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 export { GEMINI_API_BASE_URL };
 export const REMOTE_LLM_FETCH_TIMEOUT_MS = 180_000;
 
@@ -39,6 +40,53 @@ export function isNvidiaNimProvider(provider, baseUrl) {
   return isNvidiaNimBaseUrl(baseUrl);
 }
 
+function isGeminiApiBaseUrl(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "generativelanguage.googleapis.com" || host.endsWith(".googleapis.com");
+  } catch {
+    return /generativelanguage\.googleapis\.com/i.test(baseUrl || "");
+  }
+}
+
+function isOpenAiApiBaseUrl(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "api.openai.com" || host.endsWith(".openai.com");
+  } catch {
+    return /api\.openai\.com/i.test(baseUrl || "");
+  }
+}
+
+function isAnthropicApiBaseUrl(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "api.anthropic.com" || host.endsWith(".anthropic.com");
+  } catch {
+    return /api\.anthropic\.com/i.test(baseUrl || "");
+  }
+}
+
+/** baseUrl values from other LLM providers — not valid Ollama server URLs. */
+export function isKnownNonOllamaBaseUrl(baseUrl) {
+  if (!baseUrl) return false;
+  return (
+    isNvidiaNimBaseUrl(baseUrl) ||
+    isGeminiApiBaseUrl(baseUrl) ||
+    isOpenAiApiBaseUrl(baseUrl) ||
+    isAnthropicApiBaseUrl(baseUrl)
+  );
+}
+
+/** Ollama server URL for settings; ignores stale baseUrl left by another provider. */
+export function resolveOllamaBaseUrl(settings) {
+  const trimmed = (settings?.baseUrl || "").replace(/\/$/, "");
+  if (!trimmed || isKnownNonOllamaBaseUrl(trimmed)) {
+    return DEFAULT_OLLAMA_BASE_URL;
+  }
+  return trimmed;
+}
+
 export function resolveLlmBaseUrl(settings) {
   const provider = settings?.provider || "onnx";
   const trimmed = (settings?.baseUrl || "").replace(/\/$/, "");
@@ -52,7 +100,7 @@ export function resolveLlmBaseUrl(settings) {
     case "anthropic":
       return trimmed || "https://api.anthropic.com";
     case "ollama":
-      return trimmed || "http://127.0.0.1:11434";
+      return resolveOllamaBaseUrl(settings);
     default:
       return trimmed;
   }
@@ -71,6 +119,67 @@ export function resolveChatModel(settings) {
 
 export function providerRequiresApiKey(provider) {
   return provider === "openai" || provider === "anthropic" || provider === "nvidia-nim" || provider === "gemini";
+}
+
+const API_KEY_PROVIDERS = new Set(["openai", "anthropic", "nvidia-nim", "gemini", "openai-compatible"]);
+
+export function providerStoresApiKey(provider) {
+  return API_KEY_PROVIDERS.has(provider);
+}
+
+function inferApiKeyProvider(key, currentProvider) {
+  if (API_KEY_PROVIDERS.has(currentProvider)) return currentProvider;
+  const k = (key || "").trim();
+  if (k.startsWith("nvapi-")) return "nvidia-nim";
+  if (k.startsWith("AIza")) return "gemini";
+  if (k.startsWith("sk-ant-")) return "anthropic";
+  if (k.startsWith("sk-")) return "openai";
+  return null;
+}
+
+/** API key for a provider. Defaults to the active chat provider. */
+export function resolveApiKey(settings, provider) {
+  const p = provider || settings?.provider || "";
+  const fromMap = (settings?.apiKeys?.[p] || "").trim();
+  if (fromMap) return fromMap;
+  const legacy = (settings?.apiKey || "").trim();
+  if (!legacy) return "";
+  if (p && p === (settings?.provider || "")) return legacy;
+  return inferApiKeyProvider(legacy, null) === p ? legacy : "";
+}
+
+export function apiKeyPlaceholder(provider) {
+  switch (provider) {
+    case "nvidia-nim":
+      return "nvapi-…";
+    case "gemini":
+      return "AIza…";
+    case "openai":
+      return "sk-…";
+    case "anthropic":
+      return "sk-ant-…";
+    case "openai-compatible":
+      return "optional";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Move the legacy single `settings.apiKey` into `settings.apiKeys[provider]`.
+ * @returns {object|null} patch to merge, or null if nothing to migrate
+ */
+export function migrateApiKeySettings(settings) {
+  const legacy = (settings?.apiKey || "").trim();
+  if (!legacy) return null;
+  const target = inferApiKeyProvider(legacy, settings?.provider);
+  if (!target) return null;
+  const existing = (settings?.apiKeys?.[target] || "").trim();
+  if (existing) return { apiKey: "" };
+  return {
+    apiKeys: { ...(settings?.apiKeys || {}), [target]: legacy },
+    apiKey: "",
+  };
 }
 
 export function nvidiaModelSupportsThinking(model) {

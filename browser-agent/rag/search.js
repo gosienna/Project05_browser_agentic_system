@@ -1,8 +1,9 @@
 // Semantic search over ingested RAG chunks.
 
-import { embedFingerprint, embedModelsMatch } from "./config.js";
+import { embedFingerprint } from "./config.js";
 import { embedQuery, normalizeEmbeddingVector } from "./embed.js";
 import * as store from "./rag-store.js";
+import { findEmbedVariant, listEmbedVariants } from "./vectors.js";
 
 /** Cosine similarity; vectors are L2-normalized at embed time for ONNX (pooling + normalize). */
 function cosineSimilarity(a, b) {
@@ -25,38 +26,36 @@ function cosineSimilarity(a, b) {
 
 export function isChunkCompatible(chunk, settings) {
   const fp = embedFingerprint(settings);
-  const vecLen = normalizeEmbeddingVector(chunk.embedding)?.length;
-  return (
-    chunk.embedProvider === fp.embedProvider &&
-    embedModelsMatch(chunk.embedModel, fp.embedModel) &&
-    (chunk.dims == null || chunk.dims === vecLen)
-  );
+  const variant = findEmbedVariant(chunk, fp);
+  if (!variant) return false;
+  const vecLen = normalizeEmbeddingVector(variant.vector)?.length;
+  return Boolean(vecLen) && (variant.dims == null || variant.dims === vecLen);
 }
 
 export function isDocumentCompatible(doc, settings) {
   const fp = embedFingerprint(settings);
-  return doc.embedProvider === fp.embedProvider && embedModelsMatch(doc.embedModel, fp.embedModel);
+  return Boolean(findEmbedVariant(doc, fp));
 }
 
 function explainEmptySearch(chunks, fp, qVector) {
   if (!chunks.length) return "No text chunks found for the selected document(s).";
-  const withVectors = chunks.filter((c) => normalizeEmbeddingVector(c.embedding)?.length);
+  const variants = chunks.flatMap((c) => listEmbedVariants(c));
+  const withVectors = variants.filter((v) => normalizeEmbeddingVector(v.vector)?.length);
   if (!withVectors.length) {
     return "Chunks have no embedding vectors — delete the PDF and attach it again (previous ingest likely used a broken embed step).";
   }
-  const storedModels = [...new Set(chunks.map((c) => `${c.embedProvider}:${c.embedModel}`))];
+  const storedModels = [...new Set(variants.map((v) => `${v.embedProvider}:${v.embedModel}`))];
   const current = `${fp.embedProvider}:${fp.embedModel}`;
-  if (
-    !chunks.some(
-      (c) => c.embedProvider === fp.embedProvider && embedModelsMatch(c.embedModel, fp.embedModel)
-    )
-  ) {
-    return `Embedding model mismatch: document uses ${storedModels.join(", ")} but search uses ${current}. Match Settings → RAG or re-ingest the PDF.`;
+  const matching = chunks.map((c) => findEmbedVariant(c, fp)).filter(Boolean);
+  if (!matching.length) {
+    return `Embedding model mismatch: document has ${storedModels.join(", ")} but search uses ${current}. Use Re-embed in the Documents panel to add vectors for the current model (existing variants are kept).`;
   }
   const qLen = qVector.length;
-  const chunkLens = [...new Set(withVectors.map((c) => normalizeEmbeddingVector(c.embedding).length))];
+  const chunkLens = [
+    ...new Set(matching.map((v) => normalizeEmbeddingVector(v.vector)?.length).filter(Boolean)),
+  ];
   if (!chunkLens.includes(qLen)) {
-    return `Embedding size mismatch (query ${qLen} vs chunk ${chunkLens.join("/")}). Re-ingest the PDF with the current embed model.`;
+    return `Embedding size mismatch (query ${qLen} vs stored ${chunkLens.join("/")}). Re-embed the PDF with the current embed model.`;
   }
   return "No matching chunks after filtering — try re-ingesting the PDF.";
 }
@@ -72,7 +71,7 @@ export async function searchDocuments(query, settings, opts = {}) {
   const qVector = normalizeEmbeddingVector(qVec);
   if (!qVector?.length) {
     throw new Error(
-      "Query embedding was empty — check Settings → RAG embedding model, reload the extension, and re-ingest PDFs."
+      "Query embedding was empty — check Settings → LLM embedding model, reload the extension, and re-embed or re-ingest PDFs."
     );
   }
   const fp = embedFingerprint(settings);
@@ -89,19 +88,19 @@ export async function searchDocuments(query, settings, opts = {}) {
     chunks = await store.getAllChunks();
   }
 
-  const compatible = chunks.filter(
-    (c) =>
-      c.embedProvider === fp.embedProvider &&
-      embedModelsMatch(c.embedModel, fp.embedModel) &&
-      normalizeEmbeddingVector(c.embedding)?.length === qVector.length
-  );
+  const compatible = [];
+  for (const c of chunks) {
+    const variant = findEmbedVariant(c, fp);
+    const vec = normalizeEmbeddingVector(variant?.vector);
+    if (vec?.length === qVector.length) compatible.push({ chunk: c, vector: vec });
+  }
 
   if (!compatible.length && chunks.length) {
     throw new Error(explainEmptySearch(chunks, fp, qVector));
   }
 
   const scored = compatible
-    .map((c) => ({ chunk: c, score: cosineSimilarity(qVector, c.embedding) }))
+    .map(({ chunk, vector }) => ({ chunk, score: cosineSimilarity(qVector, vector) }))
     .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))
     .slice(0, topK);
 

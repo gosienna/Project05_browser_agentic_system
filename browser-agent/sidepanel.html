@@ -225,6 +225,11 @@
               <div class="progress-bar"><div id="onnx-progress-fill"></div></div>
               <div id="onnx-progress-label"></div>
             </div>
+            <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+            <label for="rag-onnx-embed-model">ONNX embed model</label>
+            <select id="rag-onnx-embed-model"></select>
+            <input id="rag-onnx-embed-model-custom" class="hidden" placeholder="Custom HF model id (feature-extraction)" />
+
             <button id="onnx-unload-btn" type="button">Unload all models</button>
             <button id="onnx-clear-cache-btn" type="button">Clear model cache</button>
             <div id="onnx-cache-hint" class="device-line"></div>
@@ -241,6 +246,10 @@
               <div class="progress-bar"><div id="webllm-progress-fill"></div></div>
               <div id="webllm-progress-label"></div>
             </div>
+            <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+            <label for="rag-webllm-embed-model">WebLLM embed model</label>
+            <select id="rag-webllm-embed-model"></select>
+
             <button id="webllm-unload-btn" type="button">Unload model</button>
             <button id="webllm-clear-cache-btn" type="button">Clear model cache</button>
             <div id="webllm-cache-hint" class="device-line"></div>
@@ -263,7 +272,10 @@
               <option value="cap:Vision">Vision</option>
             </select>
 
-            <h3 class="onnx-section-title">Models</h3>
+            <div class="gemini-catalog-toolbar">
+              <h3 class="onnx-section-title">Models</h3>
+              <button id="ollama-refresh-pulled-btn" type="button" class="secondary-btn">Refresh pulled models</button>
+            </div>
             <div id="ollama-catalog-error" class="device-line hidden"></div>
             <ul id="ollama-registry" class="onnx-registry ollama-registry-scroll"></ul>
             <button id="ollama-load-more-btn" type="button" class="secondary-btn hidden">Load more</button>
@@ -278,6 +290,12 @@
               <input id="ollama-custom-pull" placeholder="e.g. llama3.2:3b" autocomplete="off" />
               <button id="ollama-custom-pull-btn" type="button">Pull</button>
             </div>
+            <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+            <label for="rag-ollama-embed-model">Ollama embed model</label>
+            <select id="rag-ollama-embed-model"></select>
+            <input id="rag-ollama-embed-model-custom" class="hidden" placeholder="Custom Ollama model tag" />
+            <button id="rag-ollama-embed-refresh-btn" type="button" class="secondary-btn">Refresh pulled embed models</button>
+
             <div id="ollama-cache-hint" class="device-line"></div>
           </div>
 
@@ -289,7 +307,7 @@
               <input id="base-url" placeholder="e.g. http://localhost:11434 or https://api.openai.com/v1" />
             </div>
             <label for="api-key">API key</label>
-            <input id="api-key" type="password" placeholder="(not needed for Ollama)" />
+            <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" />
             <label for="nvidia-model-select" id="nvidia-model-label" class="hidden">Model</label>
             <select id="nvidia-model-select" class="hidden" aria-label="NVIDIA NIM model"></select>
             <label for="gemini-model-select" id="gemini-model-label" class="hidden">Model</label>
@@ -313,7 +331,43 @@
             <label for="model-name" id="remote-model-label">Model</label>
             <input id="model-name" placeholder="e.g. llama3.2, gpt-4o-mini, claude-sonnet-5, z-ai/glm-5.2" />
             <p id="remote-context-note" class="hint"></p>
+
+            <div id="rag-remote-embed-openai" class="hidden">
+              <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+              <label for="rag-openai-embed-model">OpenAI embed model</label>
+              <select id="rag-openai-embed-model"></select>
+            </div>
+            <div id="rag-remote-embed-gemini" class="hidden">
+              <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+              <label for="rag-gemini-embed-model">Gemini embed model</label>
+              <select id="rag-gemini-embed-model"></select>
+            </div>
+            <div id="rag-remote-embed-nvidia" class="hidden">
+              <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+              <label for="rag-nvidia-embed-model">NVIDIA NIM embed model</label>
+              <select id="rag-nvidia-embed-model"></select>
+            </div>
+            <div id="rag-remote-embed-compatible" class="hidden">
+              <h3 class="onnx-section-title">Text embeddings (RAG)</h3>
+              <label for="rag-openai-compatible-embed-model">Embed model</label>
+              <select id="rag-openai-compatible-embed-model"></select>
+              <input id="rag-openai-compatible-embed-model-custom" class="hidden" placeholder="Custom embed model id" />
+            </div>
+            <p id="rag-remote-embed-anthropic-hint" class="hint hidden">Anthropic has no embedding API — RAG uses ONNX embeddings when provider is Auto. Override below to use another backend.</p>
           </div>
+
+          <label for="rag-embed-provider">Embedding provider (RAG)</label>
+          <select id="rag-embed-provider">
+            <option value="auto">Auto (match chat provider)</option>
+            <option value="onnx">ONNX (Transformers.js)</option>
+            <option value="webllm">WebLLM</option>
+            <option value="ollama">Ollama</option>
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="nvidia-nim">NVIDIA NIM</option>
+            <option value="openai-compatible">OpenAI-compatible / custom</option>
+          </select>
+          <p class="hint">Each document remembers which model embedded it. Search only matches the current embedding provider/model. Use Re-embed in the Documents panel after changing settings. Anthropic chat falls back to ONNX when Auto.</p>
 
           <label for="max-steps-input">Max steps per run</label>
           <input id="max-steps-input" type="number" min="1" max="100" step="1" placeholder="14" />
@@ -349,26 +403,7 @@
               <input type="checkbox" id="dialogue-rag-tools-setting" checked />
               Enable document search tools in Dialogue
             </label>
-            <label for="rag-embed-provider">Embedding provider</label>
-            <select id="rag-embed-provider">
-              <option value="auto">Auto (match chat provider)</option>
-              <option value="onnx">ONNX (Transformers.js)</option>
-              <option value="webllm">WebLLM</option>
-              <option value="ollama">Ollama</option>
-            </select>
-            <label for="rag-onnx-embed-model">ONNX embed model</label>
-            <select id="rag-onnx-embed-model"></select>
-            <input id="rag-onnx-embed-model-custom" class="hidden" placeholder="Custom HF model id (feature-extraction)" />
-
-            <label for="rag-webllm-embed-model">WebLLM embed model</label>
-            <select id="rag-webllm-embed-model"></select>
-
-            <label for="rag-ollama-embed-model">Ollama embed model</label>
-            <select id="rag-ollama-embed-model"></select>
-            <input id="rag-ollama-embed-model-custom" class="hidden" placeholder="Custom Ollama model tag" />
-            <button id="rag-ollama-embed-refresh-btn" type="button">Refresh installed models</button>
-
-            <p class="hint">Each document/chunk remembers which model embedded it, so switching models here doesn't break older documents — search only matches chunks embedded with the currently selected model. Re-ingest a PDF to make it searchable under a new model.</p>
+            <p class="hint">Embedding provider and model are configured in Settings → LLM. Use Re-embed in the Documents panel when the embed backend changes.</p>
 
             <label for="rag-chunk-size">Default chunk size (chars)</label>
             <input id="rag-chunk-size" type="number" min="200" max="2000" step="50" />

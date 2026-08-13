@@ -24,12 +24,18 @@ import {
 } from "./agent-config.js";
 import { chatCompletions, renderChatPromptPreview } from "./llm.js";
 import {
+  apiKeyPlaceholder,
   getThinkingHintForSettings,
   isRemoteLlmProvider,
+  isKnownNonOllamaBaseUrl,
+  DEFAULT_OLLAMA_BASE_URL,
   NVIDIA_NIM_BASE_URL,
+  providerStoresApiKey,
   providerSupportsThinkingToggle,
+  resolveApiKey,
   resolveChatModel,
   resolveLlmBaseUrl,
+  resolveOllamaBaseUrl,
 } from "./llm-providers.js";
 import {
   DEFAULT_GEMINI_MODEL,
@@ -65,6 +71,15 @@ import {
   pullOllamaModel,
 } from "./ollama-models.js";
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
+import {
+  DEFAULT_GEMINI_EMBED_MODEL,
+  DEFAULT_NVIDIA_EMBED_MODEL,
+  DEFAULT_OPENAI_COMPATIBLE_EMBED_MODEL,
+  DEFAULT_OPENAI_EMBED_MODEL,
+  listGeminiEmbedModels,
+  listNvidiaEmbedModels,
+  listOpenAiEmbedModels,
+} from "./embed-models.js";
 import {
   DEFAULT_ONNX_EMBED_MODEL,
   DEFAULT_WEBLLM_EMBED_MODEL,
@@ -106,6 +121,13 @@ async function init() {
   const geminiPatch = migrateGeminiModelSettings(settings);
   if (geminiPatch) {
     settings = await saveSettings(geminiPatch);
+  }
+  if (
+    settings.provider === "ollama" &&
+    settings.baseUrl &&
+    isKnownNonOllamaBaseUrl(settings.baseUrl)
+  ) {
+    settings = await saveSettings({ baseUrl: DEFAULT_OLLAMA_BASE_URL });
   }
   wireTabs();
   wireOnboarding();
@@ -296,7 +318,7 @@ function wireOnboarding() {
     startWebllmDownload("Llama-3.2-3B-Instruct-q4f16_1-MLC");
   });
   $("#ob-ollama").addEventListener("click", async () => {
-    await saveSettings({ provider: "ollama", baseUrl: "http://127.0.0.1:11434", model: "llama3.2" });
+    await saveSettings({ provider: "ollama", baseUrl: DEFAULT_OLLAMA_BASE_URL, model: "llama3.2" });
     $("#onboarding").classList.add("hidden");
     openSettingsModal();
     await refreshOllamaSettings();
@@ -338,6 +360,14 @@ function wireSettingsForm() {
     const prev = settings.provider || "onnx";
     const next = e.target.value;
     const patch = { provider: next };
+    if (providerStoresApiKey(prev)) {
+      patch.apiKeys = { [prev]: ($("#api-key")?.value || "").trim() };
+    }
+    if (next === "ollama") {
+      if (!settings.baseUrl || isKnownNonOllamaBaseUrl(settings.baseUrl)) {
+        patch.baseUrl = DEFAULT_OLLAMA_BASE_URL;
+      }
+    }
     if (next === "nvidia-nim") {
       patch.baseUrl = NVIDIA_NIM_BASE_URL;
       if (!settings.model) patch.model = DEFAULT_NVIDIA_NIM_MODEL;
@@ -360,7 +390,11 @@ function wireSettingsForm() {
     applySettingsToForm();
   });
   $("#base-url").addEventListener("change", (e) => saveSettings({ baseUrl: e.target.value.trim() }));
-  $("#api-key").addEventListener("change", (e) => saveSettings({ apiKey: e.target.value.trim() }));
+  $("#api-key").addEventListener("change", (e) => {
+    const provider = settings.provider || $("#provider-select")?.value;
+    if (!providerStoresApiKey(provider)) return;
+    saveSettings({ apiKeys: { [provider]: e.target.value.trim() } });
+  });
   $("#model-name").addEventListener("change", (e) => {
     saveSettings({ model: e.target.value });
     applyThinkingToggleUi();
@@ -425,7 +459,15 @@ function wireSettingsForm() {
   wireEmbedModelSelect($("#rag-ollama-embed-model"), $("#rag-ollama-embed-model-custom"), (modelId) =>
     saveSettings({ ragOllamaEmbedModel: modelId })
   );
-  $("#rag-ollama-embed-refresh-btn")?.addEventListener("click", () => refreshRagEmbedModelOptions());
+  $("#rag-openai-embed-model")?.addEventListener("change", (e) => saveSettings({ ragOpenaiEmbedModel: e.target.value }));
+  $("#rag-gemini-embed-model")?.addEventListener("change", (e) => saveSettings({ ragGeminiEmbedModel: e.target.value }));
+  $("#rag-nvidia-embed-model")?.addEventListener("change", (e) => saveSettings({ ragNvidiaEmbedModel: e.target.value }));
+  wireEmbedModelSelect(
+    $("#rag-openai-compatible-embed-model"),
+    $("#rag-openai-compatible-embed-model-custom"),
+    (modelId) => saveSettings({ ragOpenaiCompatibleEmbedModel: modelId })
+  );
+  $("#rag-ollama-embed-refresh-btn")?.addEventListener("click", () => refreshOllamaPulledModels({ embedOnly: true }));
   $("#rag-chunk-size").addEventListener("change", (e) => saveSettings({ ragChunkSize: Number(e.target.value) || 800 }));
   $("#rag-chunk-overlap").addEventListener("change", (e) => saveSettings({ ragChunkOverlap: Number(e.target.value) || 120 }));
   $("#onnx-unload-btn").addEventListener("click", async () => {
@@ -463,6 +505,7 @@ function wireSettingsForm() {
     ollamaCatalogFilter = e.target.value;
     reloadOllamaCatalog();
   });
+  $("#ollama-refresh-pulled-btn")?.addEventListener("click", () => refreshOllamaPulledModels());
   $("#ollama-load-more-btn").addEventListener("click", () => loadMoreOllamaCatalog());
   $("#ollama-custom-pull-btn").addEventListener("click", () => {
     const name = $("#ollama-custom-pull")?.value?.trim();
@@ -626,7 +669,7 @@ function renderOpenAiModelCatalog() {
 async function refreshGeminiModelsFromApi() {
   const errEl = $("#gemini-catalog-error");
   const btn = $("#gemini-refresh-models-btn");
-  const apiKey = (settings.apiKey || $("#api-key")?.value || "").trim();
+  const apiKey = (resolveApiKey(settings, "gemini") || $("#api-key")?.value || "").trim();
   if (!apiKey) {
     if (errEl) {
       errEl.textContent = "Add your Gemini API key above, then refresh.";
@@ -698,7 +741,7 @@ function applyThinkingToggleUi() {
 function applySettingsToForm() {
   $("#provider-select").value = settings.provider || "onnx";
   $("#base-url").value = resolveLlmBaseUrl(settings) || "";
-  $("#api-key").value = settings.apiKey || "";
+  $("#api-key").value = resolveApiKey(settings) || "";
   $("#model-name").value = settings.model || "";
   renderNvidiaModelSelect();
   renderGeminiModelSelect();
@@ -731,12 +774,18 @@ function applySettingsToForm() {
   const isNvidiaNim = provider === "nvidia-nim";
   const isGemini = provider === "gemini";
   const isOpenAi = provider === "openai";
+  const isAnthropic = provider === "anthropic";
+  const isOpenAiCompatible = provider === "openai-compatible";
   const isLocalEngine = isOnnx || isWebllm;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
   $("#ollama-settings").classList.toggle("hidden", !isOllama);
-  $("#rag-settings")?.classList.toggle("hidden", !(isOnnx || isWebllm || isOllama));
   $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
+  $("#rag-remote-embed-openai")?.classList.toggle("hidden", !isOpenAi);
+  $("#rag-remote-embed-gemini")?.classList.toggle("hidden", !isGemini);
+  $("#rag-remote-embed-nvidia")?.classList.toggle("hidden", !isNvidiaNim);
+  $("#rag-remote-embed-compatible")?.classList.toggle("hidden", !isOpenAiCompatible);
+  $("#rag-remote-embed-anthropic-hint")?.classList.toggle("hidden", !isAnthropic);
   $("#nvidia-base-url-line")?.classList.toggle("hidden", !isNvidiaNim);
   $("#gemini-base-url-line")?.classList.toggle("hidden", !isGemini);
   $("#remote-base-url-wrap")?.classList.toggle("hidden", isNvidiaNim || isGemini);
@@ -752,19 +801,13 @@ function applySettingsToForm() {
   $("#model-name")?.classList.toggle("hidden", isNvidiaNim || isGemini || isOpenAi);
   const apiKeyInput = $("#api-key");
   if (apiKeyInput) {
-    apiKeyInput.placeholder = isNvidiaNim
-      ? "nvapi-…"
-      : isGemini
-        ? "AIza…"
-        : isOpenAi
-          ? "sk-…"
-          : "(not needed for Ollama)";
+    apiKeyInput.placeholder = apiKeyPlaceholder(provider);
   }
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
   if (isOllama) {
     const baseInput = $("#ollama-base-url");
-    if (baseInput) baseInput.value = settings.baseUrl || "http://127.0.0.1:11434";
+    if (baseInput) baseInput.value = resolveOllamaBaseUrl(settings);
     refreshOllamaSettings();
   }
   const noteEl = $("#remote-context-note");
@@ -783,11 +826,12 @@ function applySettingsToForm() {
   if (isOpenAi) renderOpenAiModelCatalog();
   applyThinkingToggleUi();
   renderModelBadge();
+  refreshRagEmbedModelOptions();
   dialoguePanel?.onSettingsChanged();
 }
 
 function ollamaBaseUrl() {
-  return (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  return resolveOllamaBaseUrl(settings);
 }
 
 function ollamaCatalogQueryOpts() {
@@ -833,10 +877,81 @@ async function loadMoreOllamaCatalog(replace = false) {
   }
 }
 
-async function refreshOllamaSettings() {
-  const base = ollamaBaseUrl();
+function updateOllamaServerStatus(installed, reachable, error, base) {
   const statusEl = $("#ollama-server-status");
   const hintEl = $("#ollama-cache-hint");
+  if (statusEl) {
+    if (!reachable) {
+      statusEl.textContent = `Server: not reachable — is Ollama running at ${base}?`;
+    } else if (error) {
+      statusEl.textContent = `Server: reachable but ${error}`;
+    } else {
+      const n = installed.size;
+      statusEl.textContent = n
+        ? `Server: connected ✓ — ${n} model(s) pulled`
+        : "Server: connected ✓ — no models pulled yet";
+    }
+  }
+  if (hintEl) {
+    hintEl.textContent = installed.size
+      ? `Active model: ${settings.model || "(none selected)"}`
+      : "Pull a model below to use Ollama with this extension.";
+  }
+}
+
+/** Query Ollama GET /api/tags for locally pulled models (e.g. after `ollama pull` in a terminal). */
+async function refreshOllamaPulledModels({ embedOnly = false } = {}) {
+  const base = ollamaBaseUrl();
+  const errEl = $("#ollama-catalog-error");
+  const btn = embedOnly ? $("#rag-ollama-embed-refresh-btn") : $("#ollama-refresh-pulled-btn");
+  const btnLabel = embedOnly ? "Refresh pulled embed models" : "Refresh pulled models";
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Refreshing…";
+  }
+  if (!embedOnly && errEl) errEl.classList.add("hidden");
+
+  try {
+    const { installed, reachable, error } = await listOllamaInstalled(base);
+    ollamaInstalled = installed;
+    updateOllamaServerStatus(installed, reachable, error, base);
+
+    if (!reachable) {
+      throw new Error(`Ollama not reachable at ${base}`);
+    }
+    if (error) {
+      throw new Error(error);
+    }
+
+    if (!embedOnly) {
+      renderOllamaRegistry();
+      if (errEl) {
+        const n = installed.size;
+        errEl.textContent = n
+          ? `Found ${n} pulled model(s) on ${base}.`
+          : `Connected to ${base} — no models pulled yet. Use Pull below or run ollama pull in a terminal.`;
+        errEl.classList.remove("hidden");
+      }
+    }
+
+    await refreshRagEmbedModelOptions();
+    dialoguePanel?.onSettingsChanged();
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = err.message || String(err);
+      errEl.classList.remove("hidden");
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = btnLabel;
+    }
+  }
+}
+
+async function refreshOllamaSettings() {
+  const base = ollamaBaseUrl();
   const searchInput = $("#ollama-catalog-search");
   const filterSelect = $("#ollama-catalog-filter");
 
@@ -845,22 +960,7 @@ async function refreshOllamaSettings() {
 
   const { installed, reachable, error } = await listOllamaInstalled(base);
   ollamaInstalled = installed;
-
-  if (statusEl) {
-    if (!reachable) {
-      statusEl.textContent = `Server: not reachable — is Ollama running at ${base}?`;
-    } else if (error) {
-      statusEl.textContent = `Server: reachable but ${error}`;
-    } else {
-      const n = installed.size;
-      statusEl.textContent = n ? `Server: connected ✓ — ${n} model(s) pulled` : "Server: connected ✓ — no models pulled yet";
-    }
-  }
-  if (hintEl) {
-    hintEl.textContent = installed.size
-      ? `Active model: ${settings.model || "(none selected)"}`
-      : "Pull a model below to use Ollama with this extension.";
-  }
+  updateOllamaServerStatus(installed, reachable, error, base);
 
   if (ollamaRegistry.length === 0 && ollamaCatalogSkip === 0) {
     await reloadOllamaCatalog();
@@ -1185,7 +1285,7 @@ function fallbackEmbedModelList(modelId) {
   return modelId ? [{ id: modelId, label: modelId }] : [];
 }
 
-/** Populate the ONNX/WebLLM/Ollama embed-model <select>s in Settings → RAG. Best-effort per provider — one failing (e.g. Ollama not running) shouldn't block the others. */
+/** Populate embed-model <select>s in Settings → LLM. Best-effort per provider — one failing shouldn't block the others. */
 async function refreshRagEmbedModelOptions() {
   await Promise.all([
     (async () => {
@@ -1218,6 +1318,22 @@ async function refreshRagEmbedModelOptions() {
         console.warn("[rag] failed to load Ollama embed model list:", err);
         renderEmbedModelSelect($("#rag-ollama-embed-model"), fallbackEmbedModelList(current), current);
       }
+    })(),
+    (async () => {
+      const current = settings.ragOpenaiEmbedModel || DEFAULT_OPENAI_EMBED_MODEL;
+      renderEmbedModelSelect($("#rag-openai-embed-model"), listOpenAiEmbedModels(), current, { allowCustom: false });
+    })(),
+    (async () => {
+      const current = settings.ragGeminiEmbedModel || DEFAULT_GEMINI_EMBED_MODEL;
+      renderEmbedModelSelect($("#rag-gemini-embed-model"), listGeminiEmbedModels(), current, { allowCustom: false });
+    })(),
+    (async () => {
+      const current = settings.ragNvidiaEmbedModel || DEFAULT_NVIDIA_EMBED_MODEL;
+      renderEmbedModelSelect($("#rag-nvidia-embed-model"), listNvidiaEmbedModels(), current, { allowCustom: false });
+    })(),
+    (async () => {
+      const current = settings.ragOpenaiCompatibleEmbedModel || DEFAULT_OPENAI_COMPATIBLE_EMBED_MODEL;
+      renderEmbedModelSelect($("#rag-openai-compatible-embed-model"), listOpenAiEmbedModels(), current);
     })(),
   ]);
 }

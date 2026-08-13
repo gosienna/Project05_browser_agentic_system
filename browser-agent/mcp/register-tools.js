@@ -6,6 +6,7 @@ import * as browserTools from "../tools/browser.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
 import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
+import { listEmbedVariants } from "../rag/vectors.js";
 
 const TAB_ID_PROP = {
   type: "integer",
@@ -421,6 +422,11 @@ export function registerBuiltinMcpTools() {
           chunk_overlap: d.chunkOverlap,
           embed_provider: d.embedProvider,
           embed_model: d.embedModel,
+          embed_variants: listEmbedVariants(d).map((v) => ({
+            embed_provider: v.embedProvider,
+            embed_model: v.embedModel,
+            dims: v.dims,
+          })),
           created_at: d.createdAt,
         })),
       };

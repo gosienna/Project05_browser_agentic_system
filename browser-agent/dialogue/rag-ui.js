@@ -1,9 +1,10 @@
 // Dialogue RAG UI: PDF attach, documents panel, ingest progress.
 
-import { DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE } from "../rag/config.js";
+import { DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, embedFingerprint } from "../rag/config.js";
 import { isDocumentCompatible } from "../rag/search.js";
 import { putStagingPdf } from "../rag/rag-store.js";
 import { parsePdfBuffer } from "../rag/pdf-parse.js";
+import { formatEmbedVariantsSummary } from "../rag/vectors.js";
 
 let $;
 let sendMessage;
@@ -27,6 +28,35 @@ function formatEngineProgress(msg) {
     msg.total && msg.loaded != null ? `${Math.min(100, Math.round((msg.loaded / msg.total) * 100))}%` : "";
   const file = msg.file ? String(msg.file).split("/").pop() : "";
   return [msg.status || "downloading", file, pct].filter(Boolean).join(" ");
+}
+
+function formatEmbedMismatch(doc, settings) {
+  const current = embedFingerprint(settings);
+  const stored = formatEmbedVariantsSummary(doc) || `${doc.embedProvider}: ${doc.embedModel}`;
+  const active = `${current.embedProvider}: ${current.embedModel}`;
+  return `No vectors for ${active} (have ${stored}). Re-embed to add them.`;
+}
+
+function createEmbedProgressListener() {
+  return (msg) => {
+    if (msg?.target === "rag-progress" && msg.message) {
+      setRagStatus(msg.message);
+      return;
+    }
+    if (msg?.target === "onnx-progress" || msg?.target === "webllm-progress") {
+      const label = formatEngineProgress(msg);
+      if (label) setRagStatus(`Downloading embedding model… ${label}`);
+      return;
+    }
+    if (msg?.target === "ollama-progress") {
+      const pct =
+        msg.total && msg.completed != null
+          ? `${Math.min(100, Math.round((msg.completed / msg.total) * 100))}%`
+          : "";
+      const label = [msg.status || "pulling", pct].filter(Boolean).join(" ");
+      if (label) setRagStatus(`Pulling embedding model… ${label}`);
+    }
+  };
 }
 
 export function initRagUi(deps) {
@@ -98,6 +128,7 @@ export async function refreshDocumentsPanel() {
     row.className = "dialogue-doc-row";
     const incompatible = !isDocumentCompatible(doc, settings);
     const sizeMb = (doc.sizeBytes / (1024 * 1024)).toFixed(2);
+    const variantsLabel = formatEmbedVariantsSummary(doc);
     row.innerHTML = `
       <label class="dialogue-doc-pin">
         <input type="checkbox" data-doc-id="${escapeHtml(doc.id)}" ${active.has(doc.id) ? "checked" : ""} />
@@ -105,11 +136,12 @@ export async function refreshDocumentsPanel() {
       </label>
       <div class="dialogue-doc-meta">
         <strong>${escapeHtml(doc.name)}</strong>
-        <small>${doc.pageCount} pp · ${doc.chunkCount} chunks · ${sizeMb} MB · ${doc.chunkSize}/${doc.chunkOverlap}</small>
-        ${incompatible ? '<span class="dialogue-doc-warn">Embed model changed — re-ingest</span>' : ""}
+        <small>${doc.pageCount} pp · ${doc.chunkCount} chunks · ${sizeMb} MB · ${doc.chunkSize}/${doc.chunkOverlap}${variantsLabel ? ` · ${escapeHtml(variantsLabel)}` : ""}</small>
+        ${incompatible ? `<span class="dialogue-doc-warn">${escapeHtml(formatEmbedMismatch(doc, settings))}</span>` : ""}
       </div>
       <div class="dialogue-doc-actions">
         <button type="button" class="secondary-btn doc-view" data-doc-id="${escapeHtml(doc.id)}">View</button>
+        ${incompatible ? `<button type="button" class="secondary-btn doc-reembed" data-doc-id="${escapeHtml(doc.id)}">Re-embed</button>` : ""}
         <button type="button" class="secondary-btn doc-delete" data-doc-id="${escapeHtml(doc.id)}">Delete</button>
       </div>
     `;
@@ -132,6 +164,36 @@ export async function refreshDocumentsPanel() {
       await refreshDocumentsPanel();
     });
   });
+  list.querySelectorAll(".doc-reembed").forEach((btn) => {
+    btn.addEventListener("click", () => reembedDocument(btn.dataset.docId, btn));
+  });
+}
+
+async function reembedDocument(docId, triggerBtn) {
+  if (!docId) return;
+  revealDocumentsUi();
+  if (triggerBtn) triggerBtn.disabled = true;
+  setRagStatus("Re-embedding document…");
+
+  const progressListener = createEmbedProgressListener();
+  chrome.runtime.onMessage.addListener(progressListener);
+
+  try {
+    const res = await sendMessage({ type: "rag.reembed", docId });
+    if (res?.error) throw new Error(typeof res.error === "string" ? res.error : res.error?.message || "Re-embed failed");
+    const r = res.result || res;
+    setRagStatus(
+      `Re-embedded ${r.name || "document"}: ${r.chunkCount} chunks (${r.embedProvider}: ${r.embedModel})`
+    );
+    await refreshDocumentsPanel();
+  } catch (err) {
+    const message = err?.message || String(err);
+    setRagStatus(`Re-embed failed: ${message}`, { error: true });
+    console.error("[rag] re-embed failed", err);
+  } finally {
+    chrome.runtime.onMessage.removeListener(progressListener);
+    if (triggerBtn) triggerBtn.disabled = false;
+  }
 }
 
 function getChunkParams() {
@@ -202,25 +264,7 @@ async function ingestPdfFile(file) {
 
   setRagStatus(`Ingesting ${file.name} (${chunkSize}/${chunkOverlap})…`);
 
-  const progressListener = (msg) => {
-    if (msg?.target === "rag-progress" && msg.message) {
-      setRagStatus(msg.message);
-      return;
-    }
-    if (msg?.target === "onnx-progress" || msg?.target === "webllm-progress") {
-      const label = formatEngineProgress(msg);
-      if (label) setRagStatus(`Downloading embedding model… ${label}`);
-      return;
-    }
-    if (msg?.target === "ollama-progress") {
-      const pct =
-        msg.total && msg.completed != null
-          ? `${Math.min(100, Math.round((msg.completed / msg.total) * 100))}%`
-          : "";
-      const label = [msg.status || "pulling", pct].filter(Boolean).join(" ");
-      if (label) setRagStatus(`Pulling embedding model… ${label}`);
-    }
-  };
+  const progressListener = createEmbedProgressListener();
   chrome.runtime.onMessage.addListener(progressListener);
 
   try {

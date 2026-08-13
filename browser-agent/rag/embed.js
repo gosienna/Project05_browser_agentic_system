@@ -1,11 +1,12 @@
-// RAG embedding router (ONNX / WebLLM / Ollama).
+// RAG embedding router (ONNX / WebLLM / Ollama / remote APIs).
 
-import { ensureOffscreenDocument, ollamaEmbeddings } from "../llm.js";
+import { ensureOffscreenDocument, geminiEmbeddings, ollamaEmbeddings, openaiEmbeddings } from "../llm.js";
 import {
   isOllamaModelInstalled,
   listOllamaInstalled,
   pullOllamaModel,
 } from "../ollama-models.js";
+import { resolveOllamaBaseUrl } from "../llm-providers.js";
 import {
   EMBED_BATCH_SIZE,
   prefixForEmbed,
@@ -48,7 +49,7 @@ function requireEmbeddingVector(vec, provider, model, hint = "") {
   const normalized = normalizeEmbeddingVector(vec);
   if (!normalized?.length) {
     throw new Error(
-      `Embedding model returned an empty vector (${provider}: ${model}).${hint ? ` ${hint}` : ""} Check Settings → RAG embedding model and reload the extension.`
+      `Embedding model returned an empty vector (${provider}: ${model}).${hint ? ` ${hint}` : ""} Check Settings → LLM embedding model and reload the extension.`
     );
   }
   return normalized;
@@ -98,7 +99,7 @@ function broadcastOllamaPullProgress(event) {
 }
 
 async function ensureOllamaEmbedModel(settings, modelId) {
-  const baseUrl = (settings?.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const baseUrl = resolveOllamaBaseUrl(settings);
   const { installed, reachable, error } = await listOllamaInstalled(baseUrl);
   if (!reachable) {
     throw new Error(`Ollama not reachable at ${baseUrl}: ${error || "connection failed"}`);
@@ -132,6 +133,20 @@ async function ollamaEmbed(texts, settings, modelId) {
   );
 }
 
+async function remoteOpenAiEmbed(texts, settings, modelId, provider) {
+  const vectors = await openaiEmbeddings(texts, settings, modelId, provider);
+  return vectors.map((v, i) =>
+    requireEmbeddingVector(v, provider, modelId, `Missing embedding at index ${i}.`)
+  );
+}
+
+async function geminiEmbed(texts, settings, modelId) {
+  const vectors = await geminiEmbeddings(texts, settings, modelId);
+  return vectors.map((v, i) =>
+    requireEmbeddingVector(v, "gemini", modelId, `Missing embedding at index ${i}.`)
+  );
+}
+
 /**
  * @param {string[]} texts
  * @param {object} settings
@@ -146,6 +161,11 @@ export async function embedTexts(texts, settings, opts = {}) {
   let vectors;
   if (provider === "webllm") vectors = await webllmEmbed(prefixed, model);
   else if (provider === "ollama") vectors = await ollamaEmbed(prefixed, settings, model);
+  else if (provider === "openai") vectors = await remoteOpenAiEmbed(prefixed, settings, model, "openai");
+  else if (provider === "nvidia-nim") vectors = await remoteOpenAiEmbed(prefixed, settings, model, "nvidia-nim");
+  else if (provider === "openai-compatible") {
+    vectors = await remoteOpenAiEmbed(prefixed, settings, model, "openai-compatible");
+  } else if (provider === "gemini") vectors = await geminiEmbed(prefixed, settings, model);
   else vectors = await onnxEmbed(prefixed, model);
 
   const dims = vectors[0]?.length ?? 0;

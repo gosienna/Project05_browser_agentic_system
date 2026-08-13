@@ -1,7 +1,7 @@
 import { runAgent } from "./agent.js";
 import { getMaxTokens } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
-import { resolveChatModel } from "./llm-providers.js";
+import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
 import { migrateGeminiModelSettings } from "./gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools/browser.js";
@@ -28,18 +28,28 @@ chrome.action.onClicked.addListener((tab) => {
   if (tab?.windowId != null) chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
 });
 
+function mergeSettings(current, patch) {
+  const next = { ...current, ...patch };
+  if (patch.apiKeys) {
+    next.apiKeys = { ...(current.apiKeys || {}), ...patch.apiKeys };
+  }
+  return next;
+}
+
 async function getSettings() {
   const { settings } = await chrome.storage.local.get("settings");
   const current = settings || {};
-  const geminiPatch = migrateGeminiModelSettings(current);
-  if (!geminiPatch) return current;
-  const next = { ...current, ...geminiPatch };
+  const geminiPatch = migrateGeminiModelSettings(current) || {};
+  const apiKeyPatch = migrateApiKeySettings({ ...current, ...geminiPatch }) || {};
+  const patch = { ...geminiPatch, ...apiKeyPatch };
+  if (!Object.keys(patch).length) return current;
+  const next = mergeSettings(current, patch);
   await chrome.storage.local.set({ settings: next });
   return next;
 }
 
 async function setSettings(patch) {
-  const next = { ...(await getSettings()), ...patch };
+  const next = mergeSettings(await getSettings(), patch);
   await chrome.storage.local.set({ settings: next });
   return next;
 }

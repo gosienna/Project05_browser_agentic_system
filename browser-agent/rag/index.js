@@ -5,3 +5,4 @@ export * from "./ingest.js";
 export * from "./search.js";
 export * from "./rag-store.js";
 export * from "./pdf-parse.js";
+export * from "./vectors.js";

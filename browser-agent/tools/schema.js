@@ -217,13 +217,72 @@ export function toAnthropicTools(tools) {
   }));
 }
 
+/** JSON Schema keys accepted by Gemini function declaration parameters. */
+const GEMINI_SCHEMA_KEYS = new Set([
+  "type",
+  "nullable",
+  "required",
+  "format",
+  "description",
+  "properties",
+  "items",
+  "enum",
+  "anyOf",
+  "$ref",
+  "$defs",
+]);
+
+/**
+ * Strip JSON Schema fields Gemini rejects (e.g. additionalProperties, $schema).
+ * @see https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+ */
+export function sanitizeGeminiSchema(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+
+  const out = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (!GEMINI_SCHEMA_KEYS.has(key)) continue;
+
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      const props = {};
+      for (const [pname, pdef] of Object.entries(value)) {
+        props[pname] = sanitizeGeminiSchema(pdef);
+      }
+      out.properties = props;
+      continue;
+    }
+
+    if (key === "items") {
+      out.items = sanitizeGeminiSchema(value);
+      continue;
+    }
+
+    if (key === "anyOf" && Array.isArray(value)) {
+      out.anyOf = value.map(sanitizeGeminiSchema);
+      continue;
+    }
+
+    if (key === "$defs" && value && typeof value === "object" && !Array.isArray(value)) {
+      const defs = {};
+      for (const [dname, ddef] of Object.entries(value)) {
+        defs[dname] = sanitizeGeminiSchema(ddef);
+      }
+      out.$defs = defs;
+      continue;
+    }
+
+    out[key] = value;
+  }
+  return out;
+}
+
 /** OpenAI tools → Gemini-style { function_declarations }. */
 export function toGemmaFunctionDeclarations(tools) {
   return {
     function_declarations: (tools || []).map((t) => ({
       name: t.function.name,
       description: t.function.description || "",
-      parameters: t.function.parameters || { type: "object", properties: {} },
+      parameters: sanitizeGeminiSchema(t.function.parameters || { type: "object", properties: {} }),
     })),
   };
 }
@@ -233,7 +292,7 @@ export function toGeminiTools(tools) {
   const declarations = (tools || []).map((t) => ({
     name: t.function.name,
     description: t.function.description || "",
-    parameters: t.function.parameters || { type: "object", properties: {} },
+    parameters: sanitizeGeminiSchema(t.function.parameters || { type: "object", properties: {} }),
   }));
   if (!declarations.length) return undefined;
   return [{ functionDeclarations: declarations }];

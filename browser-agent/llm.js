@@ -7,8 +7,10 @@ import {
   isNvidiaNimProvider,
   providerRequiresApiKey,
   REMOTE_LLM_FETCH_TIMEOUT_MS,
+  resolveApiKey,
   resolveChatModel,
   resolveLlmBaseUrl,
+  resolveOllamaBaseUrl,
 } from "./llm-providers.js";
 import { geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
 import { ollamaFetch } from "./ollama-models.js";
@@ -74,7 +76,7 @@ export async function renderChatPromptPreview(request, settings) {
     case "webllm":
       return { prompt: null };
     case "ollama": {
-      const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+      const baseUrl = resolveOllamaBaseUrl(settings);
       const model = request.model || settings.model || "llama3.2";
       const prompt = await ollamaFetchRenderedPrompt(baseUrl, model, request);
       return { prompt };
@@ -213,6 +215,10 @@ async function webllmChatCompletions(request, settings) {
 function buildOpenAiCompatibleBody(request, settings, baseUrl) {
   const { thinkingEnabled, ...apiRequest } = request;
   const body = { ...apiRequest, model: request.model || resolveChatModel(settings) };
+  if (isNvidiaNimProvider(settings?.provider, baseUrl)) {
+    delete body.tool_choice;
+    delete body.tools;
+  }
   if (!isNvidiaNimProvider(settings?.provider, baseUrl)) return body;
 
   const model = (body.model || "").toLowerCase();
@@ -254,6 +260,27 @@ function openAiCompatibleErrorMessage(body, status, fallback) {
   return fallback;
 }
 
+function remoteProviderLabel(provider) {
+  if (provider === "nvidia-nim") return "NVIDIA NIM";
+  if (provider === "gemini") return "Gemini";
+  if (provider === "openai") return "OpenAI";
+  if (provider === "openai-compatible") return "API";
+  return "API";
+}
+
+/** Actionable message for remote HTTP errors (especially rate limits). */
+function remoteHttpErrorMessage(status, provider, fallbackDetail) {
+  if (status === 429) {
+    const label = remoteProviderLabel(provider);
+    const extra =
+      provider === "nvidia-nim"
+        ? " Free-tier NIM accounts have strict RPM limits; wait several minutes before retrying (repeated calls while blocked extend the lockout). Check quota at build.nvidia.com."
+        : " Wait a minute before retrying.";
+    return `${label} rate limit (HTTP 429).${extra}`;
+  }
+  return fallbackDetail || `HTTP ${status}`;
+}
+
 function openAiFetchErrorMessage(err, baseUrl, settings) {
   const host = (() => {
     try {
@@ -272,10 +299,10 @@ function openAiFetchErrorMessage(err, baseUrl, settings) {
   const msg = err?.message || String(err);
   if (/failed to fetch/i.test(msg)) {
     const provider = settings?.provider || "onnx";
-    if (provider === "nvidia-nim" && !(settings?.apiKey || "").trim()) {
+    if (provider === "nvidia-nim" && !resolveApiKey(settings, "nvidia-nim")) {
       return "Network request failed — add your NVIDIA API key (nvapi-…) in Settings and reload the extension.";
     }
-    if (provider === "gemini" && !(settings?.apiKey || "").trim()) {
+    if (provider === "gemini" && !resolveApiKey(settings, "gemini")) {
       return "Network request failed — add your Gemini API key in Settings and reload the extension.";
     }
     if (!baseUrl) {
@@ -289,7 +316,7 @@ function openAiFetchErrorMessage(err, baseUrl, settings) {
 async function openaiChatCompletions(request, settings) {
   const baseUrl = resolveLlmBaseUrl(settings);
   const provider = settings?.provider || "onnx";
-  const apiKey = (settings?.apiKey || "").trim();
+  const apiKey = resolveApiKey(settings, provider);
   const model = request.model || resolveChatModel(settings);
 
   if (!baseUrl) {
@@ -323,10 +350,10 @@ async function openaiChatCompletions(request, settings) {
     });
     const parsed = await readOpenAiCompatibleResponse(res);
     if (!res.ok) {
-      const detail = parsed.body
+      const rawDetail = parsed.body
         ? openAiCompatibleErrorMessage(parsed.body, res.status, `HTTP ${res.status}`)
         : parsed.error || `HTTP ${res.status}`;
-      return errorResponse(detail, "engine_error");
+      return errorResponse(remoteHttpErrorMessage(res.status, provider, rawDetail), "engine_error");
     }
     if (parsed.error || !parsed.body) {
       return errorResponse(parsed.error || `empty response (HTTP ${res.status})`, "engine_error");
@@ -364,13 +391,40 @@ async function readJsonResponse(res) {
 
 const OLLAMA_CHAT_ROLES = new Set(["system", "user", "assistant", "tool"]);
 
+/** Ollama native /api/chat expects object arguments, not OpenAI stringified JSON. */
+function ollamaToolCallArguments(raw) {
+  if (raw == null) return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function toOllamaToolCalls(tool_calls) {
+  return tool_calls.map((tc) => {
+    const fn = tc?.function || {};
+    const name = fn.name || tc?.name;
+    const args = ollamaToolCallArguments(fn.arguments ?? tc?.arguments);
+    const out = { type: tc?.type || "function" };
+    if (tc?.id) out.id = tc.id;
+    out.function = { name, arguments: args };
+    return out;
+  });
+}
+
 function toOllamaChatMessages(messages) {
   return (messages || [])
     .filter((m) => OLLAMA_CHAT_ROLES.has(m.role))
     .map((m) => {
       const out = { role: m.role };
       if (m.content !== undefined) out.content = m.content;
-      if (m.tool_calls?.length) out.tool_calls = m.tool_calls;
+      if (m.tool_calls?.length) out.tool_calls = toOllamaToolCalls(m.tool_calls);
       if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
       if (m.tool_name) out.tool_name = m.tool_name;
       return out;
@@ -456,15 +510,45 @@ async function ollamaFetchRenderedPrompt(baseUrl, model, request) {
   }
 }
 
+async function ollamaNativeChatCompletions(baseUrl, model, request) {
+  const res = await ollamaFetch(`${baseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildOllamaNativeChatBody(model, request)),
+  });
+  const parsed = await readJsonResponse(res);
+  if (parsed.error) {
+    return errorResponse(ollamaHttpError(baseUrl, res.status, parsed.error), "engine_error");
+  }
+  const body = parsed.body;
+  if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
+  return ollamaChatCompletionFromNative(body, model);
+}
+
 async function ollamaChatCompletions(request, settings) {
-  const baseUrl = (settings.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const baseUrl = resolveOllamaBaseUrl(settings);
   const model = request.model || settings.model || "llama3.2";
+  const hasTools = Array.isArray(request.tools) && request.tools.length > 0;
+
+  // Native /api/chat handles tools without OpenAI tool_choice (v1 shim needs server flags).
+  if (hasTools) {
+    try {
+      return await ollamaNativeChatCompletions(baseUrl, model, request);
+    } catch (err) {
+      return errorResponse(
+        `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
+        "engine_error"
+      );
+    }
+  }
+
   const v1Body = {
     ...request,
     model,
     stream: false,
     think: request.thinkingEnabled !== false,
   };
+  delete v1Body.tool_choice;
 
   // Prefer Ollama's OpenAI-compatible shim; fall back to native /api/chat on any failure.
   try {
@@ -475,35 +559,19 @@ async function ollamaChatCompletions(request, settings) {
     });
     if (res.status !== 404) {
       const parsed = await readJsonResponse(res);
-      if (parsed.error) {
-        console.warn("[ollama] /v1/chat/completions:", parsed.error);
-      } else if (!res.ok) {
-        return errorResponse(
-          ollamaHttpError(baseUrl, res.status, parsed.body?.error?.message),
-          "engine_error"
-        );
-      } else {
+      if (res.ok && parsed.body && !parsed.body.error) {
         return parsed.body;
       }
+      const detail =
+        parsed.body?.error?.message || parsed.error || (res.ok ? null : `HTTP ${res.status}`);
+      console.warn("[ollama] /v1/chat/completions failed, falling back to /api/chat:", detail);
     }
   } catch (err) {
     console.warn("[ollama] /v1/chat/completions fetch failed:", err);
   }
 
-  // Fallback: native /api/chat, translated to chat.completions shape.
   try {
-    const res = await ollamaFetch(`${baseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildOllamaNativeChatBody(model, request)),
-    });
-    const parsed = await readJsonResponse(res);
-    if (parsed.error) {
-      return errorResponse(ollamaHttpError(baseUrl, res.status, parsed.error), "engine_error");
-    }
-    const body = parsed.body;
-    if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
-    return ollamaChatCompletionFromNative(body, model);
+    return await ollamaNativeChatCompletions(baseUrl, model, request);
   } catch (err) {
     return errorResponse(
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
@@ -524,16 +592,36 @@ function appendGeminiContent(contents, role, parts) {
   contents.push({ role, parts });
 }
 
+/** Gemini FunctionResponse.response is a protobuf Struct: a JSON object, never a list. */
+function toGeminiFunctionResponse(value) {
+  if (value == null) return {};
+  if (Array.isArray(value)) return { result: value };
+  if (typeof value === "object") return value;
+  return { result: value };
+}
+
 function parseToolResultObject(content) {
   if (content == null || content === "") return {};
-  if (typeof content === "object") return content;
+  if (typeof content === "object") return toGeminiFunctionResponse(content);
   if (typeof content !== "string") return { result: String(content) };
   try {
-    const parsed = JSON.parse(content);
-    return parsed && typeof parsed === "object" ? parsed : { result: content };
+    return toGeminiFunctionResponse(JSON.parse(content));
   } catch {
     return { result: content };
   }
+}
+
+function cloneGeminiParts(parts) {
+  if (!Array.isArray(parts) || !parts.length) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(parts));
+  } catch {
+    return undefined;
+  }
+}
+
+function geminiPartThoughtSignature(part) {
+  return part?.thoughtSignature ?? part?.thought_signature ?? null;
 }
 
 function buildToolCallNameMap(messages) {
@@ -573,6 +661,11 @@ function toGeminiContents(messages) {
     }
 
     if (m.role === "assistant") {
+      if (Array.isArray(m.gemini_parts) && m.gemini_parts.length) {
+        appendGeminiContent(contents, "model", m.gemini_parts);
+        continue;
+      }
+
       const parts = [];
       if (typeof m.content === "string" && m.content.trim()) parts.push({ text: m.content });
       if (Array.isArray(m.tool_calls)) {
@@ -588,7 +681,10 @@ function toGeminiContents(messages) {
             args,
           };
           if (tc.id) call.id = tc.id;
-          parts.push({ functionCall: call });
+          const part = { functionCall: call };
+          const sig = tc.thought_signature ?? tc.thoughtSignature;
+          if (sig) part.thoughtSignature = sig;
+          parts.push(part);
         }
       }
       appendGeminiContent(contents, "model", parts);
@@ -623,6 +719,8 @@ function geminiAssistantFromParts(parts) {
   const message = { role: "assistant", content: "" };
   const tool_calls = [];
   const reasoningParts = [];
+  const gemini_parts = cloneGeminiParts(parts);
+  if (gemini_parts) message.gemini_parts = gemini_parts;
 
   for (const part of parts || []) {
     if (typeof part.text === "string") {
@@ -631,14 +729,17 @@ function geminiAssistantFromParts(parts) {
     }
     const fnCall = part.functionCall || part.function_call;
     if (fnCall?.name) {
-      tool_calls.push({
+      const toolCall = {
         id: fnCall.id || `call_${crypto.randomUUID()}`,
         type: "function",
         function: {
           name: fnCall.name,
           arguments: JSON.stringify(fnCall.args && typeof fnCall.args === "object" ? fnCall.args : {}),
         },
-      });
+      };
+      const sig = geminiPartThoughtSignature(part);
+      if (sig) toolCall.thought_signature = sig;
+      tool_calls.push(toolCall);
     }
   }
 
@@ -697,7 +798,7 @@ function geminiUnavailableModelMessage(model, bodyMessage) {
 
 async function geminiChatCompletions(request, settings) {
   const baseUrl = resolveLlmBaseUrl(settings).replace(/\/$/, "");
-  const apiKey = (settings?.apiKey || "").trim();
+  const apiKey = resolveApiKey(settings, "gemini");
   const resolved = resolveGeminiModel(request.model || resolveChatModel(settings));
   const model = resolved.model;
 
@@ -808,7 +909,7 @@ async function anthropicChatCompletions(request, settings) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": settings.apiKey || "",
+        "x-api-key": resolveApiKey(settings, "anthropic"),
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
@@ -875,7 +976,7 @@ function errorResponse(message, type) {
 
 /** Ollama /api/embed — used by RAG (batch). Legacy /api/embeddings uses `prompt`, not `input`. */
 export async function ollamaEmbeddings(texts, settings, model) {
-  const baseUrl = (settings?.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, "");
+  const baseUrl = resolveOllamaBaseUrl(settings);
   const modelId = model || settings?.ragOllamaEmbedModel || "nomic-embed-text";
   const input = Array.isArray(texts) ? texts : [texts];
   const res = await ollamaFetch(`${baseUrl}/api/embed`, {
@@ -891,4 +992,104 @@ export async function ollamaEmbeddings(texts, settings, model) {
   if (Array.isArray(body?.embeddings)) return body.embeddings;
   if (body?.embedding) return [body.embedding];
   throw new Error("Ollama embed response missing embedding vectors.");
+}
+
+function resolveEmbedApiProvider(settings, provider) {
+  if (provider === "openai-compatible") return "openai-compatible";
+  if (provider === "nvidia-nim") return "nvidia-nim";
+  return provider;
+}
+
+/** OpenAI-compatible /embeddings — OpenAI, NVIDIA NIM, openai-compatible. */
+export async function openaiEmbeddings(texts, settings, model, providerOverride) {
+  const provider = providerOverride || resolveEmbedApiProvider(settings, settings?.provider || "openai");
+  const baseUrl = resolveLlmBaseUrl({ ...settings, provider }).replace(/\/$/, "");
+  const apiKey = resolveApiKey(settings, provider);
+  const modelId = model || settings?.ragOpenaiEmbedModel || "text-embedding-3-small";
+
+  if (!baseUrl) throw new Error("No Base URL configured — set it in Settings.");
+  if (providerRequiresApiKey(provider) && !apiKey) {
+    const label =
+      provider === "nvidia-nim" ? "NVIDIA API key (nvapi-…)" : provider === "gemini" ? "Gemini API key" : "API key";
+    throw new Error(`${label} required — add it in Settings.`);
+  }
+
+  const input = Array.isArray(texts) ? texts : [texts];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REMOTE_LLM_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model: modelId, input }),
+      signal: controller.signal,
+    });
+    const parsed = await readJsonResponse(res);
+    if (!res.ok) {
+      const rawDetail = parsed.body?.error?.message || parsed.body?.message || parsed.error || `HTTP ${res.status}`;
+      throw new Error(remoteHttpErrorMessage(res.status, provider, rawDetail));
+    }
+    const data = parsed.body?.data;
+    if (!Array.isArray(data) || !data.length) {
+      throw new Error("OpenAI-compatible embed response missing embedding vectors.");
+    }
+    const sorted = [...data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    return sorted.map((row) => row.embedding);
+  } catch (err) {
+    throw new Error(openAiFetchErrorMessage(err, baseUrl, settings));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function geminiEmbedModelPath(modelId) {
+  const id = String(modelId || "").replace(/^models\//, "");
+  return `models/${id}`;
+}
+
+/** Gemini batchEmbedContents — used by RAG. */
+export async function geminiEmbeddings(texts, settings, model) {
+  const baseUrl = resolveLlmBaseUrl({ ...settings, provider: "gemini" }).replace(/\/$/, "");
+  const apiKey = resolveApiKey(settings, "gemini");
+  const modelId = model || settings?.ragGeminiEmbedModel || "text-embedding-004";
+
+  if (!apiKey) throw new Error("Gemini API key required — add it in Settings.");
+
+  const input = Array.isArray(texts) ? texts : [texts];
+  const modelPath = geminiEmbedModelPath(modelId);
+  const requests = input.map((text) => ({
+    model: modelPath,
+    content: { parts: [{ text }] },
+  }));
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REMOTE_LLM_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl}/${modelPath}:batchEmbedContents`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({ requests }),
+      signal: controller.signal,
+    });
+    const parsed = await readJsonResponse(res);
+    if (!res.ok) {
+      const detail = parsed.body?.error?.message || parsed.error || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    const embeddings = parsed.body?.embeddings;
+    if (!Array.isArray(embeddings) || !embeddings.length) {
+      throw new Error("Gemini embed response missing embedding vectors.");
+    }
+    return embeddings.map((row) => row.values || row.embedding);
+  } catch (err) {
+    throw new Error(openAiFetchErrorMessage(err, baseUrl, settings));
+  } finally {
+    clearTimeout(timer);
+  }
 }

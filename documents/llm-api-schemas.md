@@ -64,6 +64,8 @@ Every provider is consumed through `chatCompletions(request, settings)`:
 | `anthropic` | `anthropicChatCompletions` → Anthropic Messages HTTP | `settings.model` |
 | `gemini` | `geminiChatCompletions` → Google generateContent HTTP | `settings.model` |
 
+API keys are stored per provider in `settings.apiKeys` (`openai`, `anthropic`, `nvidia-nim`, `gemini`, `openai-compatible`). `resolveApiKey(settings, provider)` in [`llm-providers.js`](../browser-agent/llm-providers.js) reads the matching slot. A legacy single `settings.apiKey` is migrated into that map on load.
+
 ---
 
 ## 1. ONNX Runtime (local)
@@ -331,13 +333,13 @@ The Settings “Enable model reasoning” toggle is **disabled** for OpenAI. Rea
 | Setting | Value |
 |---------|-------|
 | `settings.provider` | `"openai"` |
-| `settings.apiKey` | OpenAI API key (`sk-…`) |
+| `settings.apiKeys.openai` | OpenAI API key (`sk-…`) |
 | `settings.model` | Model id (default `gpt-5.6-terra`) |
 | `settings.baseUrl` | Optional; defaults to `https://api.openai.com/v1` |
 
 Curated flagship catalog: [`openai-models.js`](../browser-agent/openai-models.js) (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`). Alias `gpt-5.6` resolves to `gpt-5.6-sol` via `resolveOpenAiModel()`.
 
-No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM/Ollama via RAG settings, not OpenAI.
+No local model load/unload. No prompt-preview API. RAG embeddings use `POST /v1/embeddings` when `ragEmbedProvider` is `openai` or `auto` with OpenAI chat (default model: `text-embedding-3-small`).
 
 ### OpenAI-compatible / custom
 
@@ -346,7 +348,7 @@ No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM
 | Aspect | Detail |
 |--------|--------|
 | Base URL | **Required** — user-supplied (e.g. `http://localhost:8080/v1`, Azure OpenAI, LiteLLM proxy) |
-| API key | Optional — sent as `Authorization: Bearer …` when `settings.apiKey` is set |
+| API key | Optional — sent as `Authorization: Bearer …` when `settings.apiKeys["openai-compatible"]` is set |
 | Body | Same OpenAI `chat.completions` shape |
 | Thinking toggle | Disabled — no `thinkingEnabled` mapping for custom endpoints |
 
@@ -402,11 +404,11 @@ Other NIM models ignore thinking control. Curated model list: [`nvidia-nim-model
 | Setting | Value |
 |---------|-------|
 | `settings.provider` | `"nvidia-nim"` |
-| `settings.apiKey` | NVIDIA API key (`nvapi-…`) |
+| `settings.apiKeys["nvidia-nim"]` | NVIDIA API key (`nvapi-…`) |
 | `settings.model` | NIM model id (default `z-ai/glm-5.2`) |
 | `settings.baseUrl` | Overridden to integrate endpoint |
 
-No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM/Ollama via RAG settings, not NIM.
+No local model load/unload. No prompt-preview API. RAG embeddings use OpenAI-compatible `POST /v1/embeddings` when `ragEmbedProvider` is `nvidia-nim` or `auto` with NIM chat.
 
 ---
 
@@ -486,11 +488,11 @@ Default model: `gemini-3.5-flash-lite` (`DEFAULT_GEMINI_MODEL`).
 | Setting | Value |
 |---------|-------|
 | `settings.provider` | `"gemini"` |
-| `settings.apiKey` | Google AI API key (`AIza…` from [Google AI Studio](https://aistudio.google.com/apikey)) |
+| `settings.apiKeys.gemini` | Google AI API key (`AIza…` from [Google AI Studio](https://aistudio.google.com/apikey)) |
 | `settings.model` | Gemini model id (resolved via `resolveGeminiModel()`) |
 | `settings.baseUrl` | Overridden to `GEMINI_API_BASE_URL` |
 
-No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM/Ollama via RAG settings, not Gemini.
+No local model load/unload. No prompt-preview API. RAG embeddings use `batchEmbedContents` when `ragEmbedProvider` is `gemini` or `auto` with Gemini chat (default model: `text-embedding-004`).
 
 ---
 
@@ -506,7 +508,7 @@ No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM
 | **Tools** | Yes (template + generate) | Yes (subset of models) | Yes | Yes | Yes | Yes (`functionDeclarations`) |
 | **Thinking flag** | `enable_thinking` (Qwen3, Gemma 4) | `extra_body.enable_thinking` (Qwen3) | `think` | Not sent (`reasoning_effort` unsupported) | `chat_template_kwargs` | `thinkingConfig` |
 | **Prompt preview** | `chat.renderPrompt` | No | `_debug_render_only` | No | No | No |
-| **Embeddings** | `engine.run` feature-extraction | `embeddings.create` | `POST /api/embed` | Not used | Not used | Not used |
+| **Embeddings** | `engine.run` feature-extraction | `embeddings.create` | `POST /api/embed` | `POST /v1/embeddings` (RAG) | `POST /v1/embeddings` (RAG) | `batchEmbedContents` (RAG) |
 | **Multimodal chat** | Gemma 4, Ministral VLMs | Vision models in MLC list | Model-dependent | Catalog lists image input; text-only wire path today | Nemotron VL (remote) | Catalog lists image/video/audio/PDF; text-only wire path today |
 | **Device** | WebGPU or WASM | WebGPU only | Server GPU/CPU | OpenAI cloud | NVIDIA cloud | Google cloud |
 
@@ -519,12 +521,13 @@ No local model load/unload. No prompt-preview API. Embeddings use ONNX or WebLLM
 | File | Role |
 |------|------|
 | [`llm.js`](../browser-agent/llm.js) | Unified `chatCompletions`, provider adapters |
-| [`llm-providers.js`](../browser-agent/llm-providers.js) | Provider ids, base URLs, thinking hints |
+| [`llm-providers.js`](../browser-agent/llm-providers.js) | Provider ids, base URLs, thinking hints, per-provider API keys |
 | [`engine.js`](../browser-agent/engine.js) | ONNX / Transformers.js engine |
 | [`ort-worker.js`](../browser-agent/ort-worker.js) | ONNX worker message dispatch |
 | [`webllm-engine.js`](../browser-agent/webllm-engine.js) | WebLLM / MLCEngine |
 | [`webllm-worker.js`](../browser-agent/webllm-worker.js) | WebLLM worker message dispatch |
 | [`ollama-models.js`](../browser-agent/ollama-models.js) | Ollama HTTP helpers (pull, tags, embed) |
+| [`embed-models.js`](../browser-agent/embed-models.js) | Curated remote embedding model lists |
 | [`openai-models.js`](../browser-agent/openai-models.js) | Curated OpenAI flagship model list |
 | [`nvidia-nim-models.js`](../browser-agent/nvidia-nim-models.js) | Curated NIM model list |
 | [`gemini-models.js`](../browser-agent/gemini-models.js) | Curated Gemini model list, live `models.list`, deprecation migration |

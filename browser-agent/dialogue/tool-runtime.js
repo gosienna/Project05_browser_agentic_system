@@ -318,12 +318,14 @@ function parseNativeToolCall(tc) {
       args = {};
     }
   }
+  const thought_signature = tc?.thought_signature ?? tc?.thoughtSignature ?? null;
   return {
     id: tc?.id || `call_${Math.random().toString(36).slice(2, 9)}`,
     name,
     args,
     raw: null,
     source: "native",
+    ...(thought_signature ? { thought_signature } : {}),
   };
 }
 
@@ -359,6 +361,7 @@ export function toOpenAiToolCall(call) {
       name: call.name,
       arguments: JSON.stringify(call.args || {}),
     },
+    ...(call.thought_signature ? { thought_signature: call.thought_signature } : {}),
   };
 }
 

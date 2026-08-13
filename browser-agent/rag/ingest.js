@@ -1,9 +1,15 @@
 // PDF ingest: chunk → embed → IndexedDB (parse runs in the side panel, not the service worker).
 
 import { validateChunkParams, chunkPages } from "./chunk.js";
-import { embedFingerprint } from "./config.js";
+import {
+  embedBatchSizeForProvider,
+  embedFingerprint,
+  isRemoteEmbedProvider,
+  REMOTE_EMBED_BATCH_DELAY_MS,
+} from "./config.js";
 import { embedTexts } from "./embed.js";
 import * as store from "./rag-store.js";
+import { upsertDocEmbedVariant, upsertEmbedVariant } from "./vectors.js";
 
 /**
  * @param {{
@@ -47,8 +53,9 @@ export async function ingestPdf(opts) {
 
     const chunkTexts = rawChunks.map((c) => c.text);
     const allEmbeddings = [];
-    const batchSize = 12;
     const fp = embedFingerprint(settings);
+    const batchSize = embedBatchSizeForProvider(fp.embedProvider);
+    const throttleRemote = isRemoteEmbedProvider(fp.embedProvider);
     let dims = 0;
 
     onProgress?.({
@@ -67,37 +74,46 @@ export async function ingestPdf(opts) {
       const result = await embedTexts(batch, settings, { role: "passage" });
       if (!dims) dims = result.dims;
       allEmbeddings.push(...result.embeddings);
+      if (throttleRemote && i + batchSize < chunkTexts.length) {
+        await new Promise((r) => setTimeout(r, REMOTE_EMBED_BATCH_DELAY_MS));
+      }
     }
 
     const now = Date.now();
-    const chunks = rawChunks.map((c, idx) => ({
-      id: crypto.randomUUID(),
-      docId,
-      page: c.loc.page,
-      index: c.index,
-      text: c.text,
-      loc: c.loc,
-      embedding: allEmbeddings[idx],
+    const variant = {
       embedProvider: fp.embedProvider,
       embedModel: fp.embedModel,
       dims,
-      createdAt: now,
-    }));
-
-    const doc = {
-      id: docId,
-      name,
-      mimeType: "application/pdf",
-      pageCount,
-      chunkCount: chunks.length,
-      sizeBytes,
-      chunkSize: chunkParams.chunkSize,
-      chunkOverlap: chunkParams.chunkOverlap,
-      embedProvider: fp.embedProvider,
-      embedModel: fp.embedModel,
-      dims,
-      createdAt: now,
     };
+    const chunks = rawChunks.map((c, idx) =>
+      upsertEmbedVariant(
+        {
+          id: crypto.randomUUID(),
+          docId,
+          page: c.loc.page,
+          index: c.index,
+          text: c.text,
+          loc: c.loc,
+          createdAt: now,
+        },
+        { ...variant, vector: allEmbeddings[idx] }
+      )
+    );
+
+    const doc = upsertDocEmbedVariant(
+      {
+        id: docId,
+        name,
+        mimeType: "application/pdf",
+        pageCount,
+        chunkCount: chunks.length,
+        sizeBytes,
+        chunkSize: chunkParams.chunkSize,
+        chunkOverlap: chunkParams.chunkOverlap,
+        createdAt: now,
+      },
+      variant
+    );
 
     await store.putDocument(doc);
     await store.putChunks(chunks);

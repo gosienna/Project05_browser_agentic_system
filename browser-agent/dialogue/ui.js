@@ -16,13 +16,10 @@ import {
   openAiToolsToDrafts,
 } from "../tools/schema.js";
 import {
-  formatAssistantToolCallDisplay,
-  MCP_TOOL_HINT,
-  normalizeAssistantToolCalls,
-  prepareSearchToolArgs,
-  resolveDialogueToolCalls,
-  toOpenAiToolCall,
-} from "./tool-runtime.js";
+  isNvidiaNimProvider,
+  resolveLlmBaseUrl,
+  resolveOllamaBaseUrl,
+} from "../llm-providers.js";
 import {
   extractDialogueRawPayload,
   mountCollapsibleJsonTree,
@@ -54,6 +51,14 @@ import {
   wireRagUi,
 } from "./rag-ui.js";
 import { initDialoguePanelResize } from "./panel-resize.js";
+import {
+  formatAssistantToolCallDisplay,
+  MCP_TOOL_HINT,
+  normalizeAssistantToolCalls,
+  prepareSearchToolArgs,
+  resolveDialogueToolCalls,
+  toOpenAiToolCall,
+} from "./tool-runtime.js";
 
 let pdfViewer = null;
 
@@ -990,8 +995,11 @@ function activeDialogueChatModelId() {
 /** Native OpenAI-style tools — only for providers/models that support them. */
 function dialogueCompletionTools(tools) {
   if (!tools?.length) return [];
-  const provider = getSettings().provider || "onnx";
+  const settings = getSettings();
+  const provider = settings.provider || "onnx";
   if (provider === "onnx") return [];
+  // NIM's OpenAI shim rejects tools with tool_choice:auto on many models (llama.cpp backend).
+  if (provider === "nvidia-nim" || isNvidiaNimProvider(provider, resolveLlmBaseUrl(settings))) return [];
   if (provider === "webllm") {
     return isWebllmToolModel(activeDialogueChatModelId()) ? tools : [];
   }
@@ -1273,7 +1281,7 @@ async function renderDialogueToolsForm() {
 }
 
 async function listOllamaModels() {
-  return listOllamaModelsWithMeta(getSettings().baseUrl);
+  return listOllamaModelsWithMeta(resolveOllamaBaseUrl(getSettings()));
 }
 
 /** Bubble text for a non-tool assistant message; warns on token-limit truncation. */
@@ -1942,11 +1950,15 @@ async function sendDialogue() {
       const textCalls = calls.filter((c) => c.source === "text");
 
       if (nativeCalls.length) {
-        messages.push({
+        const assistantMsg = {
           role: "assistant",
           content: msg.content || null,
           tool_calls: nativeCalls.map((c) => toOpenAiToolCall(c)),
-        });
+        };
+        if (Array.isArray(msg.gemini_parts) && msg.gemini_parts.length) {
+          assistantMsg.gemini_parts = msg.gemini_parts;
+        }
+        messages.push(assistantMsg);
       } else {
         messages.push({ role: "assistant", content: msg.content || callDisplay });
       }

@@ -1,6 +1,7 @@
 // Background message handlers for RAG (PDF ingest, search, blobs).
 
 import { ingestPdf } from "./ingest.js";
+import { reembedDocument } from "./reembed.js";
 import { searchDocuments } from "./search.js";
 import * as store from "./rag-store.js";
 import { toArrayBuffer } from "./binary.js";
@@ -55,6 +56,10 @@ export async function handleRagMessage(msg, getSettings) {
         chunkOverlap: msg.chunkOverlap,
         onProgress: (p) => broadcastProgress({ docId: p.docId, ...p }),
       });
+    }
+    case "rag.reembed": {
+      if (!msg.docId) throw new Error("docId required for re-embed.");
+      return reembedDocument(msg.docId, settings, (p) => broadcastProgress({ docId: msg.docId, ...p }));
     }
     case "rag.listDocuments":
       return store.listDocuments();

@@ -50,10 +50,12 @@ flowchart TB
 | [`pdf-parse.js`](../browser-agent/rag/pdf-parse.js) | pdf.js text extraction per page (`{ page, text }[]`). Runs in the **side panel** (not the service worker — `import()` is blocked there) |
 | [`chunk.js`](../browser-agent/rag/chunk.js) | Sliding-window chunking with `loc: { page, charStart, charEnd }` for PDF highlights |
 | [`config.js`](../browser-agent/rag/config.js) | Embed provider/model resolution, chunk defaults, BGE/E5 `query:` / `passage:` prefixes |
+| [`vectors.js`](../browser-agent/rag/vectors.js) | Per-(provider, model) embedding variants on chunks/docs; legacy single-vector fallback |
 | [`embed.js`](../browser-agent/rag/embed.js) | Embedding router: ONNX `feature-extraction`, WebLLM `embeddings.create`, Ollama `/api/embeddings` |
 | [`ingest.js`](../browser-agent/rag/ingest.js) | Ingest pipeline: validate → chunk → batch embed → write doc + chunks + blob |
-| [`search.js`](../browser-agent/rag/search.js) | Embed query vector, dot-product score, top-k over compatible chunks |
-| [`handlers.js`](../browser-agent/rag/handlers.js) | Background `rag.*` message dispatch (`ingest`, `search`, `listDocuments`, blobs, active doc pins) |
+| [`reembed.js`](../browser-agent/rag/reembed.js) | Add/refresh one embed variant on existing chunks (other variants kept) |
+| [`search.js`](../browser-agent/rag/search.js) | Embed query vector, cosine score, top-k over chunks that have the current variant |
+| [`handlers.js`](../browser-agent/rag/handlers.js) | Background `rag.*` message dispatch (`ingest`, `reembed`, `search`, `listDocuments`, blobs, active doc pins) |
 | [`binary.js`](../browser-agent/rag/binary.js) | `ArrayBuffer` normalization across message/IDB boundaries |
 | [`pdf-viewer.js`](../browser-agent/rag/pdf-viewer.js) | Right-side panel viewer: canvas render + text-layer highlight from `loc` |
 | [`index.js`](../browser-agent/rag/index.js) | Re-exports |
@@ -202,29 +204,39 @@ Citation payload (`pdf-citations.js`): `{ chunk_id, doc_id, doc_name, page, text
 
 | Store | Contents |
 |-------|----------|
-| `documents` | Metadata: name, pages, chunk params, embed provider/model fingerprint, `dims` |
+| `documents` | Metadata: name, pages, chunk params, latest embed fingerprint, `embedVariants[]` (`embedProvider`, `embedModel`, `dims`) |
 | `pdfBlobs` | Original PDF `ArrayBuffer` (max 100 MB per file) |
-| `chunks` | `text`, `loc`, `embedding[]`, `embedProvider`, `embedModel`, `page`, `index` |
+| `chunks` | `text`, `loc`, `page`, `index`, `embeddings[]` (`embedProvider`, `embedModel`, `dims`, `vector`) |
 | `staging` | Temporary PDF bytes between panel parse and background ingest |
 
 **Pinned doc IDs** live in `chrome.storage.local` key `ragActiveDocIds` (not IndexedDB).
 
-**Compatibility:** search only uses chunks whose `embedProvider` + `embedModel` match current Settings. Mismatch shows **Embed model changed — re-ingest** in Documents.
+**Compatibility:** search uses the chunk vector whose `embedProvider` + `embedModel` match current Settings → LLM. Other stored variants are ignored for that query, not deleted. If the current fingerprint is missing, Documents shows a warning and a **Re-embed** button (adds that variant; existing vectors stay). Legacy chunks with a single top-level `embedding` are treated as one variant.
+
+Older documents that only store `embedProvider` / `embedModel` / `embedding` still work; the next ingest or re-embed writes the `embeddings[]` / `embedVariants[]` shape.
 
 ---
 
 ## Embedding backends
 
-**Settings → RAG** (`ragEmbedProvider`, model pickers, chunk defaults):
+**Settings → LLM** (`ragEmbedProvider`, per-backend model pickers in each provider block):
 
 | `ragEmbedProvider` | Backend |
 |--------------------|---------|
-| `auto` (default) | Matches chat provider (`onnx` / `webllm` / `ollama`); API chat providers → ONNX |
+| `auto` (default) | Matches chat provider; Anthropic chat → ONNX (no Anthropic embedding API) |
 | `onnx` | Transformers.js `feature-extraction` (e.g. `Xenova/all-MiniLM-L6-v2`) |
 | `webllm` | WebLLM `embeddings.create` (e.g. `snowflake-arctic-embed-s-q0f32-MLC-b4`) |
-| `ollama` | `POST /api/embeddings` (e.g. `nomic-embed-text`) |
+| `ollama` | `POST /api/embed` (e.g. `nomic-embed-text`) |
+| `openai` | `POST /v1/embeddings` (e.g. `text-embedding-3-small`) |
+| `gemini` | `batchEmbedContents` (e.g. `text-embedding-004`) |
+| `nvidia-nim` | OpenAI-compatible `/embeddings` on NIM endpoint |
+| `openai-compatible` | OpenAI-compatible `/embeddings` on user base URL |
+
+Remote OpenAI / Gemini / NIM / openai-compatible embeddings use that backend's key in `settings.apiKeys`, not the chat provider's key.
 
 Passages are embedded with `role: "passage"` at ingest; queries use `role: "query"`. BGE/E5 models get automatic prefixes via `prefixForEmbed()`.
+
+**Re-embed vs re-ingest:** use **Re-embed** in Documents when the current embedding provider/model is not yet stored for that PDF. Re-embed adds (or refreshes) that variant and **keeps** vectors for other backends/models — switching back reuses stored vectors with no extra compute. Full re-ingest (delete + re-attach PDF) is still required when changing chunk size or overlap.
 
 ---
 
@@ -244,6 +256,7 @@ Per-upload overrides in **Dialogue → Documents** (optional **Save as default**
 | Message | Returns |
 |---------|---------|
 | `rag.ingest` | `{ docId, pageCount, chunkCount, … }` |
+| `rag.reembed` | `{ docId, chunkCount, embedProvider, embedModel }` — add/refresh one embed variant on existing chunks |
 | `rag.search` | `[{ chunk_id, doc_id, doc_name, page, text, score, loc }, …]` |
 | `rag.listDocuments` | Document metadata array |
 | `rag.getPdfBlob` / `rag.getChunk` | Blob or chunk + doc (viewer) |
@@ -261,7 +274,7 @@ Enabled when **Document search (RAG)** is checked (`dialogueRagTools` setting).
 | Tool | Purpose |
 |------|---------|
 | `search_documents` | Semantic search; optional `doc_ids`, `top_k` |
-| `list_documents` | List ingested PDF metadata |
+| `list_documents` | List ingested PDF metadata (`embed_provider` / `embed_model` = latest; `embed_variants` = all stored fingerprints) |
 | `delete_document` | Remove doc, blob, and all chunks |
 
 See also [`mcp.md`](mcp.md).
@@ -272,7 +285,7 @@ See also [`mcp.md`](mcp.md).
 
 | Panel | Toggle | Notes |
 |-------|--------|-------|
-| **Documents** | Toolbar → Documents | Pin, chunk params, View/Delete |
+| **Documents** | Toolbar → Documents | Pin, chunk params, View/Re-embed/Delete |
 | **PDF viewer** | Toolbar → PDF viewer | Resizable right panel; opens on citation or View |
 
 ---
@@ -280,10 +293,10 @@ See also [`mcp.md`](mcp.md).
 ## Limitations (v1)
 
 - Text-layer PDFs only (no OCR for scanned PDFs)
-- Re-ingest required after changing chunk size or embed model
+- Re-embed after changing embed provider/model to add that variant (other variants stay); re-ingest required after changing chunk size
 - Auto-retrieve requires non-empty user text as the search query
 - WebLLM Qwen3 and ONNX use text-based tool calls, not native `tools` API
-- OpenAI/Anthropic chat with `ragEmbedProvider: auto` uses ONNX for embeddings
+- Anthropic chat with `ragEmbedProvider: auto` uses ONNX for embeddings (no Anthropic embedding API)
 
 ---
 
@@ -292,6 +305,6 @@ See also [`mcp.md`](mcp.md).
 | Symptom | Check |
 |---------|-------|
 | No excerpts in **Show raw** | Document pinned? User message non-empty? Expand `messages[0]` system `content` |
-| Search returns nothing | Embed model mismatch → re-ingest; query too vague |
+| Search returns nothing | Missing embed variant for current Settings → LLM → Re-embed (adds vectors; does not drop others); query too vague |
 | Ingest fails | Run `npm run build:vendor` in `browser-agent/`; reload extension |
 | Tool not called | **Document search (RAG)** enabled; model supports tools or emits `call:search_documents{…}` |
