@@ -9,27 +9,11 @@ const COMPONENTS = "components";
 const CONVERSATIONS = "conversations";
 const DIALOGUE_SESSIONS = "dialogueSessions";
 
-export const COMPONENT_KINDS = ["agent", "tools", "html", "css", "ui"];
+export const COMPONENT_KINDS = ["html", "css", "script"];
 
-/**
- * The set of component kinds a level-1 system's editor may touch. Reads the
- * current `editableKinds` array, falling back to the legacy singular
- * `editableKind` field (pre-multi-select records), then to `["ui"]`.
- */
-export function getEditableKinds(system) {
-  if (Array.isArray(system?.editableKinds) && system.editableKinds.length) {
-    const kinds = system.editableKinds.filter((k) => COMPONENT_KINDS.includes(k));
-    if (kinds.length) return kinds;
-  }
-  if (system?.editableKind && COMPONENT_KINDS.includes(system.editableKind)) return [system.editableKind];
-  return ["ui"];
-}
-
-function sanitizeEditableKinds(editableKinds) {
-  const kinds = (Array.isArray(editableKinds) ? editableKinds : [editableKinds]).filter((k) =>
-    COMPONENT_KINDS.includes(k)
-  );
-  return kinds.length ? kinds : ["ui"];
+/** Map the pre-rename `ui` kind onto `script`. */
+export function normalizeComponentKind(kind) {
+  return kind === "ui" ? "script" : kind;
 }
 
 export const BUILTIN_BROWSER_AGENT_ID = "browser-agent";
@@ -88,21 +72,61 @@ export async function ensureSeeded() {
   const db = await openDb();
   const existing = await reqToPromise(db.transaction(SYSTEMS, "readonly").objectStore(SYSTEMS).get(BUILTIN_CURVE_PLOTTER_ID));
   if (existing) {
-    if (existing.level === undefined) await migrateBuiltinLevels();
+    await migrateUiKindToScript();
+    await migrateRemoveEditorLevels();
+    await migrateRemoveRetiredComponentKinds();
     return;
   }
   await seedBuiltins();
 }
 
-/** Backfill the immutable editor level on builtins seeded before levels existed. */
-async function migrateBuiltinLevels() {
+/** Rename stored component kind `ui` → `script`. */
+async function migrateUiKindToScript() {
+  const db = await openDb();
+  const tx = db.transaction(COMPONENTS, "readwrite");
+  const compStore = tx.objectStore(COMPONENTS);
+
+  const comps = await reqToPromise(compStore.getAll());
+  for (const c of comps || []) {
+    if (c.kind !== "ui") continue;
+    const existingScript = await reqToPromise(compStore.get([c.systemId, "script"]));
+    if (!existingScript) compStore.put({ ...c, kind: "script" });
+    compStore.delete([c.systemId, "ui"]);
+  }
+  await txDone(tx);
+}
+
+/** Drop retired component kinds (`agent` prompt text, `tools` __agentTools blob). */
+async function migrateRemoveRetiredComponentKinds() {
+  const retired = new Set(["agent", "tools"]);
+  const db = await openDb();
+  const tx = db.transaction(COMPONENTS, "readwrite");
+  const compStore = tx.objectStore(COMPONENTS);
+  const comps = await reqToPromise(compStore.getAll());
+  for (const c of comps || []) {
+    if (retired.has(c.kind)) compStore.delete([c.systemId, c.kind]);
+  }
+  await txDone(tx);
+}
+
+/** Drop retired editor-access fields (`level`, `editableKinds`, custom L1 persona). */
+async function migrateRemoveEditorLevels() {
   const db = await openDb();
   const tx = db.transaction(SYSTEMS, "readwrite");
   const store = tx.objectStore(SYSTEMS);
-  const browser = await reqToPromise(store.get(BUILTIN_BROWSER_AGENT_ID));
-  if (browser && browser.level === undefined) store.put({ ...browser, level: 2 });
-  const curve = await reqToPromise(store.get(BUILTIN_CURVE_PLOTTER_ID));
-  if (curve && curve.level === undefined) store.put({ ...curve, level: 1, editableKinds: ["ui"] });
+  const systems = await reqToPromise(store.getAll());
+  for (const system of systems || []) {
+    if (
+      system.level === undefined &&
+      system.editableKinds === undefined &&
+      system.editableKind === undefined &&
+      system.systemPrompt === undefined
+    ) {
+      continue;
+    }
+    const { level: _level, editableKinds: _kinds, editableKind: _kind, systemPrompt: _prompt, ...rest } = system;
+    store.put(rest);
+  }
   await txDone(tx);
 }
 
@@ -115,7 +139,6 @@ async function seedBuiltins() {
       createdAt: now,
       updatedAt: now,
       isBuiltin: true,
-      level: 2,
     },
     {
       id: BUILTIN_CURVE_PLOTTER_ID,
@@ -123,8 +146,6 @@ async function seedBuiltins() {
       createdAt: now,
       updatedAt: now,
       isBuiltin: true,
-      level: 1,
-      editableKinds: ["ui"],
     },
   ];
 
@@ -155,16 +176,11 @@ export async function getSystem(id) {
   return reqToPromise(db.transaction(SYSTEMS, "readonly").objectStore(SYSTEMS).get(id));
 }
 
-export async function createSystem(name, { level, editableKinds } = {}) {
+export async function createSystem(name) {
   await ensureSeeded();
   const now = Date.now();
   const id = `sys_${now}_${Math.random().toString(36).slice(2, 8)}`;
   const system = { id, name: name?.trim() || "Untitled system", createdAt: now, updatedAt: now, isBuiltin: false };
-  // The editor access level is fixed at creation and never changes afterwards.
-  system.level = Number(level) === 1 ? 1 : 2;
-  if (system.level === 1) {
-    system.editableKinds = sanitizeEditableKinds(editableKinds || ["ui"]);
-  }
   const components = defaultComponents(id);
 
   const db = await openDb();
@@ -173,28 +189,6 @@ export async function createSystem(name, { level, editableKinds } = {}) {
   for (const c of components) tx.objectStore(COMPONENTS).put(c);
   await txDone(tx);
   return system;
-}
-
-/**
- * Update a level-1 system's editable component set and/or custom persona
- * prompt. These are mutable at any time, unlike `level` which is fixed at
- * creation. Passing `systemPrompt: ""` reverts to the default persona.
- */
-export async function updateSystemEditorConfig(id, { editableKinds, systemPrompt } = {}) {
-  await ensureSeeded();
-  const system = await getSystem(id);
-  if (!system) throw new Error(`Unknown system "${id}"`);
-  if (system.level !== 1) throw new Error("Editor config only applies to level 1 systems");
-
-  const next = { ...system, updatedAt: Date.now() };
-  if (editableKinds !== undefined) next.editableKinds = sanitizeEditableKinds(editableKinds);
-  if (systemPrompt !== undefined) next.systemPrompt = String(systemPrompt || "").trim();
-
-  const db = await openDb();
-  const tx = db.transaction(SYSTEMS, "readwrite");
-  tx.objectStore(SYSTEMS).put(next);
-  await txDone(tx);
-  return next;
 }
 
 export async function deleteSystem(id) {
@@ -220,11 +214,18 @@ export async function listComponents(systemId) {
   const db = await openDb();
   const idx = db.transaction(COMPONENTS, "readonly").objectStore(COMPONENTS).index("bySystem");
   const comps = await reqToPromise(idx.getAll(systemId));
-  return (comps || []).map((c) => ({ kind: c.kind, updatedAt: c.updatedAt, bytes: (c.content || "").length }));
+  return (comps || [])
+    .map((c) => ({
+      kind: normalizeComponentKind(c.kind),
+      updatedAt: c.updatedAt,
+      bytes: (c.content || "").length,
+    }))
+    .filter((c) => COMPONENT_KINDS.includes(c.kind));
 }
 
 export async function getComponent(systemId, kind) {
   await ensureSeeded();
+  kind = normalizeComponentKind(kind);
   if (!COMPONENT_KINDS.includes(kind)) throw new Error(`Unknown component kind "${kind}"`);
   const db = await openDb();
   return reqToPromise(db.transaction(COMPONENTS, "readonly").objectStore(COMPONENTS).get([systemId, kind]));
@@ -236,13 +237,17 @@ export async function getAllComponents(systemId) {
   const idx = db.transaction(COMPONENTS, "readonly").objectStore(COMPONENTS).index("bySystem");
   const comps = await reqToPromise(idx.getAll(systemId));
   const out = {};
-  for (const c of comps || []) out[c.kind] = c.content || "";
+  for (const c of comps || []) {
+    const kind = normalizeComponentKind(c.kind);
+    if (COMPONENT_KINDS.includes(kind)) out[kind] = c.content || "";
+  }
   for (const kind of COMPONENT_KINDS) if (out[kind] === undefined) out[kind] = "";
   return out;
 }
 
 export async function writeComponent(systemId, kind, content) {
   await ensureSeeded();
+  kind = normalizeComponentKind(kind);
   if (!COMPONENT_KINDS.includes(kind)) throw new Error(`Unknown component kind "${kind}"`);
   const system = await getSystem(systemId);
   if (!system) throw new Error(`Unknown system "${systemId}"`);
@@ -261,10 +266,9 @@ export async function writeComponent(systemId, kind, content) {
 
 /**
  * Persist one completed run's full LLM message array under its system.
- * `source` distinguishes browser automation runs from component-editor runs;
- * `kinds` records which scripts a level-1 editor was scoped to (else null).
+ * `source` distinguishes browser automation runs from component-editor runs.
  */
-export async function saveConversation({ systemId, source = "editor", kinds = null, task = "", messages = [], final = "" }) {
+export async function saveConversation({ systemId, source = "editor", task = "", messages = [], final = "" }) {
   await ensureSeeded();
   if (!systemId) throw new Error("saveConversation requires a systemId");
   const now = Date.now();
@@ -273,7 +277,6 @@ export async function saveConversation({ systemId, source = "editor", kinds = nu
     id,
     systemId,
     source,
-    kinds: kinds || null,
     task: String(task || ""),
     messages: Array.isArray(messages) ? messages : [],
     final: String(final ?? ""),
@@ -420,18 +423,6 @@ function defaultComponents(systemId) {
   return [
     {
       systemId,
-      kind: "agent",
-      content: DEFAULT_AGENT,
-      updatedAt: Date.now(),
-    },
-    {
-      systemId,
-      kind: "tools",
-      content: DEFAULT_TOOLS,
-      updatedAt: Date.now(),
-    },
-    {
-      systemId,
       kind: "html",
       content: DEFAULT_HTML,
       updatedAt: Date.now(),
@@ -444,8 +435,8 @@ function defaultComponents(systemId) {
     },
     {
       systemId,
-      kind: "ui",
-      content: DEFAULT_UI,
+      kind: "script",
+      content: DEFAULT_SCRIPT,
       updatedAt: Date.now(),
     },
   ];
@@ -455,8 +446,6 @@ function browserAgentComponents() {
   const id = BUILTIN_BROWSER_AGENT_ID;
   const now = Date.now();
   return [
-    { systemId: id, kind: "agent", content: BROWSER_AGENT_PROMPT, updatedAt: now },
-    { systemId: id, kind: "tools", content: BROWSER_AGENT_TOOLS_NOTE, updatedAt: now },
     {
       systemId: id,
       kind: "html",
@@ -464,7 +453,7 @@ function browserAgentComponents() {
   <h1>Browser Agent</h1>
   <p>Built-in system for tab automation (read_page, click, navigate, …).</p>
   <p>Use <strong>Run automation</strong> in the Agent tab to execute tasks on your open tabs.
-  Use <strong>Edit components</strong> to change this home page or the agent prompt via the LLM.</p>
+  Use <strong>Edit components</strong> to change this home page via the LLM.</p>
 </div>`,
       updatedAt: now,
     },
@@ -477,7 +466,7 @@ h1 { margin: 0 0 8px; font-size: 1.4rem; }
 p { margin: 0 0 10px; color: #444; }`,
       updatedAt: now,
     },
-    { systemId: id, kind: "ui", content: "// Browser Agent home — no interactive UI required.\n", updatedAt: now },
+    { systemId: id, kind: "script", content: "// Browser Agent home — no interactive script required.\n", updatedAt: now },
   ];
 }
 
@@ -485,99 +474,23 @@ function curvePlotterComponents() {
   const id = BUILTIN_CURVE_PLOTTER_ID;
   const now = Date.now();
   return [
-    { systemId: id, kind: "agent", content: CURVE_AGENT, updatedAt: now },
-    { systemId: id, kind: "tools", content: CURVE_TOOLS, updatedAt: now },
     { systemId: id, kind: "html", content: CURVE_HTML, updatedAt: now },
     { systemId: id, kind: "css", content: CURVE_CSS, updatedAt: now },
-    { systemId: id, kind: "ui", content: CURVE_UI_SOURCE, updatedAt: now },
+    { systemId: id, kind: "script", content: CURVE_UI_SOURCE, updatedAt: now },
   ];
 }
 
-const DEFAULT_AGENT = `You maintain this agent system's home UI and tools.
-Components: agent (this prompt), tools (JS tool functions), html, css, ui (home page JS).
-Prefer editing html/css/ui for display changes and tools for browser/compute helpers.
-When using tools from the home UI, assign self.__agentTools = { name: async (args, api) => ... }.
-The injected api can listTabs, getActiveTab, executeInTab, readPage, click, typeText, scroll, navigate, captureTab.`;
-
-const DEFAULT_TOOLS = `// Assign named tools for this system. api is injected at runtime.
-self.__agentTools = {
-  // Example: count words on a tab
-  // word_count: async (args, api) => {
-  //   const tabId = args.tabId ?? (await api.getActiveTab())?.id;
-  //   return api.executeInTab(tabId, "() => document.body.innerText.split(/\\\\s+/).filter(Boolean).length", []);
-  // },
-};
-`;
-
 const DEFAULT_HTML = `<div class="home">
   <h1>New agent system</h1>
-  <p>Ask the LLM in the Agent tab to build this home page and tools.</p>
+  <p>Ask the LLM in the Agent tab to build this home page.</p>
 </div>`;
 
 const DEFAULT_CSS = `body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #fafafa; color: #222; }
 .home { padding: 24px; }
 h1 { margin: 0 0 8px; font-size: 1.35rem; }`;
 
-const DEFAULT_UI = `// Home page script. DOM from the html component is already mounted.
+const DEFAULT_SCRIPT = `// Home page script. DOM from the html component is already mounted.
 console.log("[agent-system] home ready");
-`;
-
-const BROWSER_AGENT_PROMPT = `You are a browser automation agent. You control the user's browser tab-by-tab to complete their task.
-
-Tools:
-- browser_snapshot({tabId, target?, depth?, boxes?, maxChars?}): accessibility YAML snapshot with refs like [ref=e5]. Prefer this to understand the page.
-- browser_click({tabId, target, element?, doubleClick?, button?, modifiers?}): click by ref from browser_snapshot or CSS selector. Call browser_snapshot again after navigation or DOM changes.
-- read_page(): returns the visible text of the current tab.
-- get_links(): returns [{text, href}] for links on the current tab.
-- list_tabs(): returns open tabs [{id, title, url}].
-- open_tab({url}): opens a new tab, returns its id.
-- navigate({tabId, url}): navigates a tab to url.
-- click({tabId, selector}): clicks the first element matching a CSS selector or visible text.
-- type_text({tabId, selector, text}): types text into an input/textarea matching selector.
-- scroll({tabId, direction}): scrolls the tab "up" or "down" by one screen.
-- get_page_html({tabId, selector?, maxChars?}): returns raw HTML from the live tab.
-- modify_element({tabId, selector, styles?, text?, innerHTML?, all?}): change styles or content on matched element(s).
-- execute_script({tabId, script, args?}): run a JS function in the tab (JSON-serializable return).
-- fetch_url({url}): fetches a URL's text content without opening a tab.
-- download_file({url, filename?, saveAs?, timeoutMs?}): saves a file from a URL to Downloads (use for PDFs instead of click).
-- wait({ms}): pauses for ms milliseconds.
-- describe_image({tabId?, imageUrl?, dataUrl?}): locally captions an image.
-- classify_image({tabId?, imageUrl?, dataUrl?, topK?}): locally classifies an image.
-- transcribe_audio({audioUrl?, dataUrl?}): locally transcribes English audio.
-
-On every turn, reply with exactly ONE JSON object and nothing else:
-- To use a tool: {"thought": "...", "tool": "<name>", "args": {...}}
-- To finish: {"thought": "...", "final": "<answer for the user>"}
-
-Do not wrap the JSON in markdown fences. Do not include any text outside the JSON object.`;
-
-const BROWSER_AGENT_TOOLS_NOTE = `// Built-in Browser Agent uses the extension's tools/browser.js exports at runtime
-// (read_page, click, navigate, …). This file is documentation / override notes only.
-self.__agentTools = {};
-`;
-
-const CURVE_AGENT = `You maintain the Curve Plotter agent system.
-Prefer editing the ui, css, and html components to change how curves are displayed.
-Keep a 2D cartesian canvas with labeled axes. Support plotting mathematical curves.
-When the user asks for two curves at once, update the UI so they can enter and plot two equations.
-Reply with component edits via the editor tools (read_component / write_component), then reload_home.`;
-
-const CURVE_TOOLS = `self.__agentTools = {
-  sample_poly: async (args) => {
-    const coeffs = args.coeffs || [0, 0, 1]; // a0 + a1 x + a2 x^2 ...
-    const xMin = args.xMin ?? -2;
-    const xMax = args.xMax ?? 2;
-    const n = args.n ?? 200;
-    const pts = [];
-    for (let i = 0; i <= n; i++) {
-      const x = xMin + (i / n) * (xMax - xMin);
-      let y = 0;
-      for (let p = 0; p < coeffs.length; p++) y += coeffs[p] * Math.pow(x, p);
-      pts.push({ x, y });
-    }
-    return pts;
-  },
-};
 `;
 
 const CURVE_HTML = `<div class="plotter">

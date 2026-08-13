@@ -1,7 +1,7 @@
 // Shared step-limit config for every ReAct-style loop in the extension
-// (browser automation in agent.js, and the Level 1 / Level 2 system editors
-// in editor-loop.js). A single source of truth avoids two hardcoded
-// MAX_STEPS constants drifting out of sync.
+// (browser automation in agent.js, and the system editor in editor-loop.js).
+// A single source of truth avoids two hardcoded MAX_STEPS constants drifting
+// out of sync.
 
 export const DEFAULT_MAX_STEPS = 14;
 const MIN_MAX_STEPS = 1;

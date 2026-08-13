@@ -12,9 +12,7 @@ The Agent tab is a multi-system workspace. Each **agent system** is stored in In
 
 | Kind | Role |
 |------|------|
-| `agent` | System prompt / policy text |
-| `tools` | JS that assigns `self.__agentTools = { … }` |
-| `html` / `css` / `ui` | Home page markup, styles, and script |
+| `html` / `css` / `script` | Home page markup, styles, and script |
 
 **Built-ins (seeded once):**
 
@@ -27,12 +25,12 @@ The Agent tab is a multi-system workspace. Each **agent system** is stored in In
 
 **Tab access from sandbox:** the sandbox cannot call `chrome.*`. It uses an injected `api` (`listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`) bridged through the host → [`tab-bridge.js`](../browser-agent/tab-bridge.js) in the service worker. Any open tab (active or not) can be targeted by `tabId`.
 
-**Edit components (LLM):** [`system-editor-l2.js`](../browser-agent/system-editor-l2.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel (a restricted single-script variant lives in [`system-editor-l1.js`](../browser-agent/system-editor-l1.js)). Same `chat()` providers as the browser agent (ONNX / WebLLM / Ollama / API).
+**Edit components (LLM):** [`system-editor.js`](../browser-agent/system-editor.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel. Same `chat()` providers as the browser agent (ONNX / WebLLM / Ollama / API).
 
 ```
 Side panel Agent tab
   ├─ system select / + / home iframe (system-host → sandbox)
-  ├─ Edit components → port "system-editor" → system-editor-l2.js / -l1.js → system-store
+  ├─ Edit components → port "system-editor" → system-editor.js → system-store
   └─ Run automation (Browser Agent only) → port "agent" → agent.js → tools.js
 ```
 

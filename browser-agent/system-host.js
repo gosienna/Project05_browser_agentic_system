@@ -29,8 +29,7 @@ async function loadComponents() {
     type: "load",
     html: comps.html,
     css: comps.css,
-    ui: comps.ui,
-    tools: comps.tools,
+    script: comps.script,
   };
   if (sandboxReady && frame.contentWindow) {
     frame.contentWindow.postMessage(payload, "*");

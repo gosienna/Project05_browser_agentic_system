@@ -26,7 +26,7 @@ import {
   parseDialogueRawPayload,
   serializeDialogueRawPayload,
 } from "./raw-json-view.js";
-import { listOllamaModelsWithMeta } from "../ollama-models.js";
+import { listOllamaModelsWithMeta, resolveOllamaInstalledName } from "../ollama-models.js";
 import { getDialogueMaxToolRounds } from "../agent-config.js";
 import { DEFAULT_GEMINI_MODEL, formatGeminiPickerLabel, listGeminiModels, resolveGeminiModel } from "../gemini-models.js";
 import {
@@ -1460,7 +1460,10 @@ async function refreshDialogueModelSelect() {
     options = all.filter((m) => downloaded[m.id]);
     const settingsModel = getSettings().model || "";
     selected =
-      (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
+      resolveOllamaInstalledName(
+        settingsModel,
+        options.map((m) => m.id)
+      ) ||
       options[0]?.id ||
       "";
   } else if (provider === "nvidia-nim") {

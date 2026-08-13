@@ -1,6 +1,5 @@
-// Level 2 meta-editor: LLM loop with FULL control — it can read/write every
-// component of the current agent system. For the restricted single-script
-// editor see system-editor-l1.js.
+// Meta-editor: LLM loop that can read/write every component of the current
+// agent system stored in IndexedDB.
 
 import { runEditorLoop } from "./editor-loop.js";
 import {
@@ -12,25 +11,23 @@ import {
   writeComponent,
 } from "./system-store.js";
 
-const EDITOR_PROMPT = `You are a LEVEL 2 agent-system editor with full control. You modify any component of the currently selected agent system in IndexedDB.
+const EDITOR_PROMPT = `You are an agent-system editor with full control. You modify any component of the currently selected agent system in IndexedDB.
 
 Component kinds:
-- agent: system prompt / policy for the system's own agent loop
-- tools: JavaScript that assigns self.__agentTools = { name: async (args, api) => ... }
 - html: home page markup
 - css: home page styles
-- ui: home page JavaScript (runs in a sandbox after html/css mount)
+- script: home page JavaScript (runs in a sandbox after html/css mount)
 
 Tools:
 - list_components(): list kinds and byte sizes for the current system
-- read_component({ kind }): return full content of one component (kind: agent|tools|html|css|ui)
+- read_component({ kind }): return full content of one component (kind: html|css|script)
 - write_component({ kind, content }): replace a component with the full new content string
 - reload_home(): refresh the home UI so the user sees the latest components
 
 Rules:
 - Always write COMPLETE file contents (not patches).
-- Prefer editing ui/css/html for visual/behavior changes on the home page.
-- Keep tools as plain JS that sets self.__agentTools. The runtime injects api with listTabs, getActiveTab, executeInTab, readPage, click, typeText, scroll, navigate, captureTab.
+- Prefer editing script/css/html for visual/behavior changes on the home page.
+- The runtime injects api into the script with listTabs, getActiveTab, executeInTab, readPage, click, typeText, scroll, navigate, captureTab.
 - After write_component edits that affect the home page, call reload_home before finishing.
 - On every turn reply with exactly ONE JSON object:
   - Tool: {"thought":"...","tool":"<name>","args":{...}}

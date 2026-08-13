@@ -23,14 +23,6 @@
         border-bottom: 1px solid #ddd;
       }
       h1 { margin: 0; font-size: 15px; flex: 1; }
-      .level-badge {
-        font-size: 11px;
-        color: #666;
-        background: #eef1f8;
-        border-radius: 4px;
-        padding: 4px 8px;
-        white-space: nowrap;
-      }
       #refresh-btn {
         font: inherit;
         padding: 5px 12px;
@@ -90,7 +82,6 @@
         header, .kind-tabs, #content { background: #26262c; border-color: #3a3a42; }
         #refresh-btn { background: #26262c; }
         .meta { background: #2a2f3d; border-color: #3a3a42; color: #aaa; }
-        .level-badge { background: #2a2f3d; color: #ccc; }
         .kind-tab .bytes { color: #777; }
       }
     </style>
@@ -98,7 +89,6 @@
   <body>
     <header>
       <h1 id="system-name">Components</h1>
-      <span id="system-level" class="level-badge"></span>
       <button id="refresh-btn" type="button">Refresh</button>
     </header>
     <nav id="kind-tabs" class="kind-tabs" aria-label="Components"></nav>

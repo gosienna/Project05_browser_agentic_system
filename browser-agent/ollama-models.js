@@ -14,6 +14,7 @@ export const OLLAMA_MODEL_REGISTRY = [
     labels: ["1B", "3B"],
     capability: "Tools",
     modelType: "official",
+    defaultTag: "3b",
     tier: "default",
     approxSizeMB: 2000,
   },
@@ -96,10 +97,11 @@ export const OLLAMA_MODEL_REGISTRY = [
   {
     id: "gemma4",
     label: "Gemma 4",
-    description: "Google Gemma 4 — thinking, vision, and audio; default tag is e4b.",
+    description: "Google Gemma 4 — thinking, vision, and audio.",
     labels: ["E2B", "E4B", "12B", "26B", "31B"],
     capability: "Thinking",
     modelType: "official",
+    defaultTag: "e4b",
     approxSizeMB: 9600,
   },
   {
@@ -225,19 +227,106 @@ export function normalizeOllamaModelBase(name) {
   return String(name || "").split(":")[0];
 }
 
+/** `E4B` / `8x7B` → Ollama tag `e4b` / `8x7b`. */
+export function ollamaTagFromLabel(label) {
+  return String(label || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+/** Pull id for a catalog row. Gemma 4's default is `e4b`, not `latest`. */
+export function ollamaCatalogPullId(modelId) {
+  const id = String(modelId || "").trim();
+  if (!id || id.includes(":")) return id;
+  const entry = OLLAMA_MODEL_REGISTRY.find((m) => m.id === id);
+  return entry?.defaultTag ? `${id}:${entry.defaultTag}` : id;
+}
+
+/**
+ * One Settings row per concrete Ollama tag (`gemma4:e4b`), not a family umbrella.
+ * @returns {object[]}
+ */
+export function expandOllamaCatalogEntry(entry) {
+  const labels = entry.labels?.length ? entry.labels : [];
+  const defaultTag = (entry.defaultTag || (labels.length === 1 ? ollamaTagFromLabel(labels[0]) : "")).toLowerCase();
+  if (!labels.length) {
+    const id = ollamaCatalogPullId(entry.id);
+    return [{ ...entry, id, familyId: entry.id, familyLabel: entry.label }];
+  }
+  return labels.map((label) => {
+    const tag = ollamaTagFromLabel(label);
+    const isDefault = defaultTag && tag === defaultTag;
+    return {
+      ...entry,
+      id: `${entry.id}:${tag}`,
+      familyId: entry.id,
+      familyLabel: entry.label,
+      tag,
+      labels: [label],
+      tier: isDefault ? entry.tier : undefined,
+      approxSizeMB: isDefault ? entry.approxSizeMB : undefined,
+    };
+  });
+}
+
 /** True if any installed name matches the catalog / pull id. */
 export function isOllamaModelInstalled(installed, modelId) {
-  const base = normalizeOllamaModelBase(modelId);
+  const id = String(modelId || "");
+  if (!id) return false;
+  if (id.includes(":")) {
+    for (const name of installed) {
+      if (name === id) return true;
+    }
+    return false;
+  }
+  const base = normalizeOllamaModelBase(id);
   for (const name of installed) {
-    if (name === modelId || normalizeOllamaModelBase(name) === base) return true;
+    if (name === id || normalizeOllamaModelBase(name) === base) return true;
   }
   return false;
 }
 
 /** Concrete installed tag names for a catalog id (for delete UI). */
 export function getInstalledVariants(installed, modelId) {
-  const base = normalizeOllamaModelBase(modelId);
-  return [...installed].filter((name) => name === modelId || normalizeOllamaModelBase(name) === base);
+  const id = String(modelId || "");
+  if (id.includes(":")) {
+    return [...installed].filter((name) => name === id);
+  }
+  const base = normalizeOllamaModelBase(id);
+  return [...installed].filter((name) => name === id || normalizeOllamaModelBase(name) === base);
+}
+
+/**
+ * Map a catalog / untagged id to a concrete installed Ollama name.
+ * Untagged `gemma4` is `gemma4:latest` on the HTTP API; `ollama pull gemma4:e4b`
+ * does not create that alias, so chat 404s unless we rewrite to the pulled tag.
+ * Specific tags (e.g. `gemma4:31b`) are left unchanged when missing.
+ */
+export function resolveOllamaInstalledName(requested, installed) {
+  const name = String(requested || "").trim();
+  if (!name) return name;
+  const list = [...(installed || [])];
+  if (list.includes(name)) return name;
+
+  const tagged = name.includes(":");
+  const wantsLatest = /:latest$/i.test(name);
+  if (tagged && !wantsLatest) return name;
+
+  const variants = getInstalledVariants(list, name);
+  if (!variants.length) return name;
+
+  const latest = variants.find((n) => /:latest$/i.test(n));
+  if (latest) return latest;
+
+  const base = normalizeOllamaModelBase(name);
+  const entry = OLLAMA_MODEL_REGISTRY.find((m) => m.id === base);
+  if (entry?.defaultTag) {
+    const preferred = `${base}:${entry.defaultTag}`;
+    const match = variants.find((n) => n === preferred || n.toLowerCase() === preferred.toLowerCase());
+    if (match) return match;
+  }
+  return variants[0];
 }
 
 /** Human-readable input → output summary from Ollama capabilities. */
@@ -281,6 +370,7 @@ export function formatOllamaModelLabel(name, details = {}, capabilities = []) {
 /** Settings registry secondary line for catalog rows. */
 export function formatOllamaCatalogMeta(entry = {}) {
   const parts = [];
+  if (entry.familyLabel) parts.push(entry.familyLabel);
   if (entry.labels?.length) parts.push(entry.labels.join("/"));
   if (entry.capability) parts.push(entry.capability);
   if (entry.modelType) parts.push(entry.modelType);
@@ -296,7 +386,7 @@ export function formatOllamaCatalogMeta(entry = {}) {
 }
 
 function filterOllamaRegistry({ search, capability, modelType } = {}) {
-  let list = OLLAMA_MODEL_REGISTRY;
+  let list = OLLAMA_MODEL_REGISTRY.flatMap(expandOllamaCatalogEntry);
   if (modelType === "official") {
     list = list.filter((m) => m.modelType === "official");
   }
@@ -310,6 +400,9 @@ function filterOllamaRegistry({ search, capability, modelType } = {}) {
       (m) =>
         m.id.toLowerCase().includes(q) ||
         m.label.toLowerCase().includes(q) ||
+        (m.familyId || "").toLowerCase().includes(q) ||
+        (m.familyLabel || "").toLowerCase().includes(q) ||
+        (m.tag || "").toLowerCase().includes(q) ||
         (m.description || "").toLowerCase().includes(q)
     );
   }

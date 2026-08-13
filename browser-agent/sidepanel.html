@@ -139,11 +139,17 @@
           <select id="system-select" aria-label="Agent system"></select>
           <button id="system-add-btn" type="button" class="icon-btn" title="Create system" aria-label="Create system">+</button>
           <button id="system-delete-btn" type="button" class="icon-btn" title="Delete system" aria-label="Delete system">🗑</button>
-          <a id="system-open-link" class="system-open-link" href="#" target="_blank" rel="noopener">Open full page</a>
-          <a id="system-components-link" class="system-open-link" href="#" target="_blank" rel="noopener">Components</a>
+          <button id="system-render-btn" type="button" class="secondary-btn" title="Open or refresh the sandbox in a new tab">Render</button>
         </div>
         <div id="model-badge" class="model-badge"></div>
-        <iframe id="system-home-frame" class="system-home-frame" title="System home"></iframe>
+        <div id="component-editor" class="component-editor">
+          <div id="component-kind-tabs" class="component-kind-tabs" role="tablist" aria-label="Components"></div>
+          <div class="component-editor-toolbar">
+            <span id="component-meta" class="component-meta">Select a system</span>
+            <button id="component-save-btn" type="button" class="secondary-btn" disabled>Save</button>
+          </div>
+          <textarea id="component-editor-input" class="component-editor-input" spellcheck="false" disabled placeholder="Select a system to edit its components."></textarea>
+        </div>
         <div id="browser-agent-run" class="browser-agent-run hidden">
           <div class="mode-label">Run automation</div>
           <form id="agent-form">
@@ -151,27 +157,11 @@
             <button type="submit" id="run-btn">Run</button>
           </form>
         </div>
-        <div class="mode-label">Edit components (LLM)</div>
-        <div id="editor-level-badge" class="level-badge" title="Fixed when the system was created"></div>
-        <div id="l1-config" class="hidden">
-          <button id="l1-config-toggle" type="button" class="secondary-btn">⚙ Level 1 access</button>
-          <div id="l1-config-wrap" class="hidden">
-            <div id="l1-kind-checks" class="l1-kind-checks"></div>
-            <label for="l1-prompt-input">Custom system prompt (persona only — tool rules always applied)</label>
-            <textarea id="l1-prompt-input" rows="4" placeholder="Leave blank to use the default level-1 editor persona…"></textarea>
-            <div class="l1-config-actions">
-              <button id="l1-config-save-btn" type="button" class="secondary-btn">Save</button>
-              <button id="l1-config-reset-btn" type="button" class="secondary-btn">Reset prompt to default</button>
-            </div>
-            <label>Full system prompt sent to the LLM</label>
-            <pre id="l1-prompt-preview" class="l1-prompt-preview"></pre>
-          </div>
-        </div>
-        <div id="trace" class="trace"></div>
         <form id="editor-form">
           <textarea id="editor-input" placeholder="Ask to change this system… e.g. Make the curve red, or plot two curves at once" rows="2"></textarea>
           <button type="submit" id="editor-run-btn">Edit</button>
         </form>
+        <div id="trace" class="trace"></div>
 
         <div class="history-header">
           <span class="mode-label">Conversation history</span>
@@ -259,7 +249,7 @@
             <div id="ollama-server-status" class="device-line">Server: checking…</div>
             <label for="ollama-base-url">Ollama base URL</label>
             <input id="ollama-base-url" placeholder="http://127.0.0.1:11434" />
-            <p class="hint">Recommended models from the <a href="https://ollama.com/library" target="_blank" rel="noopener">Ollama library</a>. Pulls download to the machine running Ollama. Use a custom tag (e.g. <code>llama3.2:3b</code>) when a model has multiple sizes.</p>
+            <p class="hint">Recommended models from the <a href="https://ollama.com/library" target="_blank" rel="noopener">Ollama library</a>. Each row is a concrete pull tag (e.g. <code>gemma4:e4b</code>). Use custom pull for tags not listed.</p>
 
             <label for="ollama-catalog-search">Search catalog</label>
             <input id="ollama-catalog-search" type="search" placeholder="e.g. llama, qwen, mistral" autocomplete="off" />
@@ -371,7 +361,7 @@
 
           <label for="max-steps-input">Max steps per run</label>
           <input id="max-steps-input" type="number" min="1" max="100" step="1" placeholder="14" />
-          <p class="hint">Caps LLM/tool-call turns per automation or editor run (Level 1, Level 2, and browser automation). Default 14.</p>
+          <p class="hint">Caps LLM/tool-call turns per automation or editor run. Default 14.</p>
 
           <label for="max-tokens-input">Max tokens per reply</label>
           <input id="max-tokens-input" type="number" min="64" max="131072" step="64" placeholder="1024" />

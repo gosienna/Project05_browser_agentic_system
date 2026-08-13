@@ -3,11 +3,11 @@
 // watch what the LLM editor is modifying; a dot marks kinds changed since the
 // tab was last viewed.
 
-import { COMPONENT_KINDS, ensureSeeded, getComponent, getEditableKinds, getSystem, listComponents } from "./system-store.js";
+import { COMPONENT_KINDS, ensureSeeded, getComponent, getSystem, listComponents } from "./system-store.js";
 
 const params = new URLSearchParams(location.search);
 const systemId = params.get("id");
-let activeKind = COMPONENT_KINDS.includes(params.get("kind")) ? params.get("kind") : "agent";
+let activeKind = COMPONENT_KINDS.includes(params.get("kind")) ? params.get("kind") : "html";
 let componentMeta = {}; // kind -> { bytes, updatedAt }
 const changedKinds = new Set();
 
@@ -71,10 +71,6 @@ async function refresh() {
   }
   document.title = `${system.name} — components`;
   nameEl.textContent = `${system.name} — components`;
-  document.getElementById("system-level").textContent =
-    system.level === 1
-      ? `Level 1 · LLM edits: ${getEditableKinds(system).join(", ")}`
-      : "Level 2 · full LLM access";
 
   componentMeta = {};
   for (const c of await listComponents(systemId)) {

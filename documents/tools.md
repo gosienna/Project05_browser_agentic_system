@@ -183,7 +183,7 @@ All tools requiring `tabId` validate it via `requireTabId()` before running, so 
 
 ## Sandbox `api` (custom agent systems)
 
-Home UI / tools JS for custom systems runs in [`sandbox.html`](../browser-agent/sandbox.html) and cannot call `chrome.*` directly. The host injects an `api` object bridged through [`tab-bridge.js`](../browser-agent/tab-bridge.js):
+Home UI script for custom systems runs in [`sandbox.html`](../browser-agent/sandbox.html) and cannot call `chrome.*` directly. The host injects an `api` object bridged through [`tab-bridge.js`](../browser-agent/tab-bridge.js):
 
 `listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`
 

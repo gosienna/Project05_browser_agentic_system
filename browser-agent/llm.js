@@ -13,7 +13,7 @@ import {
   resolveOllamaBaseUrl,
 } from "./llm-providers.js";
 import { geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
-import { ollamaFetch } from "./ollama-models.js";
+import { listOllamaInstalled, ollamaFetch, resolveOllamaInstalledName } from "./ollama-models.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 import { stripUnsupportedNativeTools } from "./webllm-models.js";
 
@@ -77,7 +77,10 @@ export async function renderChatPromptPreview(request, settings) {
       return { prompt: null };
     case "ollama": {
       const baseUrl = resolveOllamaBaseUrl(settings);
-      const model = request.model || settings.model || "llama3.2";
+      const model = await resolveOllamaRequestModel(
+        baseUrl,
+        request.model || settings.model || "llama3.2"
+      );
       const prompt = await ollamaFetchRenderedPrompt(baseUrl, model, request);
       return { prompt };
     }
@@ -525,9 +528,17 @@ async function ollamaNativeChatCompletions(baseUrl, model, request) {
   return ollamaChatCompletionFromNative(body, model);
 }
 
+async function resolveOllamaRequestModel(baseUrl, requested) {
+  const { installed } = await listOllamaInstalled(baseUrl);
+  return resolveOllamaInstalledName(requested, installed);
+}
+
 async function ollamaChatCompletions(request, settings) {
   const baseUrl = resolveOllamaBaseUrl(settings);
-  const model = request.model || settings.model || "llama3.2";
+  const model = await resolveOllamaRequestModel(
+    baseUrl,
+    request.model || settings.model || "llama3.2"
+  );
   const hasTools = Array.isArray(request.tools) && request.tools.length > 0;
 
   // Native /api/chat handles tools without OpenAI tool_choice (v1 shim needs server flags).
@@ -977,7 +988,10 @@ function errorResponse(message, type) {
 /** Ollama /api/embed — used by RAG (batch). Legacy /api/embeddings uses `prompt`, not `input`. */
 export async function ollamaEmbeddings(texts, settings, model) {
   const baseUrl = resolveOllamaBaseUrl(settings);
-  const modelId = model || settings?.ragOllamaEmbedModel || "nomic-embed-text";
+  const modelId = await resolveOllamaRequestModel(
+    baseUrl,
+    model || settings?.ragOllamaEmbedModel || "nomic-embed-text"
+  );
   const input = Array.isArray(texts) ? texts : [texts];
   const res = await ollamaFetch(`${baseUrl}/api/embed`, {
     method: "POST",

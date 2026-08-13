@@ -5,9 +5,8 @@ import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
 import { migrateGeminiModelSettings } from "./gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import * as tools from "./tools/browser.js";
-import { runSystemEditor } from "./system-editor-l2.js";
-import { runScriptEditor } from "./system-editor-l1.js";
-import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getEditableKinds, getSystem, saveConversation } from "./system-store.js";
+import { runSystemEditor } from "./system-editor.js";
+import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getSystem, saveConversation } from "./system-store.js";
 import { handleTabBridge } from "./tab-bridge.js";
 import { handleRagMessage } from "./rag/handlers.js";
 import { stripUnsupportedNativeTools } from "./webllm-models.js";
@@ -128,11 +127,9 @@ chrome.runtime.onConnect.addListener((port) => {
 
       try {
         await ensureSeeded();
-        // The access level is an immutable property of the system record — the
-        // side panel cannot request an escalated level.
         const system = await getSystem(msg.systemId);
         if (!system) throw new Error(`Unknown system "${msg.systemId}"`);
-        const editorArgs = {
+        await runSystemEditor({
           systemId: msg.systemId,
           task: msg.task,
           settings,
@@ -143,17 +140,11 @@ chrome.runtime.onConnect.addListener((port) => {
             persistConversation({
               systemId: msg.systemId,
               source: "editor",
-              kinds: system.level === 1 ? getEditableKinds(system) : null,
               task: msg.task,
               messages,
               final,
             }),
-        };
-        if (system.level === 1) {
-          await runScriptEditor(editorArgs);
-        } else {
-          await runSystemEditor(editorArgs);
-        }
+        });
         send({ type: "done" });
       } catch (err) {
         send({ type: "error", message: err?.message || String(err) });

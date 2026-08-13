@@ -9,13 +9,13 @@ import {
   deleteConversation,
   deleteSystem,
   ensureSeeded,
+  getComponent,
   getConversation,
-  getEditableKinds,
+  listComponents,
   listConversations,
   listSystems,
-  updateSystemEditorConfig,
+  writeComponent,
 } from "./system-store.js";
-import { L1_DEFAULT_PERSONA, L1_PROTOCOL } from "./l1-prompt.js";
 import {
   DEFAULT_MAX_STEPS,
   DEFAULT_MAX_TOKENS,
@@ -67,8 +67,10 @@ import {
   isOllamaModelInstalled,
   listOllamaInstalled,
   listOllamaModelsWithMeta,
+  ollamaCatalogPullId,
   ollamaInstalledDownloadMap,
   pullOllamaModel,
+  resolveOllamaInstalledName,
 } from "./ollama-models.js";
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
 import {
@@ -111,6 +113,11 @@ let lastKnownDevice = null;
 let dialoguePanel = null;
 let systems = [];
 let currentSystemId = null;
+let activeComponentKind = COMPONENT_KINDS[0];
+let componentBaseline = "";
+let componentDirty = false;
+let componentLoading = false;
+let componentMetaByKind = {};
 /** @type {Map<string, object>} client-side cache of engine.contextEstimate results, keyed by model id. */
 const contextEstimateCache = new Map();
 
@@ -136,7 +143,7 @@ async function init() {
   wireAgentForm();
   wireEditorForm();
   wireSystemsUi();
-  wireL1Config();
+  wireComponentEditor();
   dialoguePanel = createDialoguePanel({
     $,
     sendMessage,
@@ -184,7 +191,12 @@ async function init() {
       dialoguePanel?.onSettingsChanged();
     }
     if (msg?.type === "system.reload" && msg.systemId === currentSystemId) {
-      reloadHomeFrame();
+      refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
+    }
+    if (msg?.type === "system.updated" && msg.systemId === currentSystemId) {
+      refreshComponentEditor({ keepDirty: true }).catch((err) =>
+        setComponentMeta(err.message, true)
+      );
     }
     if (msg?.type === "system.conversation" && msg.systemId === currentSystemId) {
       refreshHistory();
@@ -834,6 +846,17 @@ function ollamaBaseUrl() {
   return resolveOllamaBaseUrl(settings);
 }
 
+/** Rewrite untagged catalog ids (e.g. gemma4) to a pulled tag (gemma4:e4b). */
+async function persistResolvedOllamaModel(installed) {
+  if (settings.provider !== "ollama") return;
+  const requested = (settings.model || "").trim();
+  if (!requested || !installed?.size) return;
+  const resolved = resolveOllamaInstalledName(requested, installed);
+  if (resolved && resolved !== requested && installed.has(resolved)) {
+    await saveSettings({ model: resolved });
+  }
+}
+
 function ollamaCatalogQueryOpts() {
   const opts = { search: ollamaCatalogSearch, skip: ollamaCatalogSkip, limit: OLLAMA_CATALOG_PAGE };
   if (ollamaCatalogFilter === "official") opts.modelType = "official";
@@ -924,6 +947,8 @@ async function refreshOllamaPulledModels({ embedOnly = false } = {}) {
       throw new Error(error);
     }
 
+    await persistResolvedOllamaModel(installed);
+
     if (!embedOnly) {
       renderOllamaRegistry();
       if (errEl) {
@@ -961,6 +986,7 @@ async function refreshOllamaSettings() {
   const { installed, reachable, error } = await listOllamaInstalled(base);
   ollamaInstalled = installed;
   updateOllamaServerStatus(installed, reachable, error, base);
+  await persistResolvedOllamaModel(installed);
 
   if (ollamaRegistry.length === 0 && ollamaCatalogSkip === 0) {
     await reloadOllamaCatalog();
@@ -972,19 +998,17 @@ async function refreshOllamaSettings() {
 
 function buildOllamaRegistryRows() {
   const rows = [...ollamaRegistry];
-  const seenBases = new Set(rows.map((r) => r.id));
+  const seenIds = new Set(rows.map((r) => r.id));
   for (const name of ollamaInstalled) {
-    const base = name.split(":")[0];
-    if (!seenBases.has(base) && !seenBases.has(name)) {
-      rows.push({
-        id: name,
-        label: name,
-        description: "Installed locally (not in catalog)",
-        labels: [],
-        installedOnly: true,
-      });
-      seenBases.add(name);
-    }
+    if (seenIds.has(name)) continue;
+    rows.push({
+      id: name,
+      label: name,
+      description: "Installed locally (not in catalog)",
+      labels: [],
+      installedOnly: true,
+    });
+    seenIds.add(name);
   }
   return rows;
 }
@@ -995,16 +1019,17 @@ function renderOllamaRegistry() {
   list.innerHTML = "";
   const rows = buildOllamaRegistryRows();
   const selectedId = settings.model || rows.find((m) => m.tier === "default")?.id || "";
+  const resolvedSelected = resolveOllamaInstalledName(selectedId, ollamaInstalled);
 
   for (const m of rows) {
     const li = document.createElement("li");
     const installed = isOllamaModelInstalled(ollamaInstalled, m.id);
-    const isSelected = installed && (m.id === selectedId || getInstalledVariants(ollamaInstalled, m.id).includes(selectedId));
-    li.className = isSelected || m.id === selectedId ? "selected" : "";
+    const isUsing = m.id === selectedId || m.id === resolvedSelected;
+    li.className = isUsing ? "selected" : "";
 
     li.innerHTML = `
       <span class="model-info">
-        <span class="model-name">${escapeHtml(m.label || m.id)}</span>
+        <span class="model-name"><code>${escapeHtml(m.id)}</code></span>
         <small class="model-meta">${escapeHtml(formatOllamaCatalogMeta(m) || m.id)}</small>
         ${m.description ? `<small class="model-context">${escapeHtml(m.description.slice(0, 120))}${m.description.length > 120 ? "…" : ""}</small>` : ""}
       </span>
@@ -1018,11 +1043,10 @@ function renderOllamaRegistry() {
       btn.textContent = "Pulling…";
       btn.disabled = true;
     } else if (installed) {
-      btn.textContent = m.id === selectedId ? "Selected" : "Use";
-      btn.disabled = m.id === selectedId;
+      btn.textContent = isUsing ? "Selected" : "Use";
+      btn.disabled = isUsing;
       btn.addEventListener("click", async () => {
-        const pick = getInstalledVariants(ollamaInstalled, m.id)[0] || m.id;
-        await saveSettings({ model: pick });
+        await saveSettings({ model: m.id });
         renderOllamaRegistry();
         renderModelBadge();
       });
@@ -1087,25 +1111,26 @@ function onOllamaProgress(event) {
 
 async function startOllamaPull(modelId) {
   if (ollamaPulling) return;
+  const pullId = ollamaCatalogPullId(modelId);
   ollamaPulling = true;
   ollamaPullAbort?.abort();
   ollamaPullAbort = new AbortController();
   const wrap = $("#ollama-progress-wrap");
   wrap?.classList.remove("hidden");
   $("#ollama-progress-fill").style.width = "0%";
-  $("#ollama-progress-label").textContent = `Pulling ${modelId}…`;
+  $("#ollama-progress-label").textContent = `Pulling ${pullId}…`;
   renderOllamaRegistry();
 
   try {
-    await pullOllamaModel(ollamaBaseUrl(), modelId, {
+    await pullOllamaModel(ollamaBaseUrl(), pullId, {
       signal: ollamaPullAbort.signal,
       onProgress: onOllamaProgress,
     });
     const variants = getInstalledVariants(
       (await listOllamaInstalled(ollamaBaseUrl())).installed,
-      modelId
+      pullId
     );
-    await saveSettings({ model: variants[0] || modelId });
+    await saveSettings({ model: variants[0] || pullId });
     wrap?.classList.add("hidden");
     await refreshOllamaSettings();
     renderModelBadge();
@@ -1663,6 +1688,7 @@ function renderModelBadge() {
 
 function wireSystemsUi() {
   $("#system-select").addEventListener("change", async (e) => {
+    await saveComponentIfDirty();
     currentSystemId = e.target.value;
     await chrome.storage.local.set({ currentSystemId });
     applyCurrentSystem();
@@ -1670,17 +1696,9 @@ function wireSystemsUi() {
   $("#system-add-btn").addEventListener("click", async () => {
     const name = prompt("Name for the new agent system:", "My system");
     if (name == null) return;
-    // The access level is fixed at creation and cannot be changed later.
-    const levelAnswer = prompt(
-      "Editor access level for this system (cannot be changed later):\n1 = restricted to chosen scripts\n2 = full system",
-      "2"
-    );
-    if (levelAnswer == null) return;
-    const level = Number(levelAnswer.trim()) === 1 ? 1 : 2;
-    // Level 1 starts scoped to "ui" only; use the "⚙ Level 1 access" panel
-    // afterwards to grant more scripts or set a custom persona prompt.
     try {
-      const system = await createSystem(name, { level, editableKinds: ["ui"] });
+      await saveComponentIfDirty();
+      const system = await createSystem(name);
       currentSystemId = system.id;
       await chrome.storage.local.set({ currentSystemId });
       await refreshSystems();
@@ -1704,60 +1722,185 @@ function wireSystemsUi() {
       alert(err.message || String(err));
     }
   });
+  $("#system-render-btn").addEventListener("click", () => {
+    renderSystemInTab().catch((err) => alert(err.message || String(err)));
+  });
 }
 
-function wireL1Config() {
-  const checksEl = $("#l1-kind-checks");
-  checksEl.innerHTML = "";
+function formatComponentBytes(n) {
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+function setComponentMeta(text, isError = false) {
+  const el = $("#component-meta");
+  el.textContent = text;
+  el.classList.toggle("error", isError);
+}
+
+function setComponentDirty(dirty) {
+  componentDirty = dirty;
+  $("#component-save-btn").disabled = !dirty || !currentSystemId;
+  renderComponentKindTabs();
+}
+
+function renderComponentKindTabs() {
+  const tabs = $("#component-kind-tabs");
+  tabs.innerHTML = "";
   for (const kind of COMPONENT_KINDS) {
-    const label = document.createElement("label");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "l1-kind-check";
-    cb.value = kind;
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(` ${kind}`));
-    checksEl.appendChild(label);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `component-kind-tab${kind === activeComponentKind ? " active" : ""}${
+      kind === activeComponentKind && componentDirty ? " dirty" : ""
+    }`;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", kind === activeComponentKind ? "true" : "false");
+    const bytes = componentMetaByKind[kind]?.bytes ?? 0;
+    btn.innerHTML = `${kind}<span class="bytes">${formatComponentBytes(bytes)}</span>`;
+    btn.addEventListener("click", () => selectComponentKind(kind));
+    tabs.appendChild(btn);
   }
-  $("#l1-config-toggle").addEventListener("click", () => {
-    $("#l1-config-wrap").classList.toggle("hidden");
+}
+
+function wireComponentEditor() {
+  renderComponentKindTabs();
+  $("#component-editor-input").addEventListener("input", () => {
+    if (componentLoading) return;
+    setComponentDirty($("#component-editor-input").value !== componentBaseline);
   });
-  $("#l1-prompt-input").addEventListener("input", renderL1PromptPreview);
-  renderL1PromptPreview();
-  $("#l1-config-save-btn").addEventListener("click", async () => {
-    if (!currentSystemId) return;
-    const editableKinds = Array.from(document.querySelectorAll(".l1-kind-check"))
-      .filter((cb) => cb.checked)
-      .map((cb) => cb.value);
-    if (editableKinds.length === 0) {
-      alert("Select at least one component.");
-      return;
-    }
-    const systemPrompt = $("#l1-prompt-input").value;
-    try {
-      await updateSystemEditorConfig(currentSystemId, { editableKinds, systemPrompt });
-      await refreshSystems();
-    } catch (err) {
-      alert(err.message || String(err));
-    }
+  $("#component-save-btn").addEventListener("click", () => {
+    saveComponentIfDirty().catch((err) => setComponentMeta(err.message, true));
   });
-  $("#l1-config-reset-btn").addEventListener("click", async () => {
-    if (!currentSystemId) return;
-    $("#l1-prompt-input").value = "";
-    try {
-      await updateSystemEditorConfig(currentSystemId, { systemPrompt: "" });
-      await refreshSystems();
-    } catch (err) {
-      alert(err.message || String(err));
+  $("#component-editor-input").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      saveComponentIfDirty().catch((err) => setComponentMeta(err.message, true));
     }
   });
 }
 
-function renderL1PromptPreview() {
-  const persona = $("#l1-prompt-input").value.trim() || L1_DEFAULT_PERSONA;
-  $("#l1-prompt-preview").innerHTML =
-    `${escapeHtml(persona)}\n\n` +
-    `<span class="l1-prompt-fixed">— always appended, not editable —\n${escapeHtml(L1_PROTOCOL)}</span>`;
+async function selectComponentKind(kind) {
+  if (kind === activeComponentKind) return;
+  await saveComponentIfDirty();
+  activeComponentKind = kind;
+  await loadActiveComponent();
+}
+
+async function refreshComponentEditor({ keepDirty = false } = {}) {
+  if (!currentSystemId) {
+    componentBaseline = "";
+    componentDirty = false;
+    componentMetaByKind = {};
+    const input = $("#component-editor-input");
+    componentLoading = true;
+    input.value = "";
+    input.disabled = true;
+    componentLoading = false;
+    $("#component-save-btn").disabled = true;
+    renderComponentKindTabs();
+    setComponentMeta("Select a system");
+    return;
+  }
+
+  const listed = await listComponents(currentSystemId);
+  componentMetaByKind = {};
+  for (const c of listed) componentMetaByKind[c.kind] = { bytes: c.bytes, updatedAt: c.updatedAt };
+
+  if (keepDirty && componentDirty) {
+    renderComponentKindTabs();
+    return;
+  }
+  await loadActiveComponent();
+}
+
+async function loadActiveComponent() {
+  if (!currentSystemId) return;
+  const input = $("#component-editor-input");
+  componentLoading = true;
+  try {
+    const comp = await getComponent(currentSystemId, activeComponentKind);
+    const content = comp?.content || "";
+    input.value = content;
+    input.disabled = false;
+    componentBaseline = content;
+    setComponentDirty(false);
+    const bytes = (content || "").length;
+    componentMetaByKind[activeComponentKind] = {
+      bytes,
+      updatedAt: comp?.updatedAt,
+    };
+    renderComponentKindTabs();
+    setComponentMeta(
+      comp?.updatedAt
+        ? `${activeComponentKind} · ${formatComponentBytes(bytes)} · updated ${new Date(comp.updatedAt).toLocaleString()}`
+        : `${activeComponentKind} · empty`
+    );
+  } catch (err) {
+    input.disabled = true;
+    setComponentMeta(err.message || String(err), true);
+  } finally {
+    componentLoading = false;
+  }
+}
+
+async function saveComponentIfDirty() {
+  if (!componentDirty || !currentSystemId) return false;
+  const content = $("#component-editor-input").value;
+  const record = await writeComponent(currentSystemId, activeComponentKind, content);
+  componentBaseline = content;
+  componentMetaByKind[activeComponentKind] = {
+    bytes: content.length,
+    updatedAt: record.updatedAt,
+  };
+  setComponentDirty(false);
+  setComponentMeta(
+    `${activeComponentKind} · ${formatComponentBytes(content.length)} · saved ${new Date(record.updatedAt).toLocaleString()}`
+  );
+  chrome.runtime.sendMessage({ type: "system.updated", systemId: currentSystemId, kind: activeComponentKind }).catch(
+    () => {}
+  );
+  return true;
+}
+
+function hostUrlForSystem(systemId) {
+  return chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(systemId)}`);
+}
+
+async function findHostTabs(systemId) {
+  const prefix = hostUrlForSystem(systemId);
+  const matches = (tab) => {
+    const url = tab.url || tab.pendingUrl || "";
+    return url === prefix || url.startsWith(`${prefix}&`) || url.startsWith(`${prefix}#`);
+  };
+  try {
+    const tabs = await chrome.tabs.query({ url: `${chrome.runtime.getURL("system-host.html")}*` });
+    const found = tabs.filter(matches);
+    if (found.length) return found;
+  } catch {
+    /* url pattern may be rejected; fall through */
+  }
+  const all = await chrome.tabs.query({});
+  return all.filter(matches);
+}
+
+function requestHostReload() {
+  if (!currentSystemId) return;
+  chrome.runtime.sendMessage({ type: "system.reload", systemId: currentSystemId }).catch(() => {});
+}
+
+async function reloadOpenHostTabs() {
+  requestHostReload();
+}
+
+async function renderSystemInTab() {
+  if (!currentSystemId) return;
+  await saveComponentIfDirty();
+  const url = hostUrlForSystem(currentSystemId);
+  const existing = await findHostTabs(currentSystemId);
+  if (existing.length) {
+    await chrome.tabs.remove(existing.map((tab) => tab.id));
+  }
+  await chrome.tabs.create({ url });
 }
 
 async function refreshSystems() {
@@ -1786,49 +1929,10 @@ function applyCurrentSystem() {
   const isBrowser = currentSystemId === BUILTIN_BROWSER_AGENT_ID;
   $("#browser-agent-run").classList.toggle("hidden", !isBrowser);
   $("#system-delete-btn").disabled = !system || !!system.isBuiltin;
-  $("#editor-level-badge").textContent = !system
-    ? ""
-    : system.level === 1
-      ? `Level 1 — LLM may edit: ${getEditableKinds(system).join(", ")}`
-      : "Level 2 — LLM has full control over all components";
 
-  $("#l1-config").classList.toggle("hidden", !system || system.level !== 1);
-  if (system && system.level === 1) {
-    const kinds = getEditableKinds(system);
-    document.querySelectorAll(".l1-kind-check").forEach((cb) => {
-      cb.checked = kinds.includes(cb.value);
-    });
-    $("#l1-prompt-input").value = system.systemPrompt || "";
-    renderL1PromptPreview();
-  }
-
-  const open = $("#system-open-link");
-  const compsLink = $("#system-components-link");
-  if (currentSystemId) {
-    const url = chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(currentSystemId)}`);
-    open.href = url;
-    open.classList.remove("hidden");
-    compsLink.href = chrome.runtime.getURL(`system-components.html?id=${encodeURIComponent(currentSystemId)}`);
-    compsLink.classList.remove("hidden");
-  } else {
-    open.removeAttribute("href");
-    open.classList.add("hidden");
-    compsLink.removeAttribute("href");
-    compsLink.classList.add("hidden");
-  }
-  reloadHomeFrame();
+  $("#system-render-btn").disabled = !currentSystemId;
+  refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
   refreshHistory();
-}
-
-function reloadHomeFrame() {
-  const frame = $("#system-home-frame");
-  if (!currentSystemId) {
-    frame.removeAttribute("src");
-    return;
-  }
-  const url = chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(currentSystemId)}`);
-  // Bust cache so component edits show up immediately
-  frame.src = `${url}&t=${Date.now()}`;
 }
 
 function wireAgentForm() {
@@ -1877,15 +1981,9 @@ function runEditorTask(task) {
   editing = true;
   $("#editor-run-btn").disabled = true;
   $("#run-btn").disabled = true;
-  const system = systems.find((s) => s.id === currentSystemId);
   const trace = $("#trace");
   trace.innerHTML = "";
-  addTraceEvent(
-    "event",
-    system?.level === 1
-      ? `Edit [${getEditableKinds(system).join(", ")}] (level 1): ${task}`
-      : `Edit system (level 2): ${task}`
-  );
+  addTraceEvent("event", `Edit system: ${task}`);
 
   editorPort = chrome.runtime.connect({ name: "system-editor" });
   editorPort.onMessage.addListener((event) => {
@@ -1898,7 +1996,8 @@ function runEditorTask(task) {
       finishEdit();
     } else if (event.type === "done") {
       finishEdit();
-      reloadHomeFrame();
+      refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
+      reloadOpenHostTabs().catch(() => {});
     }
   });
   editorPort.postMessage({ type: "run", task, systemId: currentSystemId });

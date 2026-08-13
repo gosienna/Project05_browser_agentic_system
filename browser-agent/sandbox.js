@@ -9,7 +9,7 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
 
-  if (msg.type === "load" && typeof msg.html === "string") {
+  if (msg.type === "load" && (typeof msg.html === "string" || typeof msg.script === "string" || typeof msg.ui === "string")) {
     loadSystem(msg);
     return;
   }
@@ -23,7 +23,7 @@ window.addEventListener("message", (event) => {
   }
 });
 
-function loadSystem({ html, css, ui, tools }) {
+function loadSystem({ html, css, script, ui }) {
   pending.forEach((p) => p.reject(new Error("System reloaded")));
   pending = new Map();
 
@@ -35,33 +35,19 @@ function loadSystem({ html, css, ui, tools }) {
   root.innerHTML = html || "";
 
   const api = createApi();
-
-  try {
-    // tools component may assign self.__agentTools
-    self.__agentTools = {};
-    if (tools && String(tools).trim()) {
-      const toolFn = new Function("api", `${tools}\n; return self.__agentTools;`);
-      const exported = toolFn(api);
-      self.__agentTools = exported && typeof exported === "object" ? exported : self.__agentTools || {};
-    }
-  } catch (err) {
-    console.error("[sandbox] tools error", err);
-    self.__agentTools = {};
-  }
-
-  // Expose api + tools to home UI scripts
   self.__agentApi = api;
 
+  const scriptSource = script ?? ui ?? "";
   try {
-    if (ui && String(ui).trim()) {
-      const uiFn = new Function("api", "tools", `${ui}`);
-      uiFn(api, self.__agentTools || {});
+    if (scriptSource && String(scriptSource).trim()) {
+      const scriptFn = new Function("api", `${scriptSource}`);
+      scriptFn(api);
     }
   } catch (err) {
-    console.error("[sandbox] ui error", err);
+    console.error("[sandbox] script error", err);
     root.insertAdjacentHTML(
       "beforeend",
-      `<pre style="color:#a02525;padding:12px;white-space:pre-wrap;">UI script error: ${escapeHtml(err.message)}</pre>`
+      `<pre style="color:#a02525;padding:12px;white-space:pre-wrap;">script error: ${escapeHtml(err.message)}</pre>`
     );
   }
 
@@ -92,11 +78,6 @@ function createApi() {
     scroll: (tabId, opts = {}) => call("scroll", { tabId, direction: opts.direction }),
     navigate: (tabId, url) => call("navigate", { tabId, url }),
     captureTab: (tabId) => call("captureTab", { tabId }),
-    runTool: async (name, args = {}) => {
-      const fn = self.__agentTools?.[name];
-      if (typeof fn !== "function") throw new Error(`Unknown tool "${name}"`);
-      return fn(args, createApi());
-    },
   };
 }
 

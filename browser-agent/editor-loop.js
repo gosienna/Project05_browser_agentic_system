@@ -1,5 +1,5 @@
-// Shared ReAct loop for the system editors (level 1 and level 2). Each level
-// supplies its own system prompt and tool map; the loop mechanics are identical.
+// Shared ReAct loop for the system editor. The editor supplies a system prompt
+// and tool map; the loop mechanics match agent.js.
 
 import { chat } from "./llm.js";
 import { extractJson } from "./agent.js";
