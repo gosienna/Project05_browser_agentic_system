@@ -1,8 +1,8 @@
 // Shared ReAct loop for the system editor. The editor supplies a system prompt
-// and tool map; the loop mechanics match agent.js.
+// and tool map; the loop mechanics match WebApp.js.
 
 import { chat } from "./llm.js";
-import { extractJson } from "./agent.js";
+import { extractJson } from "./WebApp.js";
 import { getMaxSteps } from "./agent-config.js";
 
 const TOOL_RESULT_CHARS = 8000;

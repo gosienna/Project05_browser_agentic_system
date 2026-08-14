@@ -89,7 +89,7 @@ export async function renderChatPromptPreview(request, settings) {
   }
 }
 
-/** Back-compat convenience wrapper used by agent.js and the system editors. */
+/** Back-compat convenience wrapper used by WebApp.js and the system editors. */
 export async function chat(messages, settings) {
   const request = {
     model: settings?.model,

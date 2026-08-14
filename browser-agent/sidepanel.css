@@ -238,12 +238,12 @@ main {
   resize: none;
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-#tab-agent .system-row,
-#tab-agent .model-badge,
-#tab-agent .browser-agent-run,
-#tab-agent .mode-label,
-#tab-agent #editor-form,
-#tab-agent .history-header {
+#tab-webapp .system-row,
+#tab-webapp .model-badge,
+#tab-webapp .browser-agent-run,
+#tab-webapp .mode-label,
+#tab-webapp #editor-form,
+#tab-webapp .history-header {
   flex-shrink: 0;
 }
 .mode-label {

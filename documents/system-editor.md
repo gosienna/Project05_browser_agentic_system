@@ -4,7 +4,7 @@
 
 The system editor is a **meta-agent**: instead of controlling browser tabs, it edits the
 components of an *agent system* (home UI) stored in IndexedDB.
-It runs the same ReAct-style loop as `agent.js` (`agent.md`), but its "tools" read/write
+It runs the same ReAct-style loop as `WebApp.js` (`WebApp.md`), but its "tools" read/write
 [`system-store.js`](../browser-agent/system-store.js) instead of browser-control actions.
 
 [`system-editor.js`](../browser-agent/system-editor.js) exposes `list_components`,
@@ -39,7 +39,7 @@ messages = [system: EDITOR_PROMPT, user: intro + task]
 
 for step in 0..MAX_STEPS(14):
   reply  = await chat(messages, settings)          // LLM call (llm.js)
-  parsed = extractJson(reply)                       // reuse agent.js's parser
+  parsed = extractJson(reply)                       // reuse WebApp.js's parser
 
   if parsed.final  → onEvent("final"); return
   if parsed.tool   → onEvent("thinking"), onEvent("tool_start")
@@ -58,7 +58,7 @@ for step in 0..MAX_STEPS(14):
   `onComponentWritten(kind)`, wired to a `system.updated` broadcast (see the components
   viewer below).
 
-This mirrors `agent.js`'s loop almost exactly (same `MAX_STEPS`, same JSON contract,
+This mirrors `WebApp.js`'s loop almost exactly (same `MAX_STEPS`, same JSON contract,
 same event vocabulary: `thinking` / `tool_start` / `tool_end` / `final` / `error`), just
 with a different tool surface.
 
@@ -72,7 +72,7 @@ request/response call. "Looping the LLM" means `runEditorLoop` keeps one growing
 JavaScript array, `messages`, and **resends the entire array from scratch on every
 `chat()` call** (`editor-loop.js`). The array is the only memory the loop has; there
 is no role/type other than `system` / `user` / `assistant` — tool results are appended as
-plain `user` messages, exactly like `agent.js` does.
+plain `user` messages, exactly like `WebApp.js` does.
 
 ### Turn-by-turn mechanics
 
@@ -81,7 +81,7 @@ plain `user` messages, exactly like `agent.js` does.
    all available component kinds.
 2. **Ask**: `chat(messages, settings)` serializes the *whole* array into one
    completion request and returns the assistant's raw text `reply`.
-3. **Parse**: `extractJson(reply)` (shared with `agent.js`) strips markdown
+3. **Parse**: `extractJson(reply)` (shared with `WebApp.js`) strips markdown
    fences if present and parses the first `{...}` blob.
    - **If parsing fails entirely** (`parsed` is `null`): the loop treats the raw
      text itself as the final answer and returns immediately — it does **not** push
@@ -286,7 +286,7 @@ service-worker proxying. It tracks modifications live via the broadcasts from §
 
 ## Summary
 
-The system editor is one ReAct loop (`editor-loop.js`, same shape as `agent.js`) whose
+The system editor is one ReAct loop (`editor-loop.js`, same shape as `WebApp.js`) whose
 "world" is IndexedDB component text instead of browser tabs
 ([`system-editor.js`](../browser-agent/system-editor.js) can read and write all three
 components). The interesting part isn't the loop itself — it's the surrounding wiring: the

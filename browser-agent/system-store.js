@@ -452,7 +452,7 @@ function browserAgentComponents() {
       content: `<div class="ba-home">
   <h1>Browser Agent</h1>
   <p>Built-in system for tab automation (read_page, click, navigate, …).</p>
-  <p>Use <strong>Run automation</strong> in the Agent tab to execute tasks on your open tabs.
+  <p>Use <strong>Run automation</strong> in the WebApp tab to execute tasks on your open tabs.
   Use <strong>Edit components</strong> to change this home page via the LLM.</p>
 </div>`,
       updatedAt: now,
@@ -482,7 +482,7 @@ function curvePlotterComponents() {
 
 const DEFAULT_HTML = `<div class="home">
   <h1>New agent system</h1>
-  <p>Ask the LLM in the Agent tab to build this home page.</p>
+  <p>Ask the LLM in the WebApp tab to build this home page.</p>
 </div>`;
 
 const DEFAULT_CSS = `body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #fafafa; color: #222; }

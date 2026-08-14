@@ -1,4 +1,4 @@
-// Side panel UI: Agent systems and Settings (incl. the ONNX model picker).
+// Side panel UI: WebApp systems and Settings (incl. the ONNX model picker).
 
 import {
   BUILTIN_BROWSER_AGENT_ID,
@@ -1684,7 +1684,7 @@ function renderModelBadge() {
   document.querySelectorAll(".model-badge").forEach((el) => (el.textContent = text));
 }
 
-// --- Agent tab (systems + automation + component editor) --------------------
+// --- WebApp tab (systems + automation + component editor) --------------------
 
 function wireSystemsUi() {
   $("#system-select").addEventListener("change", async (e) => {

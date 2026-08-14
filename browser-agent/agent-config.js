@@ -1,5 +1,5 @@
 // Shared step-limit config for every ReAct-style loop in the extension
-// (browser automation in agent.js, and the system editor in editor-loop.js).
+// (browser automation in WebApp.js, and the system editor in editor-loop.js).
 // A single source of truth avoids two hardcoded MAX_STEPS constants drifting
 // out of sync.
 

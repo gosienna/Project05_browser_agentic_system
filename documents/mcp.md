@@ -117,7 +117,7 @@ MCP does **not** replace LLM function calling. It sits **under** it.
 | Model → “call a tool” | Provider returns `tool_calls` or `call:…` text | `dialogueChatCompletion` → `normalizeAssistantToolCalls` |
 | Extension → run it | Map name + args to real code | `runDialogueTool` → `callMcpTool` → handler |
 
-### vs Automation agent (`agent.js`) — direct function map
+### vs Automation agent (`WebApp.js`) — direct function map
 
 The classic browser automation path is direct:
 
@@ -145,7 +145,7 @@ No registry, no `mcp.tools.list`, no message bridge.
 |----------|-------------------|------------|--------------------|----------------|
 | LLM function calling only (custom UI tool) | Yes | Only if registered on MCP server | No | Schema in session / form |
 | MCP workflow | Yes (filtered list) | Yes (handlers in registry) | Yes | `mcp/server.js` + `register-tools.js` |
-| Agent direct `tools[name]()` | No (prompt lists tools) | Yes | Agent settings | `agent.js` + `tools.js` |
+| Agent direct `tools[name]()` | No (prompt lists tools) | Yes | Agent settings | `WebApp.js` + `tools.js` |
 
 ---
 
@@ -174,4 +174,4 @@ sequenceDiagram
 ## Related docs
 
 - [`tools.md`](tools.md) — implementation of browser tools (`read_page`, `click`, etc.)
-- [`agent.md`](agent.md) — automation agent loop that calls `tools.js` directly (no MCP layer)
+- [`WebApp.md`](WebApp.md) — automation agent loop that calls `tools.js` directly (no MCP layer)

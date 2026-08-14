@@ -2,7 +2,7 @@
 
 How reasoning-capable models (Qwen3, DeepSeek-R1, Gemma 4 thinking mode, etc.) emit their internal chain-of-thought on each backend, and how the extension normalizes that into one display shape in Dialogue.
 
-This doc covers **model reasoning** only. It is separate from the Agent / System Editor **trace** `thinking` events, which come from JSON `thought` fields in the tool-calling loop (see [agent.md](./agent.md)).
+This doc covers **model reasoning** only. It is separate from the WebApp / System Editor **trace** `thinking` events, which come from JSON `thought` fields in the tool-calling loop (see [WebApp.md](./WebApp.md)).
 
 ---
 
@@ -228,7 +228,7 @@ All providers share the same UI path in [`dialogue/ui.js`](../browser-agent/dial
 
 **Message history for the next turn:** [`turnToMessage()`](../browser-agent/dialogue/ui.js) sends only `content` back to the model, not `reasoning` — avoids replaying chain-of-thought into subsequent requests.
 
-**Agent / automation:** [`llm.chat()`](../browser-agent/llm.js) returns normalized `content` only (no reasoning in the string returned to `agent.js`).
+**Agent / automation:** [`llm.chat()`](../browser-agent/llm.js) returns normalized `content` only (no reasoning in the string returned to `WebApp.js`).
 
 ---
 
@@ -251,7 +251,7 @@ All providers share the same UI path in [`dialogue/ui.js`](../browser-agent/dial
 The Automation and System Editor tabs show italic gray **thinking** lines in the trace panel. Those are **not** model chain-of-thought:
 
 ```javascript
-// agent.js / editor-loop.js — JSON tool loop only
+// WebApp.js / editor-loop.js — JSON tool loop only
 onEvent({ type: "thinking", content: parsed.thought || "" });
 ```
 

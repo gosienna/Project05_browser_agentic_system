@@ -1,4 +1,4 @@
-import { runAgent } from "./agent.js";
+import { runAgent } from "./WebApp.js";
 import { getMaxTokens } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";

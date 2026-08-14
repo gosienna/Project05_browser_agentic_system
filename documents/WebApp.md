@@ -1,14 +1,14 @@
-# Browser Agent Architecture (`agent.js`)
+# WebApp Architecture (`WebApp.js`)
 
 ## Overview
 
-`agent.js` implements the core **agentic loop** for a browser automation agent. It runs a multi-turn conversation between an LLM and a set of browser control tools, allowing the LLM to iteratively decide which tools to call and process their results until it completes the user's task.
+`WebApp.js` implements the core **agentic loop** for a browser automation agent. It runs a multi-turn conversation between an LLM and a set of browser control tools, allowing the LLM to iteratively decide which tools to call and process their results until it completes the user's task.
 
 ---
 
 ## Custom agent systems
 
-The Agent tab is a multi-system workspace. Each **agent system** is stored in IndexedDB (`agent-systems`) via [`system-store.js`](../browser-agent/system-store.js) with components:
+The WebApp tab is a multi-system workspace. Each **agent system** is stored in IndexedDB (`agent-systems`) via [`system-store.js`](../browser-agent/system-store.js) with components:
 
 | Kind | Role |
 |------|------|
@@ -19,7 +19,7 @@ The Agent tab is a multi-system workspace. Each **agent system** is stored in In
 - **Browser Agent** — classic tab automation; Run automation uses `runAgent()` + [`tools.js`](../browser-agent/tools.js).
 - **Curve Plotter** — demo home UI (cartesian plot of `y = x^2`) meant to be edited via the LLM.
 
-**Create:** `+` in the Agent tab → empty home stub + starter components.
+**Create:** `+` in the WebApp tab → empty home stub + starter components.
 
 **Home runtime:** [`system-host.html`](../browser-agent/system-host.html) embeds sandboxed [`sandbox.html`](../browser-agent/sandbox.html) (relaxed CSP) so LLM/user JS can run. The host loads components from IndexedDB and `postMessage`s them into the sandbox.
 
@@ -28,10 +28,10 @@ The Agent tab is a multi-system workspace. Each **agent system** is stored in In
 **Edit components (LLM):** [`system-editor.js`](../browser-agent/system-editor.js) is a ReAct loop over `list_components` / `read_component` / `write_component` / `reload_home`, wired on port `system-editor` from the side panel. Same `chat()` providers as the browser agent (ONNX / WebLLM / Ollama / API).
 
 ```
-Side panel Agent tab
+Side panel WebApp tab
   ├─ system select / + / home iframe (system-host → sandbox)
   ├─ Edit components → port "system-editor" → system-editor.js → system-store
-  └─ Run automation (Browser Agent only) → port "agent" → agent.js → tools.js
+  └─ Run automation (Browser Agent only) → port "agent" → WebApp.js → tools.js
 ```
 
 ---
@@ -268,7 +268,7 @@ Used by `sidepanel.js` to display agent progress in real-time.
 ## Integration with Other Modules
 
 ```
-┌─ agent.js ──────────────┐
+┌─ WebApp.js ─────────────┐
 │ Exports: runAgent()      │
 └────────┬────────────────┘
          │ calls
@@ -320,7 +320,7 @@ Agent stops and returns the final message.
 
 ## Summary
 
-`agent.js` is the **orchestrator** of an autonomous browser agent. It:
+`WebApp.js` is the **orchestrator** of an autonomous browser agent. It:
 1. Maintains a rolling conversation with an LLM
 2. Parses the LLM's JSON commands (tool name + arguments)
 3. Executes requested tools against the browser

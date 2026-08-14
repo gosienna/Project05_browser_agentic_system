@@ -1,6 +1,6 @@
 # Browser Agent Tools (`tools.js`)
 
-Browser-side tools invoked by the agent loop (`agent.js`). Each tool takes a single args object and returns a plain string/object result that gets fed back into the chat transcript.
+Browser-side tools invoked by the agent loop (`WebApp.js`). Each tool takes a single args object and returns a plain string/object result that gets fed back into the chat transcript.
 
 ---
 
