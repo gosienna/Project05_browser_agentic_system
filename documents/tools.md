@@ -1,6 +1,6 @@
-# Browser Agent Tools (`tools.js`)
+# Browser Tools (`dialogue/tools`)
 
-Browser-side tools invoked by the agent loop (`WebApp.js`). Each tool takes a single args object and returns a plain string/object result that gets fed back into the chat transcript.
+Browser-side tools invoked via MCP from Dialogue / the WebApp dock (and a subset via the sandbox `api` / [`tab-bridge.js`](../browser-agent/tab-bridge.js)). Each tool takes a single args object and returns a plain string/object result that gets fed back into the chat transcript.
 
 ---
 
@@ -8,7 +8,7 @@ Browser-side tools invoked by the agent loop (`WebApp.js`). Each tool takes a si
 
 ### `browser_snapshot({ tabId, target?, depth?, boxes?, maxChars = 14000 })`
 Capture an accessibility-style YAML snapshot of the page (Playwright MCP-inspired).
-- Injects [`tools/a11y/injected.js`](../browser-agent/tools/a11y/injected.js) and walks the DOM for roles, names, and states
+- Injects [`dialogue/tools/a11y/injected.js`](../browser-agent/dialogue/tools/a11y/injected.js) and walks the DOM for roles, names, and states
 - Assigns `data-ba-ref="eN"` on interactable elements; YAML lines include `[ref=eN]`
 - Returns `{ url, title, snapshot, refCount, generation }` (truncates `snapshot` when over `maxChars`)
 - Optional `target`: ref from a prior snapshot to capture a subtree only
@@ -169,7 +169,7 @@ Shared helper for all `chrome.scripting.executeScript` calls. Runs `func` in the
 
 | Category | Tools | Mechanism |
 |----------|-------|-----------|
-| **Accessibility snapshot / ref click** | `browser_snapshot`, `browser_click` | Injected [`tools/a11y/`](../browser-agent/tools/a11y/) script + background YAML renderer |
+| **Accessibility snapshot / ref click** | `browser_snapshot`, `browser_click` | Injected [`dialogue/tools/a11y/`](../browser-agent/dialogue/tools/a11y/) script + background YAML renderer |
 | **Page inspection/interaction** | `read_page`, `get_links`, `click`, `type_text`, `scroll` | `chrome.scripting.executeScript()` — injects and runs a function inside the tab's page context |
 | **Page HTML / DOM manipulation** | `get_page_html`, `modify_element`, `execute_script` | Same `executeScript` path via internal `runInTab()` |
 | **Tab management** | `list_tabs`, `open_tab`, `navigate` | `chrome.tabs.*` API — no script injection needed |
@@ -183,10 +183,10 @@ All tools requiring `tabId` validate it via `requireTabId()` before running, so 
 
 ## Sandbox `api` (custom agent systems)
 
-Home UI script for custom systems runs in [`sandbox.html`](../browser-agent/sandbox.html) and cannot call `chrome.*` directly. The host injects an `api` object bridged through [`tab-bridge.js`](../browser-agent/tab-bridge.js):
+Home UI script for custom systems runs in [`sandbox.html`](../browser-agent/WebApp/sandbox.html) and cannot call `chrome.*` directly. The host injects an `api` object bridged through [`tab-bridge.js`](../browser-agent/tab-bridge.js):
 
 `listTabs`, `getActiveTab`, `executeInTab`, `readPage`, `click`, `typeText`, `scroll`, `navigate`, `captureTab`
 
-`executeInTab` delegates to `execute_script` in [`tools/browser.js`](../browser-agent/tools/browser.js). The MCP/Agent tools `get_page_html`, `modify_element`, and `execute_script` are also available directly in Dialogue and Browser Agent automation.
+`executeInTab` delegates to `execute_script` in [`dialogue/tools/browser.js`](../browser-agent/dialogue/tools/browser.js). The MCP tools `get_page_html`, `modify_element`, and `execute_script` are also available directly in Dialogue and the WebApp dock.
 
 These reuse the same privileged paths as above and accept any open `tabId` (active or background), except `captureTab` which requires a visible tab.

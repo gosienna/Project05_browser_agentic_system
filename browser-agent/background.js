@@ -1,12 +1,10 @@
-import { runAgent } from "./WebApp.js";
 import { getMaxTokens } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
 import { migrateGeminiModelSettings } from "./gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
-import * as tools from "./tools/browser.js";
-import { runSystemEditor } from "./system-editor.js";
-import { BUILTIN_BROWSER_AGENT_ID, ensureSeeded, getSystem, saveConversation } from "./system-store.js";
+import { runSystemEditor } from "./WebApp/system-editor.js";
+import { ensureSeeded, getSystem } from "./WebApp/system-store.js";
 import { handleTabBridge } from "./tab-bridge.js";
 import { handleRagMessage } from "./rag/handlers.js";
 import { stripUnsupportedNativeTools } from "./webllm-models.js";
@@ -53,104 +51,35 @@ async function setSettings(patch) {
   return next;
 }
 
-function broadcastReload(systemId) {
-  chrome.runtime.sendMessage({ type: "system.reload", systemId }).catch(() => {});
-}
-
-function broadcastComponentUpdated(systemId, kind) {
-  chrome.runtime.sendMessage({ type: "system.updated", systemId, kind }).catch(() => {});
-}
-
-function broadcastConversationSaved(systemId) {
-  chrome.runtime.sendMessage({ type: "system.conversation", systemId }).catch(() => {});
-}
-
-async function persistConversation(meta) {
-  try {
-    await saveConversation(meta);
-    broadcastConversationSaved(meta.systemId);
-  } catch (err) {
-    console.error("[systems] save conversation failed", err);
-  }
-}
-
-// Long-lived port for classic browser automation runs.
+// Long-lived port for the unused system-editor ReAct loop (side panel uses Dialogue dock).
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === "agent") {
-    port.onMessage.addListener(async (msg) => {
-      if (msg?.type !== "run") return;
-      const settings = await getSettings();
-      const send = (event) => {
-        try {
-          port.postMessage(event);
-        } catch {
-          /* panel closed */
-        }
-      };
-
+  if (port.name !== "system-editor") return;
+  port.onMessage.addListener(async (msg) => {
+    if (msg?.type !== "run") return;
+    const settings = await getSettings();
+    const send = (event) => {
       try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        await runAgent({
-          task: msg.task,
-          settings,
-          tools,
-          tabId: activeTab?.id,
-          onEvent: send,
-          onComplete: ({ messages, final }) =>
-            persistConversation({
-              systemId: BUILTIN_BROWSER_AGENT_ID,
-              source: "automation",
-              task: msg.task,
-              messages,
-              final,
-            }),
-        });
-        send({ type: "done" });
-      } catch (err) {
-        send({ type: "error", message: err?.message || String(err) });
+        port.postMessage(event);
+      } catch {
+        /* panel closed */
       }
-    });
-    return;
-  }
+    };
 
-  if (port.name === "system-editor") {
-    port.onMessage.addListener(async (msg) => {
-      if (msg?.type !== "run") return;
-      const settings = await getSettings();
-      const send = (event) => {
-        try {
-          port.postMessage(event);
-        } catch {
-          /* panel closed */
-        }
-      };
-
-      try {
-        await ensureSeeded();
-        const system = await getSystem(msg.systemId);
-        if (!system) throw new Error(`Unknown system "${msg.systemId}"`);
-        await runSystemEditor({
-          systemId: msg.systemId,
-          task: msg.task,
-          settings,
-          onEvent: send,
-          onReloadHome: async () => broadcastReload(msg.systemId),
-          onComponentWritten: (kind) => broadcastComponentUpdated(msg.systemId, kind),
-          onComplete: ({ messages, final }) =>
-            persistConversation({
-              systemId: msg.systemId,
-              source: "editor",
-              task: msg.task,
-              messages,
-              final,
-            }),
-        });
-        send({ type: "done" });
-      } catch (err) {
-        send({ type: "error", message: err?.message || String(err) });
-      }
-    });
-  }
+    try {
+      await ensureSeeded();
+      const system = await getSystem(msg.systemId);
+      if (!system) throw new Error(`Unknown system "${msg.systemId}"`);
+      await runSystemEditor({
+        systemId: msg.systemId,
+        task: msg.task,
+        settings,
+        onEvent: send,
+      });
+      send({ type: "done" });
+    } catch (err) {
+      send({ type: "error", message: err?.message || String(err) });
+    }
+  });
 });
 
 async function markOnnxModelDownloaded(modelId) {
@@ -193,7 +122,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  if (msg.type === "system.reload" || msg.type === "system.updated" || msg.type === "system.conversation") {
+  if (msg.type === "system.reload" || msg.type === "system.updated") {
     // Broadcast-only; hosts/viewers/side panel listen. No response needed.
     return;
   }
@@ -282,6 +211,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           settings: merged,
           tabId: activeTab?.id,
           userQuery: msg.userQuery,
+          systemId: msg.systemId || merged.webAppSystemId,
         });
       }).then((result) => ({ result })),
       sendResponse

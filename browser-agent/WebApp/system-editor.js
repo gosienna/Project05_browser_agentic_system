@@ -2,14 +2,13 @@
 // agent system stored in IndexedDB.
 
 import { runEditorLoop } from "./editor-loop.js";
+import { COMPONENT_KINDS, getAllComponents, getSystem } from "./system-store.js";
 import {
-  COMPONENT_KINDS,
-  getAllComponents,
-  getComponent,
-  getSystem,
-  listComponents,
-  writeComponent,
-} from "./system-store.js";
+  list_components,
+  read_component,
+  reload_home,
+  write_component,
+} from "./tools/index.js";
 
 const EDITOR_PROMPT = `You are an agent-system editor with full control. You modify any component of the currently selected agent system in IndexedDB.
 
@@ -39,30 +38,16 @@ export async function runSystemEditor({
   task,
   settings,
   onEvent,
-  onReloadHome,
-  onComponentWritten,
   onComplete,
 }) {
   const system = await getSystem(systemId);
   if (!system) throw new Error(`Unknown system "${systemId}"`);
 
   const tools = {
-    list_components: () => listComponents(systemId),
-    read_component: async ({ kind }) => {
-      const comp = await getComponent(systemId, kind);
-      if (!comp) return { kind, content: "", error: "empty or missing" };
-      return { kind: comp.kind, content: comp.content, updatedAt: comp.updatedAt };
-    },
-    write_component: async ({ kind, content }) => {
-      if (content === undefined) throw new Error("write_component requires content");
-      const record = await writeComponent(systemId, kind, content);
-      if (typeof onComponentWritten === "function") await onComponentWritten(record.kind);
-      return { ok: true, kind: record.kind, bytes: record.content.length, updatedAt: record.updatedAt };
-    },
-    reload_home: async () => {
-      if (typeof onReloadHome === "function") await onReloadHome();
-      return { ok: true };
-    },
+    list_components: () => list_components({ systemId }),
+    read_component: ({ kind }) => read_component({ systemId, kind }),
+    write_component: ({ kind, content }) => write_component({ systemId, kind, content }),
+    reload_home: () => reload_home({ systemId }),
     get_all_components: () => getAllComponents(systemId),
   };
 

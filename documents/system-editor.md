@@ -4,15 +4,17 @@
 
 The system editor is a **meta-agent**: instead of controlling browser tabs, it edits the
 components of an *agent system* (home UI) stored in IndexedDB.
-It runs the same ReAct-style loop as `WebApp.js` (`WebApp.md`), but its "tools" read/write
-[`system-store.js`](../browser-agent/system-store.js) instead of browser-control actions.
 
-[`system-editor.js`](../browser-agent/system-editor.js) exposes `list_components`,
-`read_component`, `write_component`, and `reload_home` so the LLM can touch all three
-components. The generic loop lives in
-[`editor-loop.js`](../browser-agent/editor-loop.js). Both execute **inside the service
-worker** (`background.js`), not inside the side panel or any iframe — the side panel only
-drives them remotely over a `chrome.runtime` port.
+**Side-panel UI:** the WebApp tab docks the Dialogue chat on the right. The model edits
+components via MCP tools (`list_components`, `read_component`, `write_component`,
+`reload_home`) registered in [`mcp/register-tools.js`](../browser-agent/mcp/register-tools.js).
+Those handlers call [`system-store.js`](../browser-agent/WebApp/system-store.js) and broadcast
+`system.updated` / `system.reload` — the same refresh path as below.
+
+[`system-editor.js`](../browser-agent/WebApp/system-editor.js) still exposes the same four tools
+inside a ReAct loop (`editor-loop.js`) on port `system-editor`. That loop is unused from
+the current side panel (no `#editor-form`); it remains in the service worker as an
+alternate driver.
 
 ---
 
@@ -39,7 +41,7 @@ messages = [system: EDITOR_PROMPT, user: intro + task]
 
 for step in 0..MAX_STEPS(14):
   reply  = await chat(messages, settings)          // LLM call (llm.js)
-  parsed = extractJson(reply)                       // reuse WebApp.js's parser
+  parsed = extractJson(reply)                       // shared helper in WebApp/agent.js
 
   if parsed.final  → onEvent("final"); return
   if parsed.tool   → onEvent("thinking"), onEvent("tool_start")
@@ -58,7 +60,7 @@ for step in 0..MAX_STEPS(14):
   `onComponentWritten(kind)`, wired to a `system.updated` broadcast (see the components
   viewer below).
 
-This mirrors `WebApp.js`'s loop almost exactly (same `MAX_STEPS`, same JSON contract,
+This mirrors the classic JSON ReAct shape (same `MAX_STEPS`, same JSON contract,
 same event vocabulary: `thinking` / `tool_start` / `tool_end` / `final` / `error`), just
 with a different tool surface.
 
@@ -72,7 +74,7 @@ request/response call. "Looping the LLM" means `runEditorLoop` keeps one growing
 JavaScript array, `messages`, and **resends the entire array from scratch on every
 `chat()` call** (`editor-loop.js`). The array is the only memory the loop has; there
 is no role/type other than `system` / `user` / `assistant` — tool results are appended as
-plain `user` messages, exactly like `WebApp.js` does.
+plain `user` messages (JSON ReAct style).
 
 ### Turn-by-turn mechanics
 
@@ -81,7 +83,7 @@ plain `user` messages, exactly like `WebApp.js` does.
    all available component kinds.
 2. **Ask**: `chat(messages, settings)` serializes the *whole* array into one
    completion request and returns the assistant's raw text `reply`.
-3. **Parse**: `extractJson(reply)` (shared with `WebApp.js`) strips markdown
+3. **Parse**: `extractJson(reply)` (from `WebApp/agent.js`) strips markdown
    fences if present and parses the first `{...}` blob.
    - **If parsing fails entirely** (`parsed` is `null`): the loop treats the raw
      text itself as the final answer and returns immediately — it does **not** push
@@ -147,6 +149,16 @@ the eventual `final`/`done`.
 
 ## How it's wired to the Chrome extension surfaces
 
+The **live UI path** is the Dialogue dock on the WebApp tab: `mcp.tools.list` /
+`dialogue.tool.run` → MCP `list_components` / `read_component` / `write_component` /
+`reload_home` → `system-store.js` plus `system.updated` / `system.reload` broadcasts.
+`systemId` is the currently selected WebApp system (not a model argument). RAG tools are
+forced off in that dock.
+
+The ReAct port (`system-editor` → `runSystemEditor`) still exists in `background.js` but
+the side panel no longer connects to it (no `#editor-form`). Host/sandbox refresh after
+writes is unchanged:
+
 ```
 ┌─────────────────────┐   port "system-editor"   ┌──────────────────────────┐
 │ sidepanel.html       │  {run, task, systemId}   │ background.js            │
@@ -190,18 +202,12 @@ the eventual `final`/`done`.
 └─────────────────────┘
 ```
 
-### 1. `sidepanel.html` → `background.js`: long-lived port, not one-shot messages
+### 1. Alternate driver: `system-editor` port (unused from the side panel)
 
-`sidepanel.js` opens `chrome.runtime.connect({ name: "system-editor" })` and posts
-`{ type: "run", task, systemId }`. `background.js`'s `chrome.runtime.onConnect` listener
-(matching `port.name === "system-editor"`) owns the *entire* editor run: it loads
-settings, calls `runSystemEditor(...)`, and streams every `onEvent` back over the same
-port (`port.postMessage(event)`). The port stays open for the whole multi-step LLM loop;
-`sidepanel.js` renders each event into `#trace` and disables the editor/run buttons until
-`done`/`error`.
-
-This is the same pattern used for the classic browser-automation port (`"agent"`), just a
-second named port sharing the same service worker.
+`background.js` still accepts `chrome.runtime.connect({ name: "system-editor" })` and
+posts `{ type: "run", task, systemId }` into `runSystemEditor`. The current WebApp UI
+does not open that port; component edits go through Dialogue MCP instead. The port
+remains as an alternate ReAct driver sharing the same IndexedDB tools and broadcasts.
 
 ### 2. `background.js` is the only place the editor loop runs
 
@@ -214,24 +220,20 @@ never needs `tabBridge` for its own tool calls (only sandboxed home-UI code does
 
 When component writes happen and/or the LLM calls `reload_home`:
 
-- **Write broadcast** — every successful `write_component` fires the
-  injected `onComponentWritten(kind)`, which `background.js` wires to
-  `chrome.runtime.sendMessage({type:"system.updated", systemId, kind})`. The components
-  viewer (`system-components.html`, see §7) listens for this to refresh and mark the
+- **Write broadcast** — every successful MCP (or ReAct) `write_component` sends
+  `{type:"system.updated", systemId, kind}`. The components viewer
+  (`system-components.html`, see §7) listens for this to refresh and mark the
   changed tab — it fires per write, so the user can watch edits land mid-run.
 - **Reload broadcast** — `reload_home` fires `chrome.runtime.sendMessage({type:
   "system.reload", systemId})`. Any open `system-host.html` document with a matching
   `systemId` (it registered its own `chrome.runtime.onMessage` listener) re-reads
   components straight from IndexedDB and `postMessage`s a fresh `{type:"load", html,
   css, script, tools}` payload into its `sandbox.html` iframe.
-- **Side-panel path** — independently, when `sidepanel.js` receives the port's `"done"`
-  event, it calls `reloadHomeFrame()`, which re-points `#system-home-frame`'s `src` to
-  `system-host.html?id=…&t=<timestamp>` (cache-busted), forcing a full reload of the host
-  document (and, transitively, a fresh `sandbox.html`).
+- **Side-panel path** — the WebApp component editor listens for `system.updated` /
+  `system.reload` and refreshes the kind tabs / textarea. Open `system-host.html` tabs
+  reload from the same broadcast.
 
-Multiple paths can fire for the same edit (mid-run `reload_home` calls hit the broadcast
-path; the final `done` hits the side-panel path), which is redundant but harmless since
-`loadComponents()` is idempotent.
+Broadcasts are idempotent: `loadComponents()` can run more than once for the same write.
 
 ### 4. `system-host.html` never talks to the service worker for reads
 
@@ -265,7 +267,7 @@ directly from the service worker and `offscreen.html` is never created.
 ### 7. `system-components.html` — the per-system components viewer
 
 Each agent system has a read-only viewer page,
-[`system-components.html`](../browser-agent/system-components.html) (opened via the
+[`system-components.html`](../browser-agent/WebApp/system-components.html) (opened via the
 **Components** link next to the system selector in the side panel, URL
 `system-components.html?id=<systemId>`). It renders **one tab per component kind**
 (`html` / `css` / `script`), each showing the kind's byte size in the tab
@@ -286,14 +288,14 @@ service-worker proxying. It tracks modifications live via the broadcasts from §
 
 ## Summary
 
-The system editor is one ReAct loop (`editor-loop.js`, same shape as `WebApp.js`) whose
+The system editor is one ReAct loop (`editor-loop.js`, JSON ReAct style) whose
 "world" is IndexedDB component text instead of browser tabs
-([`system-editor.js`](../browser-agent/system-editor.js) can read and write all three
-components). The interesting part isn't the loop itself — it's the surrounding wiring: the
-service worker is the only privileged, long-running compute context (owns the LLM loop,
-the IndexedDB writes, the tab bridge, and the optional ONNX offscreen relay);
-`sidepanel.html` is a thin remote control over a `chrome.runtime` port;
-`system-host.html` is an independent IndexedDB reader that re-renders on a
-`system.reload` broadcast; `system-components.html` is a per-kind tabbed viewer that
+([`system-editor.js`](../browser-agent/WebApp/system-editor.js) can read and write all three
+components). The side panel drives those tools through Dialogue MCP on the WebApp dock;
+the ReAct port is unused from the UI. The interesting part isn't the loop itself — it's
+the surrounding wiring: the service worker is the only privileged, long-running compute
+context (owns MCP handlers, IndexedDB writes, the tab bridge, and the optional ONNX
+offscreen relay); `system-host.html` is an independent IndexedDB reader that re-renders
+on a `system.reload` broadcast; `system-components.html` is a per-kind tabbed viewer that
 tracks each write via `system.updated` broadcasts; and `sandbox.html` is the sandboxed
-execution target for whatever html/css/script code the editor just wrote.
+execution target for whatever html/css/script code was just written.

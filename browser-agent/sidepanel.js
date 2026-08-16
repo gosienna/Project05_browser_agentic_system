@@ -1,21 +1,7 @@
 // Side panel UI: WebApp systems and Settings (incl. the ONNX model picker).
 
-import {
-  BUILTIN_BROWSER_AGENT_ID,
-  BUILTIN_CURVE_PLOTTER_ID,
-  COMPONENT_KINDS,
-  clearConversations,
-  createSystem,
-  deleteConversation,
-  deleteSystem,
-  ensureSeeded,
-  getComponent,
-  getConversation,
-  listComponents,
-  listConversations,
-  listSystems,
-  writeComponent,
-} from "./system-store.js";
+import { createDialoguePanel } from "./dialogue/index.js";
+import { createWebAppPanel } from "./WebApp/ui.js";
 import {
   DEFAULT_MAX_STEPS,
   DEFAULT_MAX_TOKENS,
@@ -58,7 +44,6 @@ import {
   listNvidiaNimModels,
   nvidiaNimModelLabel,
 } from "./nvidia-nim-models.js";
-import { createDialoguePanel } from "./dialogue/index.js";
 import {
   deleteOllamaModel,
   fetchOllamaCatalog,
@@ -105,19 +90,9 @@ let ollamaPullAbort = null;
 let ollamaPulling = false;
 let ollamaSearchTimer = null;
 const OLLAMA_CATALOG_PAGE = 40;
-let agentPort = null;
-let editorPort = null;
-let running = false;
-let editing = false;
 let lastKnownDevice = null;
 let dialoguePanel = null;
-let systems = [];
-let currentSystemId = null;
-let activeComponentKind = COMPONENT_KINDS[0];
-let componentBaseline = "";
-let componentDirty = false;
-let componentLoading = false;
-let componentMetaByKind = {};
+let webAppPanel = null;
 /** @type {Map<string, object>} client-side cache of engine.contextEstimate results, keyed by model id. */
 const contextEstimateCache = new Map();
 
@@ -140,15 +115,19 @@ async function init() {
   wireOnboarding();
   wireSettingsForm();
   wireSettingsModal();
-  wireAgentForm();
-  wireEditorForm();
-  wireSystemsUi();
-  wireComponentEditor();
+  webAppPanel = createWebAppPanel({
+    $,
+    onSystemChanged() {
+      dialoguePanel?.onWebAppContextChanged?.();
+    },
+  });
+  webAppPanel.wire();
   dialoguePanel = createDialoguePanel({
     $,
     sendMessage,
     getSettings: () => settings,
     saveSettings,
+    getCurrentSystemId: () => webAppPanel.getCurrentSystemId(),
     getRegistry: () => {
       const p = settings.provider || "onnx";
       if (p === "webllm") return webllmRegistry;
@@ -177,7 +156,6 @@ async function init() {
     escapeHtml,
   });
   dialoguePanel.wire();
-  wireHistory();
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.target === "onnx-progress") onOnnxProgress(msg);
@@ -190,16 +168,8 @@ async function init() {
       downloadedWebllmModels = { ...downloadedWebllmModels, [msg.model]: true };
       dialoguePanel?.onSettingsChanged();
     }
-    if (msg?.type === "system.reload" && msg.systemId === currentSystemId) {
-      refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
-    }
-    if (msg?.type === "system.updated" && msg.systemId === currentSystemId) {
-      refreshComponentEditor({ keepDirty: true }).catch((err) =>
-        setComponentMeta(err.message, true)
-      );
-    }
-    if (msg?.type === "system.conversation" && msg.systemId === currentSystemId) {
-      refreshHistory();
+    if (msg?.type === "system.reload" || msg?.type === "system.updated") {
+      webAppPanel?.onRuntimeMessage(msg);
     }
   });
 
@@ -210,8 +180,7 @@ async function init() {
     applySettingsToForm();
   }
 
-  renderModelBadge();
-  await refreshSystems();
+  await webAppPanel.refreshSystems();
 }
 
 /** Remote providers can run for minutes; call from the panel to avoid MV3 message timeouts. */
@@ -256,16 +225,22 @@ async function sendMessage(msg) {
 
 // --- Tabs -----------------------------------------------------------------
 
+function applySidepanelTab(tab) {
+  document.body.dataset.tab = tab;
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $("#tab-webapp")?.classList.toggle("active", tab === "webapp");
+  const dialogue = $("#tab-dialogue");
+  dialogue?.classList.toggle("active", tab === "dialogue");
+  dialogue?.classList.toggle("webapp-dock", tab === "webapp");
+  dialoguePanel?.onTabActivate();
+}
+
 function wireTabs() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
-      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
-      if (btn.dataset.tab === "dialogue") {
-        dialoguePanel?.onTabActivate();
-      }
-    });
+    btn.addEventListener("click", () => applySidepanelTab(btn.dataset.tab));
   });
+  const initial = document.querySelector(".tab-btn.active")?.dataset.tab || "webapp";
+  applySidepanelTab(initial);
 }
 
 // --- Settings modal ---------------------------------------------------------
@@ -596,7 +571,6 @@ function renderGeminiModelCatalog() {
       if (modelInput) modelInput.value = m.id;
       applyThinkingToggleUi();
       renderGeminiModelCatalog();
-      renderModelBadge();
       dialoguePanel?.onSettingsChanged();
     });
     actions.appendChild(btn);
@@ -669,7 +643,6 @@ function renderOpenAiModelCatalog() {
       if (modelInput) modelInput.value = m.id;
       applyThinkingToggleUi();
       renderOpenAiModelCatalog();
-      renderModelBadge();
       dialoguePanel?.onSettingsChanged();
     });
     actions.appendChild(btn);
@@ -837,7 +810,6 @@ function applySettingsToForm() {
   if (isGemini) renderGeminiModelCatalog();
   if (isOpenAi) renderOpenAiModelCatalog();
   applyThinkingToggleUi();
-  renderModelBadge();
   refreshRagEmbedModelOptions();
   dialoguePanel?.onSettingsChanged();
 }
@@ -1048,7 +1020,6 @@ function renderOllamaRegistry() {
       btn.addEventListener("click", async () => {
         await saveSettings({ model: m.id });
         renderOllamaRegistry();
-        renderModelBadge();
       });
     } else {
       btn.textContent = "Pull";
@@ -1133,7 +1104,6 @@ async function startOllamaPull(modelId) {
     await saveSettings({ model: variants[0] || pullId });
     wrap?.classList.add("hidden");
     await refreshOllamaSettings();
-    renderModelBadge();
   } catch (err) {
     if (err.name === "AbortError") {
       $("#ollama-progress-label").textContent = "Pull cancelled.";
@@ -1150,7 +1120,6 @@ async function startOllamaPull(modelId) {
 
 async function saveSettings(patch) {
   settings = await sendMessage({ type: "settings.set", patch });
-  renderModelBadge();
   dialoguePanel?.onSettingsChanged();
   return settings;
 }
@@ -1173,7 +1142,6 @@ async function refreshOnnxSettings() {
       : "IndexedDB cache: empty";
     registry = statusRes.registry || registry;
     lastKnownDevice = statusRes.device || lastKnownDevice;
-    renderModelBadge();
   }
 
   if (registry.length === 0) {
@@ -1238,7 +1206,6 @@ async function refreshWebllmSettings() {
         ? `${catalogCount} models in catalog (IndexedDB cache empty)`
         : "IndexedDB cache: empty";
     lastKnownDevice = statusRes.device === "webgpu" ? "webgpu" : lastKnownDevice;
-    renderModelBadge();
   }
 
   if (webllmRegistry.length === 0) {
@@ -1590,7 +1557,6 @@ function startOnnxDownload(modelId, task) {
         $("#onnx-progress-wrap").classList.add("hidden");
       }
       await refreshOnnxSettings();
-      renderModelBadge();
     })
     .catch((err) => {
       // e.g. "The message port closed before a response was received" if the
@@ -1667,463 +1633,6 @@ async function testConnection() {
   } catch (err) {
     out.textContent = `✗ ${err.message}`;
   }
-}
-
-function renderModelBadge() {
-  const provider = settings.provider || "onnx";
-  const model =
-    provider === "onnx"
-      ? settings.onnxModel
-      : provider === "webllm"
-        ? settings.webllmModel
-        : settings.model;
-  const shortModel = (model || "no model").split("/").pop();
-  const deviceSuffix =
-    (provider === "onnx" || provider === "webllm") && lastKnownDevice ? ` · ${lastKnownDevice}` : "";
-  const text = `${provider} · ${shortModel}${deviceSuffix}`;
-  document.querySelectorAll(".model-badge").forEach((el) => (el.textContent = text));
-}
-
-// --- WebApp tab (systems + automation + component editor) --------------------
-
-function wireSystemsUi() {
-  $("#system-select").addEventListener("change", async (e) => {
-    await saveComponentIfDirty();
-    currentSystemId = e.target.value;
-    await chrome.storage.local.set({ currentSystemId });
-    applyCurrentSystem();
-  });
-  $("#system-add-btn").addEventListener("click", async () => {
-    const name = prompt("Name for the new agent system:", "My system");
-    if (name == null) return;
-    try {
-      await saveComponentIfDirty();
-      const system = await createSystem(name);
-      currentSystemId = system.id;
-      await chrome.storage.local.set({ currentSystemId });
-      await refreshSystems();
-    } catch (err) {
-      alert(err.message || String(err));
-    }
-  });
-  $("#system-delete-btn").addEventListener("click", async () => {
-    const system = systems.find((s) => s.id === currentSystemId);
-    if (!system || system.isBuiltin) {
-      alert("Built-in systems cannot be deleted.");
-      return;
-    }
-    if (!confirm(`Delete system "${system.name}"?`)) return;
-    try {
-      await deleteSystem(currentSystemId);
-      currentSystemId = BUILTIN_CURVE_PLOTTER_ID;
-      await chrome.storage.local.set({ currentSystemId });
-      await refreshSystems();
-    } catch (err) {
-      alert(err.message || String(err));
-    }
-  });
-  $("#system-render-btn").addEventListener("click", () => {
-    renderSystemInTab().catch((err) => alert(err.message || String(err)));
-  });
-}
-
-function formatComponentBytes(n) {
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${n} B`;
-}
-
-function setComponentMeta(text, isError = false) {
-  const el = $("#component-meta");
-  el.textContent = text;
-  el.classList.toggle("error", isError);
-}
-
-function setComponentDirty(dirty) {
-  componentDirty = dirty;
-  $("#component-save-btn").disabled = !dirty || !currentSystemId;
-  renderComponentKindTabs();
-}
-
-function renderComponentKindTabs() {
-  const tabs = $("#component-kind-tabs");
-  tabs.innerHTML = "";
-  for (const kind of COMPONENT_KINDS) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `component-kind-tab${kind === activeComponentKind ? " active" : ""}${
-      kind === activeComponentKind && componentDirty ? " dirty" : ""
-    }`;
-    btn.setAttribute("role", "tab");
-    btn.setAttribute("aria-selected", kind === activeComponentKind ? "true" : "false");
-    const bytes = componentMetaByKind[kind]?.bytes ?? 0;
-    btn.innerHTML = `${kind}<span class="bytes">${formatComponentBytes(bytes)}</span>`;
-    btn.addEventListener("click", () => selectComponentKind(kind));
-    tabs.appendChild(btn);
-  }
-}
-
-function wireComponentEditor() {
-  renderComponentKindTabs();
-  $("#component-editor-input").addEventListener("input", () => {
-    if (componentLoading) return;
-    setComponentDirty($("#component-editor-input").value !== componentBaseline);
-  });
-  $("#component-save-btn").addEventListener("click", () => {
-    saveComponentIfDirty().catch((err) => setComponentMeta(err.message, true));
-  });
-  $("#component-editor-input").addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-      e.preventDefault();
-      saveComponentIfDirty().catch((err) => setComponentMeta(err.message, true));
-    }
-  });
-}
-
-async function selectComponentKind(kind) {
-  if (kind === activeComponentKind) return;
-  await saveComponentIfDirty();
-  activeComponentKind = kind;
-  await loadActiveComponent();
-}
-
-async function refreshComponentEditor({ keepDirty = false } = {}) {
-  if (!currentSystemId) {
-    componentBaseline = "";
-    componentDirty = false;
-    componentMetaByKind = {};
-    const input = $("#component-editor-input");
-    componentLoading = true;
-    input.value = "";
-    input.disabled = true;
-    componentLoading = false;
-    $("#component-save-btn").disabled = true;
-    renderComponentKindTabs();
-    setComponentMeta("Select a system");
-    return;
-  }
-
-  const listed = await listComponents(currentSystemId);
-  componentMetaByKind = {};
-  for (const c of listed) componentMetaByKind[c.kind] = { bytes: c.bytes, updatedAt: c.updatedAt };
-
-  if (keepDirty && componentDirty) {
-    renderComponentKindTabs();
-    return;
-  }
-  await loadActiveComponent();
-}
-
-async function loadActiveComponent() {
-  if (!currentSystemId) return;
-  const input = $("#component-editor-input");
-  componentLoading = true;
-  try {
-    const comp = await getComponent(currentSystemId, activeComponentKind);
-    const content = comp?.content || "";
-    input.value = content;
-    input.disabled = false;
-    componentBaseline = content;
-    setComponentDirty(false);
-    const bytes = (content || "").length;
-    componentMetaByKind[activeComponentKind] = {
-      bytes,
-      updatedAt: comp?.updatedAt,
-    };
-    renderComponentKindTabs();
-    setComponentMeta(
-      comp?.updatedAt
-        ? `${activeComponentKind} · ${formatComponentBytes(bytes)} · updated ${new Date(comp.updatedAt).toLocaleString()}`
-        : `${activeComponentKind} · empty`
-    );
-  } catch (err) {
-    input.disabled = true;
-    setComponentMeta(err.message || String(err), true);
-  } finally {
-    componentLoading = false;
-  }
-}
-
-async function saveComponentIfDirty() {
-  if (!componentDirty || !currentSystemId) return false;
-  const content = $("#component-editor-input").value;
-  const record = await writeComponent(currentSystemId, activeComponentKind, content);
-  componentBaseline = content;
-  componentMetaByKind[activeComponentKind] = {
-    bytes: content.length,
-    updatedAt: record.updatedAt,
-  };
-  setComponentDirty(false);
-  setComponentMeta(
-    `${activeComponentKind} · ${formatComponentBytes(content.length)} · saved ${new Date(record.updatedAt).toLocaleString()}`
-  );
-  chrome.runtime.sendMessage({ type: "system.updated", systemId: currentSystemId, kind: activeComponentKind }).catch(
-    () => {}
-  );
-  return true;
-}
-
-function hostUrlForSystem(systemId) {
-  return chrome.runtime.getURL(`system-host.html?id=${encodeURIComponent(systemId)}`);
-}
-
-async function findHostTabs(systemId) {
-  const prefix = hostUrlForSystem(systemId);
-  const matches = (tab) => {
-    const url = tab.url || tab.pendingUrl || "";
-    return url === prefix || url.startsWith(`${prefix}&`) || url.startsWith(`${prefix}#`);
-  };
-  try {
-    const tabs = await chrome.tabs.query({ url: `${chrome.runtime.getURL("system-host.html")}*` });
-    const found = tabs.filter(matches);
-    if (found.length) return found;
-  } catch {
-    /* url pattern may be rejected; fall through */
-  }
-  const all = await chrome.tabs.query({});
-  return all.filter(matches);
-}
-
-function requestHostReload() {
-  if (!currentSystemId) return;
-  chrome.runtime.sendMessage({ type: "system.reload", systemId: currentSystemId }).catch(() => {});
-}
-
-async function reloadOpenHostTabs() {
-  requestHostReload();
-}
-
-async function renderSystemInTab() {
-  if (!currentSystemId) return;
-  await saveComponentIfDirty();
-  const url = hostUrlForSystem(currentSystemId);
-  const existing = await findHostTabs(currentSystemId);
-  if (existing.length) {
-    await chrome.tabs.remove(existing.map((tab) => tab.id));
-  }
-  await chrome.tabs.create({ url });
-}
-
-async function refreshSystems() {
-  await ensureSeeded();
-  systems = await listSystems();
-  const { currentSystemId: stored } = await chrome.storage.local.get("currentSystemId");
-  currentSystemId =
-    stored && systems.some((s) => s.id === stored)
-      ? stored
-      : systems.find((s) => s.id === BUILTIN_CURVE_PLOTTER_ID)?.id || systems[0]?.id || null;
-
-  const select = $("#system-select");
-  select.innerHTML = "";
-  for (const s of systems) {
-    const opt = document.createElement("option");
-    opt.value = s.id;
-    opt.textContent = s.isBuiltin ? `${s.name}` : s.name;
-    select.appendChild(opt);
-  }
-  if (currentSystemId) select.value = currentSystemId;
-  applyCurrentSystem();
-}
-
-function applyCurrentSystem() {
-  const system = systems.find((s) => s.id === currentSystemId);
-  const isBrowser = currentSystemId === BUILTIN_BROWSER_AGENT_ID;
-  $("#browser-agent-run").classList.toggle("hidden", !isBrowser);
-  $("#system-delete-btn").disabled = !system || !!system.isBuiltin;
-
-  $("#system-render-btn").disabled = !currentSystemId;
-  refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
-  refreshHistory();
-}
-
-function wireAgentForm() {
-  $("#agent-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const task = $("#task-input").value.trim();
-    if (!task || running || editing) return;
-    runAgentTask(task);
-  });
-}
-
-function wireEditorForm() {
-  $("#editor-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const task = $("#editor-input").value.trim();
-    if (!task || editing || running || !currentSystemId) return;
-    runEditorTask(task);
-  });
-}
-
-function runAgentTask(task) {
-  running = true;
-  $("#run-btn").disabled = true;
-  $("#editor-run-btn").disabled = true;
-  const trace = $("#trace");
-  trace.innerHTML = "";
-  addTraceEvent("event", `Automation: ${task}`);
-
-  agentPort = chrome.runtime.connect({ name: "agent" });
-  agentPort.onMessage.addListener((event) => {
-    if (event.type === "thinking") addTraceEvent("thinking", event.content);
-    else if (event.type === "tool_start") addTraceEvent("tool", `→ ${event.tool}(${JSON.stringify(event.args)})`);
-    else if (event.type === "tool_end") addTraceEvent("tool", `← ${event.tool}: ${truncateForDisplay(event.result)}`);
-    else if (event.type === "final") addTraceEvent("final", event.content);
-    else if (event.type === "error") {
-      addTraceEvent("error", event.message);
-      finishRun();
-    } else if (event.type === "done") {
-      finishRun();
-    }
-  });
-  agentPort.postMessage({ type: "run", task });
-}
-
-function runEditorTask(task) {
-  editing = true;
-  $("#editor-run-btn").disabled = true;
-  $("#run-btn").disabled = true;
-  const trace = $("#trace");
-  trace.innerHTML = "";
-  addTraceEvent("event", `Edit system: ${task}`);
-
-  editorPort = chrome.runtime.connect({ name: "system-editor" });
-  editorPort.onMessage.addListener((event) => {
-    if (event.type === "thinking") addTraceEvent("thinking", event.content);
-    else if (event.type === "tool_start") addTraceEvent("tool", `→ ${event.tool}(${JSON.stringify(event.args)})`);
-    else if (event.type === "tool_end") addTraceEvent("tool", `← ${event.tool}: ${truncateForDisplay(event.result)}`);
-    else if (event.type === "final") addTraceEvent("final", event.content);
-    else if (event.type === "error") {
-      addTraceEvent("error", event.message);
-      finishEdit();
-    } else if (event.type === "done") {
-      finishEdit();
-      refreshComponentEditor().catch((err) => setComponentMeta(err.message, true));
-      reloadOpenHostTabs().catch(() => {});
-    }
-  });
-  editorPort.postMessage({ type: "run", task, systemId: currentSystemId });
-}
-
-function finishRun() {
-  running = false;
-  $("#run-btn").disabled = false;
-  $("#editor-run-btn").disabled = editing;
-  agentPort?.disconnect();
-  agentPort = null;
-}
-
-function finishEdit() {
-  editing = false;
-  $("#editor-run-btn").disabled = false;
-  $("#run-btn").disabled = running;
-  editorPort?.disconnect();
-  editorPort = null;
-}
-
-function addTraceEvent(cls, text) {
-  const div = document.createElement("div");
-  div.className = `event ${cls}`;
-  div.textContent = text;
-  $("#trace").appendChild(div);
-  $("#trace").scrollTop = $("#trace").scrollHeight;
-}
-
-function truncateForDisplay(value) {
-  const str = typeof value === "string" ? value : JSON.stringify(value);
-  return str.length > 400 ? str.slice(0, 400) + "…" : str;
-}
-
-// --- Conversation history (per-system LLM transcripts) ----------------------
-
-function wireHistory() {
-  $("#history-clear-btn").addEventListener("click", async () => {
-    if (!currentSystemId) return;
-    const system = systems.find((s) => s.id === currentSystemId);
-    if (!confirm(`Delete all stored conversations for "${system?.name || "this system"}"?`)) return;
-    await clearConversations(currentSystemId);
-    await refreshHistory();
-  });
-  $("#history-modal-close-btn").addEventListener("click", closeTranscript);
-  $("#history-modal").addEventListener("click", (e) => {
-    if (e.target.id === "history-modal") closeTranscript();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("#history-modal").classList.contains("hidden")) closeTranscript();
-  });
-}
-
-async function refreshHistory() {
-  const list = $("#history-list");
-  if (!list || !currentSystemId) return;
-  const items = await listConversations(currentSystemId);
-  list.innerHTML = "";
-  $("#history-clear-btn").disabled = items.length === 0;
-
-  if (items.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "history-empty";
-    empty.textContent = "No runs stored yet. Automation and editor runs are saved here.";
-    list.appendChild(empty);
-    return;
-  }
-
-  for (const item of items) {
-    const row = document.createElement("div");
-    row.className = "history-item";
-
-    const main = document.createElement("button");
-    main.type = "button";
-    main.className = "history-item-main";
-    const tag =
-      item.source === "automation" ? "Automation" : item.kinds?.length ? `Edit · ${item.kinds.join(", ")}` : "Edit";
-    main.innerHTML = `
-      <span class="history-item-task">${escapeHtml(item.task || "(no task)")}</span>
-      <span class="history-item-meta">${tag} · ${formatTime(item.createdAt)} · ${item.messageCount} msgs</span>
-    `;
-    main.addEventListener("click", () => openTranscript(item.id));
-
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "history-item-del icon-btn";
-    del.title = "Delete this run";
-    del.textContent = "🗑";
-    del.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      await deleteConversation(item.id);
-      await refreshHistory();
-    });
-
-    row.appendChild(main);
-    row.appendChild(del);
-    list.appendChild(row);
-  }
-}
-
-async function openTranscript(id) {
-  const conv = await getConversation(id);
-  if (!conv) return;
-  const body = $("#history-modal-body");
-  body.innerHTML = "";
-  $("#history-modal-title").textContent = conv.task ? truncateForDisplay(conv.task) : "Transcript";
-
-  for (const m of conv.messages || []) {
-    const block = document.createElement("div");
-    block.className = `transcript-msg role-${m.role || "unknown"}`;
-    const label = document.createElement("div");
-    label.className = "transcript-role";
-    label.textContent = m.role || "unknown";
-    const content = document.createElement("pre");
-    content.className = "transcript-content";
-    content.textContent = typeof m.content === "string" ? m.content : JSON.stringify(m.content, null, 2);
-    block.appendChild(label);
-    block.appendChild(content);
-    body.appendChild(block);
-  }
-
-  $("#history-modal").classList.remove("hidden");
-}
-
-function closeTranscript() {
-  $("#history-modal").classList.add("hidden");
 }
 
 function formatTime(ts) {

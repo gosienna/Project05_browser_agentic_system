@@ -2,7 +2,7 @@
 // object (always includes tabId when relevant) and returns a plain
 // string/object result suitable for feeding back into the chat transcript.
 
-import { ensureOffscreenDocument } from "../llm.js";
+import { ensureOffscreenDocument } from "../../llm.js";
 export { browser_snapshot, browser_click } from "./a11y/index.js";
 
 const DEFAULT_PAGE_HTML_CHARS = 14000;

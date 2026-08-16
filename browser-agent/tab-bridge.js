@@ -1,6 +1,6 @@
 // Privileged tab APIs for sandbox tools (called from background).
 
-import * as tools from "./tools/browser.js";
+import * as tools from "./dialogue/tools/index.js";
 
 export async function handleTabBridge(msg) {
   const op = msg?.op;

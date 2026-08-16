@@ -1,7 +1,7 @@
 // Internal protocol: every provider is consumed through the OpenAI
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
-import { toAnthropicTools, toGeminiTools } from "./tools/schema.js";
+import { toAnthropicTools, toGeminiTools } from "./dialogue/tools/schema.js";
 import { getMaxTokens, resolveMaxTokens } from "./agent-config.js";
 import {
   isNvidiaNimProvider,

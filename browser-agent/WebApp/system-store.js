@@ -16,7 +16,8 @@ export function normalizeComponentKind(kind) {
   return kind === "ui" ? "script" : kind;
 }
 
-export const BUILTIN_BROWSER_AGENT_ID = "browser-agent";
+/** Retired builtin id — kept for one-time IndexedDB cleanup only. */
+const RETIRED_BROWSER_AGENT_ID = "browser-agent";
 export const BUILTIN_CURVE_PLOTTER_ID = "curve-plotter";
 
 let dbPromise = null;
@@ -75,6 +76,7 @@ export async function ensureSeeded() {
     await migrateUiKindToScript();
     await migrateRemoveEditorLevels();
     await migrateRemoveRetiredComponentKinds();
+    await migrateRemoveBrowserAgent();
     return;
   }
   await seedBuiltins();
@@ -130,16 +132,30 @@ async function migrateRemoveEditorLevels() {
   await txDone(tx);
 }
 
+/** Remove the retired Browser Agent builtin (system, components, conversations). */
+async function migrateRemoveBrowserAgent() {
+  const id = RETIRED_BROWSER_AGENT_ID;
+  const db = await openDb();
+  const existing = await reqToPromise(db.transaction(SYSTEMS, "readonly").objectStore(SYSTEMS).get(id));
+  if (!existing) return;
+
+  const tx = db.transaction([SYSTEMS, COMPONENTS, CONVERSATIONS], "readwrite");
+  tx.objectStore(SYSTEMS).delete(id);
+  const comps = await reqToPromise(tx.objectStore(COMPONENTS).index("bySystem").getAll(id));
+  for (const c of comps || []) tx.objectStore(COMPONENTS).delete([c.systemId, c.kind]);
+  const convs = await reqToPromise(tx.objectStore(CONVERSATIONS).index("bySystem").getAll(id));
+  for (const c of convs || []) tx.objectStore(CONVERSATIONS).delete(c.id);
+  await txDone(tx);
+
+  const { currentSystemId } = await chrome.storage.local.get("currentSystemId");
+  if (currentSystemId === id) {
+    await chrome.storage.local.set({ currentSystemId: BUILTIN_CURVE_PLOTTER_ID });
+  }
+}
+
 async function seedBuiltins() {
   const now = Date.now();
   const systems = [
-    {
-      id: BUILTIN_BROWSER_AGENT_ID,
-      name: "Browser Agent",
-      createdAt: now,
-      updatedAt: now,
-      isBuiltin: true,
-    },
     {
       id: BUILTIN_CURVE_PLOTTER_ID,
       name: "Curve Plotter",
@@ -149,10 +165,7 @@ async function seedBuiltins() {
     },
   ];
 
-  const components = [
-    ...browserAgentComponents(),
-    ...curvePlotterComponents(),
-  ];
+  const components = [...curvePlotterComponents()];
 
   const db = await openDb();
   const tx = db.transaction([SYSTEMS, COMPONENTS], "readwrite");
@@ -262,80 +275,6 @@ export async function writeComponent(systemId, kind, content) {
   return record;
 }
 
-// --- Conversation history (LLM dialogue transcripts, per system) ------------
-
-/**
- * Persist one completed run's full LLM message array under its system.
- * `source` distinguishes browser automation runs from component-editor runs.
- */
-export async function saveConversation({ systemId, source = "editor", task = "", messages = [], final = "" }) {
-  await ensureSeeded();
-  if (!systemId) throw new Error("saveConversation requires a systemId");
-  const now = Date.now();
-  const id = `conv_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  const record = {
-    id,
-    systemId,
-    source,
-    task: String(task || ""),
-    messages: Array.isArray(messages) ? messages : [],
-    final: String(final ?? ""),
-    createdAt: now,
-  };
-  const db = await openDb();
-  const tx = db.transaction(CONVERSATIONS, "readwrite");
-  tx.objectStore(CONVERSATIONS).put(record);
-  await txDone(tx);
-  return record;
-}
-
-/** Lightweight metadata for every stored run of a system, newest first. */
-export async function listConversations(systemId) {
-  await ensureSeeded();
-  const db = await openDb();
-  const idx = db.transaction(CONVERSATIONS, "readonly").objectStore(CONVERSATIONS).index("bySystem");
-  const all = await reqToPromise(idx.getAll(systemId));
-  return (all || [])
-    .map((c) => ({
-      id: c.id,
-      systemId: c.systemId,
-      source: c.source,
-      kinds: c.kinds,
-      task: c.task,
-      final: c.final,
-      createdAt: c.createdAt,
-      messageCount: (c.messages || []).length,
-    }))
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-}
-
-/** Full transcript (including the messages array) for one run. */
-export async function getConversation(id) {
-  await ensureSeeded();
-  const db = await openDb();
-  return reqToPromise(db.transaction(CONVERSATIONS, "readonly").objectStore(CONVERSATIONS).get(id));
-}
-
-export async function deleteConversation(id) {
-  const db = await openDb();
-  const tx = db.transaction(CONVERSATIONS, "readwrite");
-  tx.objectStore(CONVERSATIONS).delete(id);
-  await txDone(tx);
-  return true;
-}
-
-/** Wipe all stored runs for one system. Returns how many were removed. */
-export async function clearConversations(systemId) {
-  await ensureSeeded();
-  const db = await openDb();
-  const tx = db.transaction(CONVERSATIONS, "readwrite");
-  const idx = tx.objectStore(CONVERSATIONS).index("bySystem");
-  const all = await reqToPromise(idx.getAll(systemId));
-  for (const c of all || []) tx.objectStore(CONVERSATIONS).delete(c.id);
-  await txDone(tx);
-  return (all || []).length;
-}
-
 // --- Dialogue sessions (Dialogue tab chats, including image data URLs) -------
 
 function dialogueSessionTitle(turns) {
@@ -439,34 +378,6 @@ function defaultComponents(systemId) {
       content: DEFAULT_SCRIPT,
       updatedAt: Date.now(),
     },
-  ];
-}
-
-function browserAgentComponents() {
-  const id = BUILTIN_BROWSER_AGENT_ID;
-  const now = Date.now();
-  return [
-    {
-      systemId: id,
-      kind: "html",
-      content: `<div class="ba-home">
-  <h1>Browser Agent</h1>
-  <p>Built-in system for tab automation (read_page, click, navigate, …).</p>
-  <p>Use <strong>Run automation</strong> in the WebApp tab to execute tasks on your open tabs.
-  Use <strong>Edit components</strong> to change this home page via the LLM.</p>
-</div>`,
-      updatedAt: now,
-    },
-    {
-      systemId: id,
-      kind: "css",
-      content: `body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #f4f6fa; color: #1b1b1f; }
-.ba-home { padding: 24px; max-width: 480px; }
-h1 { margin: 0 0 8px; font-size: 1.4rem; }
-p { margin: 0 0 10px; color: #444; }`,
-      updatedAt: now,
-    },
-    { systemId: id, kind: "script", content: "// Browser Agent home — no interactive script required.\n", updatedAt: now },
   ];
 }
 

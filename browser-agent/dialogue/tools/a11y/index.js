@@ -2,7 +2,7 @@
 
 import { renderSnapshotYaml } from "./render-yaml.js";
 
-const INJECTED_FILE = "tools/a11y/injected.js";
+const INJECTED_FILE = "dialogue/tools/a11y/injected.js";
 const DEFAULT_SNAPSHOT_CHARS = 14000;
 
 /** @type {Map<number, number>} */

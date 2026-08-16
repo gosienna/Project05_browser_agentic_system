@@ -1,6 +1,6 @@
 # In-Extension MCP Tool Server (`mcp/`)
 
-The `browser-agent/mcp/` package implements **MCP-style tool semantics** (`tools/list` + `tools/call`) inside the Chrome extension. It is **not** a separate MCP process over stdio/JSON-RPC. It is a registry and dispatcher for built-in Dialogue tools (web search + browser automation).
+The `browser-agent/mcp/` package implements **MCP-style tool semantics** (`tools/list` + `tools/call`) inside the Chrome extension. It is **not** a separate MCP process over stdio/JSON-RPC. It is a registry and dispatcher for built-in Dialogue tools (web search, browser automation, RAG, and WebApp component editing).
 
 ---
 
@@ -35,7 +35,7 @@ Tools live in an in-memory `Map<string, McpToolDef>`. Each definition has:
 | `name` | Unique key |
 | `description` | Shown to the model |
 | `inputSchema` | JSON Schema for arguments (MCP-style) |
-| `groups` | Tags for filtering (e.g. `dialogue`, `browser`, `network`) |
+| `groups` | Tags for filtering (e.g. `dialogue`, `browser`, `network`, `rag`, `webapp`) |
 | `isEnabled(settings)` | Optional gate based on user settings |
 | `handler(args, context)` | Async implementation |
 
@@ -63,7 +63,7 @@ Implements **MCP `tools/call`**:
 2. Re-check `isEnabled` when `context.settings` is present.
 3. Run `handler(args, context)` and return the result.
 
-`context` typically includes `settings` (API keys, toggles) and `tabId` (active tab for browser tools).
+`context` typically includes `settings` (API keys, toggles), `tabId` (active tab for browser tools), `userQuery`, and `systemId` (selected WebApp system for component tools).
 
 ---
 
@@ -74,9 +74,12 @@ Registered at startup:
 | Tool | Group | Handler | Settings gate |
 |------|-------|---------|---------------|
 | `web_search` | dialogue, network | Tavily via [`dialogue/tool-runtime.js`](../browser-agent/dialogue/tool-runtime.js) | `dialogueWebSearch !== false` |
-| `browser_snapshot`, `browser_click` | dialogue, browser | [`tools/a11y/`](../browser-agent/tools/a11y/) | `dialogueBrowserTools !== false` |
-| `read_page`, `get_links`, `list_tabs`, `open_tab`, `navigate`, `click`, `type_text`, `scroll`, `fetch_url`, `download_file`, `get_page_html`, `modify_element`, `execute_script`, `wait` | dialogue, browser | [`tools/browser.js`](../browser-agent/tools/browser.js) | `dialogueBrowserTools !== false` |
+| `browser_snapshot`, `browser_click` | dialogue, browser | [`dialogue/tools/a11y/`](../browser-agent/dialogue/tools/a11y/) | `dialogueBrowserTools !== false` |
+| `read_page`, `get_links`, `list_tabs`, `open_tab`, `navigate`, `click`, `type_text`, `scroll`, `fetch_url`, `download_file`, `get_page_html`, `modify_element`, `execute_script`, `wait` | dialogue, browser | [`dialogue/tools/browser.js`](../browser-agent/dialogue/tools/browser.js) | `dialogueBrowserTools !== false` |
 | `search_documents`, `list_documents`, `delete_document` | dialogue, rag | [`rag/search.js`](../browser-agent/rag/search.js), [`rag/rag-store.js`](../browser-agent/rag/rag-store.js) | `dialogueRagTools !== false` |
+| `list_components`, `read_component`, `write_component`, `reload_home` | dialogue, webapp | [`WebApp/tools/`](../browser-agent/WebApp/tools/) | `dialogueWebAppTools !== false` and a selected `webAppSystemId` |
+
+WebApp component tools edit the **currently selected** system (`context.systemId` / `settings.webAppSystemId`), not a model-supplied id. `write_component` requires complete file contents. `write_component` broadcasts `system.updated`; `reload_home` broadcasts `system.reload`. They are listed only while the Dialogue panel is docked on the WebApp tab.
 
 See [`documents/rag.md`](rag.md) for PDF ingest, embedding backends, and the citation-linked PDF viewer.
 
@@ -96,7 +99,7 @@ Refs are stored as `data-ba-ref` attributes on the live page; a per-tab generati
 
 ### Listing tools for the model
 
-[`dialogue/ui.js`](../browser-agent/dialogue/ui.js) calls `mcp.tools.list` with `groups: ["dialogue"]` and UI toggle overrides (`dialogueWebSearch`, `dialogueBrowserTools`). It merges returned `openAiTools` with user-defined custom tools from the form.
+[`dialogue/ui.js`](../browser-agent/dialogue/ui.js) calls `mcp.tools.list` with `groups: ["dialogue"]` and UI toggle overrides (`dialogueWebSearch`, `dialogueBrowserTools`, `dialogueRagTools`, and on the WebApp dock `dialogueWebAppTools` + `webAppSystemId`). It merges returned `openAiTools` with user-defined custom tools from the form. The WebApp dock forces `dialogueRagTools: false` and passes `systemId` on `dialogue.tool.run`.
 
 ### Executing tools
 
@@ -117,17 +120,9 @@ MCP does **not** replace LLM function calling. It sits **under** it.
 | Model → “call a tool” | Provider returns `tool_calls` or `call:…` text | `dialogueChatCompletion` → `normalizeAssistantToolCalls` |
 | Extension → run it | Map name + args to real code | `runDialogueTool` → `callMcpTool` → handler |
 
-### vs Automation agent (`WebApp.js`) — direct function map
+### vs direct function calls
 
-The classic browser automation path is direct:
-
-```javascript
-// background.js passes import * as tools from "./tools.js"
-const fn = tools[name];
-return fn(effectiveArgs);
-```
-
-No registry, no `mcp.tools.list`, no message bridge.
+Browser tool implementations live in [`dialogue/tools/browser.js`](../browser-agent/dialogue/tools/browser.js). Dialogue and the WebApp dock reach them through MCP (`callMcpTool` → registered handlers). The sandbox host reaches a subset through [`tab-bridge.js`](../browser-agent/tab-bridge.js).
 
 **MCP adds:**
 
@@ -137,15 +132,12 @@ No registry, no `mcp.tools.list`, no message bridge.
 4. **Cross-context bridge** — sidepanel cannot call `chrome.*`; execution runs in the background service worker.
 5. **Single registration point** — builtins in `register-tools.js`; same server can serve multiple consumers.
 
-`callMcpTool("read_page", …)` ultimately calls the same [`tools.js`](../browser-agent/tools.js) functions as the agent — extra indirection, not different browser behavior.
-
 ### Comparison table
 
 | Approach | Model sees tools? | Code runs? | Settings / toggles | Where it lives |
 |----------|-------------------|------------|--------------------|----------------|
 | LLM function calling only (custom UI tool) | Yes | Only if registered on MCP server | No | Schema in session / form |
 | MCP workflow | Yes (filtered list) | Yes (handlers in registry) | Yes | `mcp/server.js` + `register-tools.js` |
-| Agent direct `tools[name]()` | No (prompt lists tools) | Yes | Agent settings | `WebApp.js` + `tools.js` |
 
 ---
 

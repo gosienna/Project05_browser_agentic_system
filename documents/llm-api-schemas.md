@@ -532,7 +532,7 @@ No local model load/unload. No prompt-preview API. RAG embeddings use `batchEmbe
 | [`nvidia-nim-models.js`](../browser-agent/nvidia-nim-models.js) | Curated NIM model list |
 | [`gemini-models.js`](../browser-agent/gemini-models.js) | Curated Gemini model list, live `models.list`, deprecation migration |
 | [`reasoning-content.js`](../browser-agent/reasoning-content.js) | Cross-provider reasoning normalization |
-| [`tools/schema.js`](../browser-agent/tools/schema.js) | OpenAI tool schema utilities |
+| [`tools/schema.js`](../browser-agent/dialogue/tools/schema.js) | OpenAI tool schema utilities |
 
 ## Related docs
 

@@ -6,7 +6,7 @@ import {
   getDialogueSession,
   listDialogueSessions,
   putDialogueSession,
-} from "../system-store.js";
+} from "../WebApp/system-store.js";
 import {
   PARAM_TYPES,
   draftsToOpenAiTools,
@@ -14,7 +14,7 @@ import {
   emptyParamDraft,
   emptyToolDraft,
   openAiToolsToDrafts,
-} from "../tools/schema.js";
+} from "./tools/schema.js";
 import {
   isNvidiaNimProvider,
   resolveLlmBaseUrl,
@@ -51,6 +51,7 @@ import {
   wireRagUi,
 } from "./rag-ui.js";
 import { initDialoguePanelResize } from "./panel-resize.js";
+import { buildWebAppSystemMessages } from "../WebApp/prompt.js";
 import {
   formatAssistantToolCallDisplay,
   MCP_TOOL_HINT,
@@ -67,6 +68,7 @@ const DIALOGUE_TOOL_RESULT_CHARS = 8000;
 const DIALOGUE_WEBLLM_TOOL_RESULT_CHARS = 3000;
 const DIALOGUE_HTML_FIELD_CHARS = 6000;
 const DIALOGUE_SNAPSHOT_FIELD_CHARS = 6000;
+const UNTRUNCATED_TOOL_RESULTS = new Set(["list_components", "read_component"]);
 
 function dialogueToolResultCharLimit() {
   return (getSettings?.().provider || "onnx") === "webllm"
@@ -102,6 +104,7 @@ function stringifyToolResultForLlm(toolName, result) {
     }
   }
   const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  if (UNTRUNCATED_TOOL_RESULTS.has(toolName)) return text;
   const limit = dialogueToolResultCharLimit();
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}\n...[truncated for LLM context]`;
@@ -122,6 +125,7 @@ let ollamaMetaLabel;
 let startDownload;
 let formatTime;
 let escapeHtml;
+let getCurrentSystemId;
 
 let dialogueSystemPrompt = "";
 let dialogueToolDrafts = [];
@@ -161,15 +165,18 @@ export function createDialoguePanel(deps) {
   startDownload = deps.startDownload;
   formatTime = deps.formatTime;
   escapeHtml = deps.escapeHtml;
+  getCurrentSystemId = deps.getCurrentSystemId;
 
   return {
     wire,
     onTabActivate() {
+      applyWebAppDockChrome();
       refreshDialogueModelSelect();
       refreshDialogueSessionsList();
       refreshDialogueContextEstimate();
       syncRagChunkInputs();
       refreshDocumentsPanel();
+      renderDialogueToolsForm();
     },
     onSettingsChanged() {
       refreshDialogueModelSelect();
@@ -178,6 +185,10 @@ export function createDialoguePanel(deps) {
       renderDialogueToolsForm();
       refreshDialogueContextEstimate();
       refreshDocumentsPanel();
+    },
+    onWebAppContextChanged() {
+      renderDialogueToolsForm();
+      notifyDialogueInputChanged();
     },
   };
 }
@@ -282,6 +293,14 @@ function wire() {
       notifyDialogueInputChanged();
     });
   }
+  const webAppToolsCb = $("#dialogue-webapp-tools-enabled");
+  if (webAppToolsCb) {
+    webAppToolsCb.addEventListener("change", (e) => {
+      saveSettings({ dialogueWebAppTools: e.target.checked });
+      renderDialogueToolsForm();
+      notifyDialogueInputChanged();
+    });
+  }
   initRagUi({
     $,
     sendMessage,
@@ -300,6 +319,7 @@ function wire() {
   bindPdfCitationOpener((opts) => pdfViewer?.openCitation(opts));
   syncRagChunkInputs();
   wireDialogueInputPreview();
+  applyWebAppDockChrome();
   renderDialogue();
   renderDialogueToolsForm();
   refreshDialogueModelSelect();
@@ -819,6 +839,19 @@ function createDialogueRawModeSwitcher({ getMode, setMode, onModeChange }) {
   return { modes, syncActive };
 }
 
+function isWebAppDock() {
+  return $("#tab-dialogue")?.classList.contains("webapp-dock");
+}
+
+function applyWebAppDockChrome() {
+  if (!isWebAppDock()) return;
+  $("#dialogue-documents-panel")?.classList.add("collapsed");
+  $("#dialogue-pdf-panel")?.classList.add("collapsed");
+  $("#dialogue-documents-toggle")?.setAttribute("aria-expanded", "false");
+  $("#dialogue-pdf-toggle")?.setAttribute("aria-expanded", "false");
+  syncDialogueToolbarHighlights();
+}
+
 function isDialogueWebSearchEnabled() {
   return getSettings().dialogueWebSearch !== false && $("#dialogue-web-search-enabled")?.checked !== false;
 }
@@ -834,25 +867,37 @@ function syncDialogueMcpTogglesFromSettings() {
   if (browserToolsCb) browserToolsCb.checked = getSettings().dialogueBrowserTools !== false;
   const ragToolsCb = $("#dialogue-rag-tools-enabled");
   if (ragToolsCb) ragToolsCb.checked = getSettings().dialogueRagTools !== false;
+  const webAppToolsCb = $("#dialogue-webapp-tools-enabled");
+  if (webAppToolsCb) webAppToolsCb.checked = getSettings().dialogueWebAppTools !== false;
 }
 
 function isDialogueRagToolsEnabled() {
   return getSettings().dialogueRagTools !== false && $("#dialogue-rag-tools-enabled")?.checked !== false;
 }
 
+function isDialogueWebAppToolsEnabled() {
+  return getSettings().dialogueWebAppTools !== false && $("#dialogue-webapp-tools-enabled")?.checked !== false;
+}
+
 function dialogueMcpSettingsOverrides() {
+  const dock = isWebAppDock();
+  const systemId = dock ? getCurrentSystemId?.() || "" : "";
   return {
     dialogueWebSearch: isDialogueWebSearchEnabled(),
     dialogueBrowserTools: isDialogueBrowserToolsEnabled(),
-    dialogueRagTools: isDialogueRagToolsEnabled(),
+    dialogueRagTools: dock ? false : isDialogueRagToolsEnabled(),
+    dialogueWebAppTools: dock && isDialogueWebAppToolsEnabled(),
+    webAppSystemId: systemId,
   };
 }
 
 async function fetchMcpDialogueTools() {
+  const overrides = dialogueMcpSettingsOverrides();
   const res = await sendMessage({
     type: "mcp.tools.list",
     groups: ["dialogue"],
-    settings: dialogueMcpSettingsOverrides(),
+    settings: overrides,
+    ...(overrides.webAppSystemId ? { systemId: overrides.webAppSystemId } : {}),
   });
   return res || { tools: [], openAiTools: [] };
 }
@@ -868,6 +913,12 @@ async function buildDialogueTools(userTools) {
 }
 
 function buildDialogueSystemMessages(mcpToolNames = []) {
+  if (isWebAppDock()) {
+    return buildWebAppSystemMessages({
+      customPrompt: dialogueSystemPrompt,
+      mcpToolNames,
+    });
+  }
   const parts = [];
   if (dialogueSystemPrompt.trim()) parts.push(dialogueSystemPrompt.trim());
   if (mcpToolNames.length) {
@@ -878,12 +929,14 @@ function buildDialogueSystemMessages(mcpToolNames = []) {
 }
 
 async function runDialogueTool(name, args) {
+  const overrides = dialogueMcpSettingsOverrides();
   const res = await sendMessage({
     type: "dialogue.tool.run",
     name,
     args,
     userQuery: dialogueTriggerQuery,
-    settings: dialogueMcpSettingsOverrides(),
+    settings: overrides,
+    ...(overrides.webAppSystemId ? { systemId: overrides.webAppSystemId } : {}),
   });
   if (!res) {
     throw new Error("Tool runner did not respond — reload the extension and try again.");
@@ -1068,12 +1121,14 @@ async function renderDialogueToolsForm() {
   const status = $("#dialogue-mcp-status");
   const webOn = isDialogueWebSearchEnabled();
   const browserOn = isDialogueBrowserToolsEnabled();
-  const ragOn = isDialogueRagToolsEnabled();
+  const ragOn = !isWebAppDock() && isDialogueRagToolsEnabled();
+  const webAppOn = isWebAppDock() && isDialogueWebAppToolsEnabled();
   if (status) {
     const parts = [];
     if (webOn) parts.push("web search");
     if (browserOn) parts.push("browser automation");
     if (ragOn) parts.push("document RAG");
+    if (webAppOn) parts.push("WebApp components");
     status.textContent = parts.length
       ? `MCP enabled: ${parts.join(" + ")}`
       : "No MCP tools enabled — check the boxes above.";

@@ -1,7 +1,4 @@
-// Shared step-limit config for every ReAct-style loop in the extension
-// (browser automation in WebApp.js, and the system editor in editor-loop.js).
-// A single source of truth avoids two hardcoded MAX_STEPS constants drifting
-// out of sync.
+// Shared step-limit config for ReAct-style loops (system editor in WebApp/editor-loop.js).
 
 export const DEFAULT_MAX_STEPS = 14;
 const MIN_MAX_STEPS = 1;

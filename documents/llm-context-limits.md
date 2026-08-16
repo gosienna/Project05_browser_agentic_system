@@ -233,7 +233,7 @@ To set context for a run (not done by this extension today):
 
 ### Agent loop truncation (all providers)
 
-ReAct agent transcripts also cap tool results at **8000** chars ([`WebApp.js`](../browser-agent/WebApp.js)); editor loops use the same ([`editor-loop.js`](../browser-agent/editor-loop.js)).
+ReAct-style editor transcripts also cap tool results at **8000** chars ([`editor-loop.js`](../browser-agent/WebApp/editor-loop.js)). Dialogue tool results use a separate dialogue limit.
 
 ---
 

@@ -6,7 +6,7 @@
     <link rel="stylesheet" href="sidepanel.css" />
     <link rel="stylesheet" href="dialogue/dialogue.css" />
   </head>
-  <body>
+  <body data-tab="webapp">
     <header class="topbar">
       <div class="tabs">
         <button class="tab-btn" data-tab="dialogue">Dialogue</button>
@@ -36,7 +36,7 @@
     </section>
 
     <main>
-      <section id="tab-dialogue" class="tab-panel">
+      <section id="tab-dialogue" class="tab-panel webapp-dock">
         <div class="dialogue-toolbar">
           <button id="dialogue-sessions-toggle" type="button" class="secondary-btn" aria-expanded="false">Sessions</button>
           <button id="dialogue-documents-toggle" type="button" class="secondary-btn" aria-expanded="false">Documents</button>
@@ -72,9 +72,13 @@
                     <input type="checkbox" id="dialogue-browser-tools-enabled" checked />
                     Browser tools (MCP)
                   </label>
-                  <label class="dialogue-web-search-label">
+                  <label class="dialogue-web-search-label" id="dialogue-rag-tools-label">
                     <input type="checkbox" id="dialogue-rag-tools-enabled" checked />
                     Document search (RAG)
+                  </label>
+                  <label class="dialogue-web-search-label" id="dialogue-webapp-tools-label">
+                    <input type="checkbox" id="dialogue-webapp-tools-enabled" checked />
+                    WebApp components (MCP)
                   </label>
                 </div>
                 <p id="dialogue-mcp-status" class="dialogue-mcp-status"></p>
@@ -140,8 +144,8 @@
           <button id="system-add-btn" type="button" class="icon-btn" title="Create system" aria-label="Create system">+</button>
           <button id="system-delete-btn" type="button" class="icon-btn" title="Delete system" aria-label="Delete system">🗑</button>
           <button id="system-render-btn" type="button" class="secondary-btn" title="Open or refresh the sandbox in a new tab">Render</button>
+          <button id="component-editor-toggle" type="button" class="secondary-btn active" aria-expanded="true" title="Hide or show system components">Components</button>
         </div>
-        <div id="model-badge" class="model-badge"></div>
         <div id="component-editor" class="component-editor">
           <div id="component-kind-tabs" class="component-kind-tabs" role="tablist" aria-label="Components"></div>
           <div class="component-editor-toolbar">
@@ -150,24 +154,6 @@
           </div>
           <textarea id="component-editor-input" class="component-editor-input" spellcheck="false" disabled placeholder="Select a system to edit its components."></textarea>
         </div>
-        <div id="browser-agent-run" class="browser-agent-run hidden">
-          <div class="mode-label">Run automation</div>
-          <form id="agent-form">
-            <textarea id="task-input" placeholder="What should the browser agent do? e.g. Summarize this page in 5 bullets" rows="2"></textarea>
-            <button type="submit" id="run-btn">Run</button>
-          </form>
-        </div>
-        <form id="editor-form">
-          <textarea id="editor-input" placeholder="Ask to change this system… e.g. Make the curve red, or plot two curves at once" rows="2"></textarea>
-          <button type="submit" id="editor-run-btn">Edit</button>
-        </form>
-        <div id="trace" class="trace"></div>
-
-        <div class="history-header">
-          <span class="mode-label">Conversation history</span>
-          <button id="history-clear-btn" type="button" class="secondary-btn" title="Delete all stored runs for this system">Clear</button>
-        </div>
-        <div id="history-list" class="history-list"></div>
       </section>
 
     </main>
@@ -403,16 +389,6 @@
           </div>
           </div>
         </div>
-      </div>
-    </div>
-
-    <div id="history-modal" class="modal-overlay hidden">
-      <div class="modal" role="dialog" aria-modal="true" aria-label="Conversation transcript">
-        <div class="modal-header">
-          <h2 id="history-modal-title">Transcript</h2>
-          <button id="history-modal-close-btn" type="button" class="icon-btn" aria-label="Close">✕</button>
-        </div>
-        <div id="history-modal-body" class="modal-body history-transcript"></div>
       </div>
     </div>
 

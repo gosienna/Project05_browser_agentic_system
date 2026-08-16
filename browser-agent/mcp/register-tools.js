@@ -1,8 +1,10 @@
-// Register built-in MCP tools for Dialogue (web search + browser automation).
+// Register built-in MCP tools for Dialogue (web search, browser automation, RAG, WebApp components).
 
 import { registerMcpTool } from "./server.js";
 import { tavilySearch, prepareSearchToolArgs } from "../dialogue/tool-runtime.js";
-import * as browserTools from "../tools/browser.js";
+import * as browserTools from "../dialogue/tools/index.js";
+import * as webAppTools from "../WebApp/tools/index.js";
+import { WEBAPP_MCP_TOOL_DEFS } from "../WebApp/tools/schema.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
 import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
@@ -23,6 +25,17 @@ function browserToolsEnabled(settings) {
 
 function ragToolsEnabled(settings) {
   return settings.dialogueRagTools !== false;
+}
+
+function webAppToolsEnabled(settings) {
+  return settings.dialogueWebAppTools !== false && Boolean(settings.webAppSystemId);
+}
+
+function withSystemId(fn) {
+  return (args, context) => {
+    const systemId = webAppTools.resolveWebAppSystemId(context);
+    return fn({ ...args, systemId });
+  };
 }
 
 async function resolveTabId(args, context) {
@@ -452,4 +465,12 @@ export function registerBuiltinMcpTools() {
       return { ok: true, doc_id: args.doc_id };
     },
   });
+
+  for (const def of WEBAPP_MCP_TOOL_DEFS) {
+    registerMcpTool({
+      ...def,
+      isEnabled: webAppToolsEnabled,
+      handler: withSystemId((args) => webAppTools[def.name](args)),
+    });
+  }
 }
