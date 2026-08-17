@@ -34,4 +34,49 @@ for (const [srcRel, destName] of copies) {
   console.log(`[build:wllama]   ${destName} (${mb} MB)`);
 }
 
+patchWorkerDocumentBase(path.join(outDir, "wllama.js"));
+patchWorkerDocumentBase(path.join(outDir, "wllama.min.js"));
+
 console.log(`[build:wllama] done → ${path.relative(root, outDir)}/`);
+
+/**
+ * @wllama/wllama resolves wasm URLs with `document.baseURI`. That throws
+ * `document is not defined` inside wllama-worker.js (Dedicated Worker).
+ * Keep the library on the window path, fall back to `self.location.href`.
+ */
+function patchWorkerDocumentBase(filePath) {
+  const src = fs.readFileSync(filePath, "utf8");
+  const replacements = [
+    [
+      "var absoluteUrl = (relativePath) => new URL(relativePath, document.baseURI).href;",
+      'var absoluteUrl = (relativePath) => new URL(relativePath, typeof document !== "undefined" ? document.baseURI : self.location.href).href;',
+    ],
+    [
+      "absoluteUrl=e=>new URL(e,document.baseURI).href",
+      'absoluteUrl=e=>new URL(e,"undefined"!=typeof document?document.baseURI:self.location.href).href',
+    ],
+  ];
+  let next = src;
+  let hits = 0;
+  for (const [from, to] of replacements) {
+    if (!next.includes(from)) continue;
+    const count = next.split(from).length - 1;
+    next = next.split(from).join(to);
+    hits += count;
+  }
+  if (hits === 0) {
+    const alreadyPatched =
+      next.includes('typeof document !== "undefined" ? document.baseURI : self.location.href') ||
+      next.includes('"undefined"!=typeof document?document.baseURI:self.location.href');
+    if (alreadyPatched) {
+      console.log(`[build:wllama]   ${path.basename(filePath)} already worker-patched`);
+      return;
+    }
+    throw new Error(
+      `[build:wllama] ${path.basename(filePath)} is missing document.baseURI; ` +
+        `update the Dedicated Worker patch for this @wllama/wllama version.`
+    );
+  }
+  fs.writeFileSync(filePath, next);
+  console.log(`[build:wllama]   patched ${path.basename(filePath)} for Dedicated Worker`);
+}

@@ -1036,7 +1036,8 @@ var isMmproj = (blob) => __async(void 0, null, function* () {
   }
   return true;
 });
-var absoluteUrl = (relativePath) => new URL(relativePath, document.baseURI).href;
+// Dedicated Workers have no `document`; wllama runs inside wllama-worker.js.
+var absoluteUrl = (relativePath) => new URL(relativePath, typeof document !== "undefined" ? document.baseURI : self.location.href).href;
 var padDigits = (number, digits) => {
   return Array(Math.max(digits - String(number).length + 1, 0)).join("0") + number;
 };
