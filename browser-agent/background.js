@@ -92,6 +92,11 @@ async function markWebllmModelDownloaded(modelId) {
   await chrome.storage.local.set({ webllmModels: { ...(webllmModels || {}), [modelId]: true } });
 }
 
+async function markWllamaModelDownloaded(modelId) {
+  const { wllamaModels } = await chrome.storage.local.get("wllamaModels");
+  await chrome.storage.local.set({ wllamaModels: { ...(wllamaModels || {}), [modelId]: true } });
+}
+
 function replyAsync(promise, sendResponse) {
   promise
     .then(sendResponse)
@@ -112,6 +117,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.target === "webllm-model-ready" && msg.model) {
     markWebllmModelDownloaded(msg.model);
+    return;
+  }
+
+  if (msg.target === "wllama-model-ready" && msg.model) {
+    markWllamaModelDownloaded(msg.model);
     return;
   }
 
@@ -264,6 +274,34 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .then(async (res) => {
         const loadedModel = msg.model || msg.request?.model;
         if (msg.engineType === "engine.load" && loadedModel && !res?.error) await markWebllmModelDownloaded(loadedModel);
+        sendResponse(res);
+      })
+      .catch((err) => sendResponse({ error: { message: err.message, type: "engine_error", code: null } }));
+    return true;
+  }
+  if (msg.type === "wllama.relay") {
+    ensureOffscreenDocument()
+      .then(async () => {
+        const settings = await getSettings();
+        let request = msg.request;
+        if (msg.engineType === "chat.completions" && request) {
+          request = stripUnsupportedNativeTools(
+            { ...request, model: msg.model || request.model },
+            settings
+          );
+        }
+        return chrome.runtime.sendMessage({
+          target: "wllama-engine",
+          type: msg.engineType,
+          model: msg.model,
+          request,
+        });
+      })
+      .then(async (res) => {
+        const loadedModel = msg.model || msg.request?.model;
+        if (msg.engineType === "engine.load" && loadedModel && !res?.error) {
+          await markWllamaModelDownloaded(loadedModel);
+        }
         sendResponse(res);
       })
       .catch((err) => sendResponse({ error: { message: err.message, type: "engine_error", code: null } }));

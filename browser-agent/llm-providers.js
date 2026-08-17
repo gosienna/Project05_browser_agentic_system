@@ -111,6 +111,7 @@ export function resolveChatModel(settings) {
   const provider = settings?.provider || "onnx";
   if (provider === "onnx") return settings?.onnxModel;
   if (provider === "webllm") return settings?.webllmModel;
+  if (provider === "wllama") return settings?.wllamaModel;
   if (provider === "nvidia-nim") return settings?.model || DEFAULT_NVIDIA_NIM_MODEL;
   if (provider === "gemini") return resolveGeminiModel(settings?.model || DEFAULT_GEMINI_MODEL).model;
   if (provider === "openai") return resolveOpenAiModel(settings?.model || DEFAULT_OPENAI_MODEL).model;
@@ -211,6 +212,11 @@ export function getProviderThinkingMeta(provider) {
       return {
         available: true,
         hint: "Sent as enable_thinking for Qwen3 WebLLM models. Other models ignore this setting.",
+      };
+    case "wllama":
+      return {
+        available: false,
+        hint: "Not available for wllama yet. Reasoning-capable GGUFs may still emit thinking tokens in content.",
       };
     case "ollama":
       return {

@@ -25,6 +25,10 @@
         <strong>Built-in engine (WebLLM)</strong>
         <span>Faster chat on WebGPU. Downloads an MLC model once, then runs fully offline.</span>
       </button>
+      <button id="ob-wllama" class="ob-card">
+        <strong>Built-in engine (wllama / GGUF)</strong>
+        <span>llama.cpp in WASM. Loads Hugging Face GGUFs; WebGPU when available, CPU fallback otherwise.</span>
+      </button>
       <button id="ob-ollama" class="ob-card">
         <strong>Ollama</strong>
         <span id="ob-ollama-status">Checking for a local Ollama server…</span>
@@ -174,6 +178,7 @@
           <select id="provider-select">
             <option value="onnx">Built-in (ONNX, runs in your browser)</option>
             <option value="webllm">Built-in (WebLLM, WebGPU)</option>
+            <option value="wllama">Built-in (wllama / GGUF)</option>
             <option value="ollama">Ollama</option>
             <option value="gemini">Google Gemini</option>
             <option value="nvidia-nim">NVIDIA NIM</option>
@@ -229,6 +234,30 @@
             <button id="webllm-unload-btn" type="button">Unload model</button>
             <button id="webllm-clear-cache-btn" type="button">Clear model cache</button>
             <div id="webllm-cache-hint" class="device-line"></div>
+          </div>
+
+          <div id="wllama-settings" class="provider-block hidden">
+            <div id="wllama-device" class="device-line">Device: unknown</div>
+            <p class="hint">Runs llama.cpp via WASM (Memory64). Uses WebGPU when available; otherwise CPU. Vision/audio tools still use ONNX. Prefer Q4/Q5 GGUFs under ~2 GB (or split shards).</p>
+
+            <h3 class="onnx-section-title">Chat model (LLM)</h3>
+            <ul id="wllama-registry" class="onnx-registry"></ul>
+
+            <h3 class="onnx-section-title">Custom Hugging Face GGUF</h3>
+            <label for="wllama-custom-repo">HF repo</label>
+            <input id="wllama-custom-repo" placeholder="e.g. bartowski/Llama-3.2-1B-Instruct-GGUF" />
+            <label for="wllama-custom-file">GGUF file</label>
+            <input id="wllama-custom-file" placeholder="e.g. Llama-3.2-1B-Instruct-Q4_K_M.gguf" />
+            <button id="wllama-custom-load-btn" type="button">Load custom model</button>
+
+            <div id="wllama-progress-wrap" class="hidden">
+              <div class="progress-bar"><div id="wllama-progress-fill"></div></div>
+              <div id="wllama-progress-label"></div>
+            </div>
+
+            <button id="wllama-unload-btn" type="button">Unload model</button>
+            <button id="wllama-clear-cache-btn" type="button">Clear model cache</button>
+            <div id="wllama-cache-hint" class="device-line"></div>
           </div>
 
           <div id="ollama-settings" class="provider-block hidden">

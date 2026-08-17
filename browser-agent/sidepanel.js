@@ -59,6 +59,14 @@ import {
 } from "./ollama-models.js";
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "./webllm-models.js";
 import {
+  DEFAULT_WLLAMA_MODEL,
+  encodeWllamaModelId,
+  formatWllamaPickerLabel,
+  formatWllamaRegistryMeta,
+  parseWllamaModelId,
+  WLLAMA_MODEL_REGISTRY,
+} from "./wllama-models.js";
+import {
   DEFAULT_GEMINI_EMBED_MODEL,
   DEFAULT_NVIDIA_EMBED_MODEL,
   DEFAULT_OPENAI_COMPATIBLE_EMBED_MODEL,
@@ -78,10 +86,12 @@ const $ = (sel) => document.querySelector(sel);
 let settings = {};
 let registry = [];
 let webllmRegistry = [];
+let wllamaRegistry = [];
 let ollamaRegistry = [];
 let ollamaInstalled = new Set();
 let downloadedModels = {};
 let downloadedWebllmModels = {};
+let downloadedWllamaModels = {};
 let ollamaCatalogSkip = 0;
 let ollamaCatalogTotal = 0;
 let ollamaCatalogSearch = "";
@@ -131,18 +141,21 @@ async function init() {
     getRegistry: () => {
       const p = settings.provider || "onnx";
       if (p === "webllm") return webllmRegistry;
+      if (p === "wllama") return wllamaRegistry;
       if (p === "ollama") return ollamaRegistry;
       return registry;
     },
     setRegistry: (models) => {
       const p = settings.provider || "onnx";
       if (p === "webllm") webllmRegistry = models;
+      else if (p === "wllama") wllamaRegistry = models;
       else if (p === "ollama") ollamaRegistry = models;
       else registry = models;
     },
     getDownloadedModels: () => {
       const p = settings.provider || "onnx";
       if (p === "webllm") return downloadedWebllmModels;
+      if (p === "wllama") return downloadedWllamaModels;
       if (p === "ollama") return ollamaInstalledDownloadMap(ollamaInstalled);
       return downloadedModels;
     },
@@ -150,6 +163,8 @@ async function init() {
     modelMetaLabel,
     webllmPickerLabel: formatWebllmPickerLabel,
     webllmMetaLabel,
+    wllamaPickerLabel: formatWllamaPickerLabel,
+    wllamaMetaLabel,
     ollamaMetaLabel: formatOllamaCatalogMeta,
     startDownload,
     formatTime,
@@ -160,12 +175,17 @@ async function init() {
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.target === "onnx-progress") onOnnxProgress(msg);
     if (msg?.target === "webllm-progress") onWebllmProgress(msg);
+    if (msg?.target === "wllama-progress") onWllamaProgress(msg);
     if (msg?.target === "onnx-model-ready" && msg.model) {
       downloadedModels = { ...downloadedModels, [msg.model]: true };
       dialoguePanel?.onSettingsChanged();
     }
     if (msg?.target === "webllm-model-ready" && msg.model) {
       downloadedWebllmModels = { ...downloadedWebllmModels, [msg.model]: true };
+      dialoguePanel?.onSettingsChanged();
+    }
+    if (msg?.target === "wllama-model-ready" && msg.model) {
+      downloadedWllamaModels = { ...downloadedWllamaModels, [msg.model]: true };
       dialoguePanel?.onSettingsChanged();
     }
     if (msg?.type === "system.reload" || msg?.type === "system.updated") {
@@ -279,6 +299,7 @@ function openSettingsModal(tabId) {
   applyThinkingToggleUi();
   if (settings.provider === "onnx") refreshOnnxSettings();
   if (settings.provider === "webllm") refreshWebllmSettings();
+  if (settings.provider === "wllama") refreshWllamaSettings();
   if (settings.provider === "ollama") refreshOllamaSettings();
   refreshRagEmbedModelOptions();
 }
@@ -303,6 +324,13 @@ function wireOnboarding() {
     openSettingsModal();
     await refreshWebllmSettings();
     startWebllmDownload("Llama-3.2-3B-Instruct-q4f16_1-MLC");
+  });
+  $("#ob-wllama").addEventListener("click", async () => {
+    await saveSettings({ provider: "wllama", wllamaModel: DEFAULT_WLLAMA_MODEL });
+    $("#onboarding").classList.add("hidden");
+    openSettingsModal();
+    await refreshWllamaSettings();
+    startWllamaDownload(DEFAULT_WLLAMA_MODEL);
   });
   $("#ob-ollama").addEventListener("click", async () => {
     await saveSettings({ provider: "ollama", baseUrl: DEFAULT_OLLAMA_BASE_URL, model: "llama3.2" });
@@ -373,6 +401,9 @@ function wireSettingsForm() {
     }
     if (prev === "webllm" && next !== "webllm") {
       await sendMessage({ type: "webllm.relay", engineType: "engine.unload" });
+    }
+    if (prev === "wllama" && next !== "wllama") {
+      await sendMessage({ type: "wllama.relay", engineType: "engine.unload" });
     }
     applySettingsToForm();
   });
@@ -478,6 +509,32 @@ function wireSettingsForm() {
     await chrome.storage.local.set({ webllmModels: {} });
     downloadedWebllmModels = {};
     await refreshWebllmSettings();
+  });
+  $("#wllama-unload-btn")?.addEventListener("click", async () => {
+    await sendMessage({ type: "wllama.relay", engineType: "engine.unload" });
+    await refreshWllamaSettings();
+  });
+  $("#wllama-clear-cache-btn")?.addEventListener("click", async () => {
+    if (!confirm("Delete all cached wllama GGUF weights from IndexedDB? You'll need to re-download models.")) return;
+    await sendMessage({ type: "wllama.relay", engineType: "engine.clearCache" });
+    await chrome.storage.local.set({ wllamaModels: {} });
+    downloadedWllamaModels = {};
+    await refreshWllamaSettings();
+  });
+  $("#wllama-custom-load-btn")?.addEventListener("click", async () => {
+    const repo = ($("#wllama-custom-repo")?.value || "").trim();
+    const file = ($("#wllama-custom-file")?.value || "").trim();
+    if (!repo || !file) {
+      alert("Enter both Hugging Face repo and GGUF file name.");
+      return;
+    }
+    if (!/\.gguf$/i.test(file)) {
+      alert("File must end with .gguf");
+      return;
+    }
+    const modelId = encodeWllamaModelId(repo, file);
+    await saveSettings({ wllamaModel: modelId });
+    startWllamaDownload(modelId);
   });
   $("#ollama-base-url").addEventListener("change", async (e) => {
     await saveSettings({ baseUrl: e.target.value.trim() });
@@ -755,15 +812,17 @@ function applySettingsToForm() {
   const provider = settings.provider || "onnx";
   const isOnnx = provider === "onnx";
   const isWebllm = provider === "webllm";
+  const isWllama = provider === "wllama";
   const isOllama = provider === "ollama";
   const isNvidiaNim = provider === "nvidia-nim";
   const isGemini = provider === "gemini";
   const isOpenAi = provider === "openai";
   const isAnthropic = provider === "anthropic";
   const isOpenAiCompatible = provider === "openai-compatible";
-  const isLocalEngine = isOnnx || isWebllm;
+  const isLocalEngine = isOnnx || isWebllm || isWllama;
   $("#onnx-settings").classList.toggle("hidden", !isOnnx);
   $("#webllm-settings").classList.toggle("hidden", !isWebllm);
+  $("#wllama-settings")?.classList.toggle("hidden", !isWllama);
   $("#ollama-settings").classList.toggle("hidden", !isOllama);
   $("#remote-settings").classList.toggle("hidden", isLocalEngine || isOllama);
   $("#rag-remote-embed-openai")?.classList.toggle("hidden", !isOpenAi);
@@ -790,6 +849,13 @@ function applySettingsToForm() {
   }
   if (isOnnx) refreshOnnxSettings();
   if (isWebllm) refreshWebllmSettings();
+  if (isWllama) {
+    const parsed = parseWllamaModelId(settings.wllamaModel || "");
+    const customKnown = parsed && !WLLAMA_MODEL_REGISTRY.some((m) => m.id === settings.wllamaModel);
+    if ($("#wllama-custom-repo")) $("#wllama-custom-repo").value = customKnown ? parsed.repo : "";
+    if ($("#wllama-custom-file")) $("#wllama-custom-file").value = customKnown ? parsed.file : "";
+    refreshWllamaSettings();
+  }
   if (isOllama) {
     const baseInput = $("#ollama-base-url");
     if (baseInput) baseInput.value = resolveOllamaBaseUrl(settings);
@@ -1334,6 +1400,105 @@ function webllmMetaLabel(entry) {
   return formatWebllmRegistryMeta(entry, { sizeLabel });
 }
 
+function wllamaMetaLabel(entry) {
+  return formatWllamaRegistryMeta(entry, { sizeLabel });
+}
+
+async function refreshWllamaSettings() {
+  const { wllamaModels } = await chrome.storage.local.get("wllamaModels");
+  downloadedWllamaModels = wllamaModels || {};
+
+  const statusRes = await sendMessage({ type: "wllama.relay", engineType: "engine.status" });
+  if (statusRes?.error) {
+    if ($("#wllama-device")) $("#wllama-device").textContent = "Device: not started yet";
+    if ($("#wllama-cache-hint")) $("#wllama-cache-hint").textContent = "";
+  } else {
+    const deviceLabel =
+      statusRes.device === "webgpu"
+        ? "GPU (WebGPU) + WASM"
+        : statusRes.device === "wasm"
+          ? "CPU (WASM)"
+          : "unknown";
+    if ($("#wllama-device")) $("#wllama-device").textContent = `Device: ${deviceLabel}`;
+    const cached = statusRes.cachedModels || [];
+    wllamaRegistry = statusRes.registry || wllamaRegistry;
+    const catalogCount = wllamaRegistry.length || statusRes.registry?.length || 0;
+    if ($("#wllama-cache-hint")) {
+      $("#wllama-cache-hint").textContent = cached.length
+        ? `IndexedDB cache: ${cached.length} model(s) cached · ${catalogCount} in catalog`
+        : catalogCount
+          ? `${catalogCount} models in catalog (IndexedDB cache empty)`
+          : "IndexedDB cache: empty";
+    }
+    if (statusRes.device === "webgpu" || statusRes.device === "wasm") lastKnownDevice = statusRes.device;
+  }
+
+  if (wllamaRegistry.length === 0) {
+    wllamaRegistry = WLLAMA_MODEL_REGISTRY.slice();
+  }
+
+  const loadedModel = statusRes?.loadedModel || null;
+  renderWllamaRegistry(loadedModel);
+  dialoguePanel?.onSettingsChanged();
+}
+
+function renderWllamaRegistry(loadedModel) {
+  const list = $("#wllama-registry");
+  if (!list) return;
+  list.innerHTML = "";
+  const models = wllamaRegistry.length ? wllamaRegistry : WLLAMA_MODEL_REGISTRY;
+  const selectedId =
+    settings.wllamaModel || models.find((m) => m.tier === "default")?.id || models[0]?.id;
+
+  for (const m of models) {
+    const li = document.createElement("li");
+    li.className = m.id === selectedId ? "selected" : "";
+    const isDownloaded = !!downloadedWllamaModels[m.id];
+    li.innerHTML = `
+      <span class="model-info">
+        <span class="model-name">${escapeHtml(m.label)}</span>
+        <small class="model-meta">${escapeHtml(wllamaMetaLabel(m))}</small>
+      </span>
+      <span class="badge ${isDownloaded ? "downloaded" : ""}">${isDownloaded ? "Downloaded" : "Not downloaded"}</span>
+    `;
+    const actions = document.createElement("span");
+    actions.className = "model-actions";
+    const btn = document.createElement("button");
+    btn.textContent = m.id === loadedModel ? "Loaded" : isDownloaded ? "Load" : "Download";
+    btn.disabled = m.id === loadedModel;
+    btn.addEventListener("click", async () => {
+      await saveSettings({ wllamaModel: m.id });
+      startWllamaDownload(m.id);
+      renderWllamaRegistry(loadedModel);
+    });
+    actions.appendChild(btn);
+    if (isDownloaded) {
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.className = "danger";
+      delBtn.addEventListener("click", async () => {
+        if (!confirm(`Delete cached weights for ${m.label}?`)) return;
+        delBtn.disabled = true;
+        const res = await sendMessage({ type: "wllama.relay", engineType: "engine.deleteModel", model: m.id });
+        if (res?.error) {
+          delBtn.disabled = false;
+          alert(`Delete failed: ${res.error.message}`);
+          return;
+        }
+        const { wllamaModels } = await chrome.storage.local.get("wllamaModels");
+        const next = { ...(wllamaModels || {}) };
+        delete next[m.id];
+        await chrome.storage.local.set({ wllamaModels: next });
+        downloadedWllamaModels = next;
+        await refreshWllamaSettings();
+      });
+      actions.appendChild(delBtn);
+    }
+    li.appendChild(actions);
+    list.appendChild(li);
+  }
+}
+
 function renderWebllmRegistry(loadedModel) {
   const list = $("#webllm-registry");
   if (!list) return;
@@ -1458,6 +1623,7 @@ function llmLoadedModel(loadedByTask) {
 
 function llmModels() {
   if (settings.provider === "webllm") return webllmRegistry;
+  if (settings.provider === "wllama") return wllamaRegistry.length ? wllamaRegistry : WLLAMA_MODEL_REGISTRY;
   if (settings.provider === "ollama") return ollamaRegistry;
   return registry.filter((m) => m.modality === "llm");
 }
@@ -1539,6 +1705,7 @@ function renderRegistrySection(listId, task, settingsKey, loadedModel, { modalit
 function startDownload(modelId, task) {
   const provider = settings.provider || "onnx";
   if (provider === "webllm") startWebllmDownload(modelId);
+  else if (provider === "wllama") startWllamaDownload(modelId);
   else if (provider === "ollama") startOllamaPull(modelId);
   else startOnnxDownload(modelId, task);
 }
@@ -1585,6 +1752,25 @@ function startWebllmDownload(modelId) {
     });
 }
 
+function startWllamaDownload(modelId) {
+  $("#wllama-progress-wrap")?.classList.remove("hidden");
+  if ($("#wllama-progress-label")) $("#wllama-progress-label").textContent = `Loading ${modelId}…`;
+  sendMessage({ type: "wllama.relay", engineType: "engine.load", model: modelId })
+    .then(async (res) => {
+      if (res?.error) {
+        if ($("#wllama-progress-fill")) $("#wllama-progress-fill").style.width = "0%";
+        if ($("#wllama-progress-label")) $("#wllama-progress-label").textContent = `✗ ${res.error.message}`;
+      } else {
+        $("#wllama-progress-wrap")?.classList.add("hidden");
+      }
+      await refreshWllamaSettings();
+    })
+    .catch((err) => {
+      if ($("#wllama-progress-fill")) $("#wllama-progress-fill").style.width = "0%";
+      if ($("#wllama-progress-label")) $("#wllama-progress-label").textContent = `✗ ${err.message}`;
+    });
+}
+
 function onOnnxProgress(event) {
   const wrap = $("#onnx-progress-wrap");
   wrap.classList.remove("hidden");
@@ -1599,6 +1785,18 @@ function onWebllmProgress(event) {
   const pct = event.total ? Math.round(((event.loaded || 0) / event.total) * 100) : 0;
   $("#webllm-progress-fill").style.width = `${pct}%`;
   $("#webllm-progress-label").textContent = `${event.status || "downloading"} ${event.file || ""} ${event.total ? pct + "%" : ""}`.trim();
+}
+
+function onWllamaProgress(event) {
+  const wrap = $("#wllama-progress-wrap");
+  if (!wrap) return;
+  wrap.classList.remove("hidden");
+  const pct = event.total ? Math.round(((event.loaded || 0) / event.total) * 100) : 0;
+  if ($("#wllama-progress-fill")) $("#wllama-progress-fill").style.width = `${pct}%`;
+  if ($("#wllama-progress-label")) {
+    $("#wllama-progress-label").textContent =
+      `${event.status || "downloading"} ${event.file || ""} ${event.total ? pct + "%" : ""}`.trim();
+  }
 }
 
 async function testConnection() {
@@ -1625,6 +1823,13 @@ async function testConnection() {
         type: "webllm.relay",
         engineType: "chat.completions",
         request: { model: settings.webllmModel, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
+      });
+    } else if (settings.provider === "wllama") {
+      if (!settings.wllamaModel) throw new Error("Pick a model first");
+      res = await sendMessage({
+        type: "wllama.relay",
+        engineType: "chat.completions",
+        request: { model: settings.wllamaModel, messages: [{ role: "user", content: "Hi" }], max_tokens: 1 },
       });
     } else {
       res = await sendMessage({ type: "llm.test" });

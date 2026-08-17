@@ -1,6 +1,6 @@
 # LLM Context Limits by Backend
 
-How **input context** (prompt + history + tools) and **output tokens** (`max_tokens`) are bounded for the three local chat providers in this extension: **ONNX Runtime (Transformers.js)**, **WebLLM**, and **Ollama**.
+How **input context** (prompt + history + tools) and **output tokens** (`max_tokens`) are bounded for the local chat providers in this extension: **ONNX Runtime (Transformers.js)**, **WebLLM**, **wllama**, and **Ollama**.
 
 This doc covers **LLM chat** in Dialogue / agent loops. Embedding models (RAG) use separate, smaller windows.
 
@@ -15,7 +15,7 @@ All providers read the same user setting and clamps:
 | `settings.maxTokens` | **1024** | 64 – 131,072 | [`agent-config.js`](../browser-agent/agent-config.js) |
 
 - Mapped to Ollama native `options.num_predict`.
-- Passed as `max_tokens` / `max_new_tokens` to ONNX and WebLLM engines.
+- Passed as `max_tokens` / `max_new_tokens` to ONNX, WebLLM, and wllama engines.
 - **Output limit is independent of context window** — a 1024 default reply still needs room in the *input* budget on small-context models.
 
 ---
@@ -26,6 +26,7 @@ All providers read the same user setting and clamps:
 |---------|--------------------------------------|-------------------------------------|------------|------------------------|
 | **ONNX Runtime** | No — full messages sent to template + `generate()` | **Model trained max** down to **~hundreds–32K tokens** (memory estimate) | Settings registry + Dialogue bar | None |
 | **WebLLM** | Yes — proactive trim before inference | **4096 tokens** for most catalog models; **1024** for `*-1k-MLC` builds | Settings registry + Dialogue bar | [`trimChatMessagesForContext()`](../browser-agent/context-trim.js) |
+| **wllama** | Yes — same trim helper as WebLLM | **8192** tokens for curated registry entries (load-time `n_ctx`) | Settings registry + Dialogue bar | [`trimChatMessagesForContext()`](../browser-agent/context-trim.js) |
 | **Ollama** | No — server owns context | **Whatever the Ollama model + server defaults allow** (not configured here) | None | None |
 
 ---
@@ -184,6 +185,26 @@ WebLLM tool calling is only sent for models in `functionCallingModelIds`; other 
 
 ---
 
+## 2b. wllama (GGUF / llama.cpp WASM)
+
+**Code:** [`wllama-engine.js`](../browser-agent/wllama-engine.js), worker [`wllama-worker.js`](../browser-agent/wllama-worker.js), registry [`wllama-models.js`](../browser-agent/wllama-models.js).
+
+### Per-model context window
+
+Curated entries set `contextWindow` (typically **8192**). Load uses `n_ctx` capped to that value. Custom `repo::file.gguf` entries default to **4096**.
+
+`getContextEstimate()` returns the registry window with **no ONNX-style wasm32 4GB downshift** — wllama uses Memory64; OOM / `kv_cache_full` are handled at runtime.
+
+### Proactive trimming
+
+Same `trimChatMessagesForContext()` path as WebLLM before `createChatCompletion()`. Dialogue shows a trim notice when older turns are dropped.
+
+### Dialogue tool result limits
+
+Same tighter char limits as WebLLM (`DIALOGUE_WEBLLM_TOOL_RESULT_CHARS`) when `provider === "wllama"`.
+
+---
+
 ## 3. Ollama
 
 **Code:** [`llm.js`](../browser-agent/llm.js) `ollamaChatCompletions`, `buildOllamaNativeChatBody`, [`ollama-models.js`](../browser-agent/ollama-models.js) (catalog only — no context metadata).
@@ -283,6 +304,7 @@ flowchart TB
 | [`context-trim.js`](../browser-agent/context-trim.js) | WebLLM-only prompt trimming |
 | [`engine.js`](../browser-agent/engine.js) | ONNX `getContextEstimate`, inference |
 | [`webllm-engine.js`](../browser-agent/webllm-engine.js) | WebLLM registry context + trim + chat |
+| [`wllama-engine.js`](../browser-agent/wllama-engine.js) | wllama registry context + trim + chat |
 | [`llm.js`](../browser-agent/llm.js) | Provider routing; Ollama HTTP |
-| [`dialogue/ui.js`](../browser-agent/dialogue/ui.js) | Context bar, WebLLM trim notice, tool char limits |
+| [`dialogue/ui.js`](../browser-agent/dialogue/ui.js) | Context bar, WebLLM/wllama trim notice, tool char limits |
 | [`sidepanel.js`](../browser-agent/sidepanel.js) | Settings context estimate display |

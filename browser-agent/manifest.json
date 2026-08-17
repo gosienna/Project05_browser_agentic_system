@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browser Agent",
   "version": "0.1.0",
-  "description": "AI agent that reads and acts on your browser tabs. Runs fully local (ONNX or WebLLM) or via Ollama/Gemini/OpenAI/Anthropic.",
+  "description": "AI agent that reads and acts on your browser tabs. Runs fully local (ONNX, WebLLM, or wllama/GGUF) or via Ollama/Gemini/OpenAI/Anthropic.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -64,7 +64,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["vendor/transformers/*", "vendor/webllm/*", "vendor/pdf/*"],
+      "resources": ["vendor/transformers/*", "vendor/webllm/*", "vendor/wllama/*", "vendor/pdf/*"],
       "matches": ["<all_urls>"]
     }
   ]

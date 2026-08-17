@@ -667,6 +667,7 @@ export async function loadModel(modelOrOpts) {
   // Only one LLM pipeline at a time (text or vision-language).
   if (isLlmTask(task)) {
     requestPeerUnload("webllm-engine", { type: "engine.unload" });
+    requestPeerUnload("wllama-engine", { type: "engine.unload" });
     for (const llmTask of LLM_TASKS) {
       if (llmTask === task) continue;
       await unload({ task: llmTask });

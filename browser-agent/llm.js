@@ -47,6 +47,9 @@ export async function chatCompletions(request, settings) {
     case "webllm":
       response = await webllmChatCompletions(req, settings);
       break;
+    case "wllama":
+      response = await wllamaChatCompletions(req, settings);
+      break;
     case "openai":
     case "openai-compatible":
     case "nvidia-nim":
@@ -74,6 +77,8 @@ export async function renderChatPromptPreview(request, settings) {
     case "onnx":
       return onnxRenderChatPrompt(request, settings);
     case "webllm":
+      return { prompt: null };
+    case "wllama":
       return { prompt: null };
     case "ollama": {
       const baseUrl = resolveOllamaBaseUrl(settings);
@@ -115,7 +120,7 @@ export async function ensureOffscreenDocument() {
       await chrome.offscreen.createDocument({
         url: ONNX_OFFSCREEN_URL,
         reasons: ["WORKERS"],
-        justification: "Run local ONNX/WebLLM inference engines off the service worker.",
+        justification: "Run local ONNX/WebLLM/wllama inference engines off the service worker.",
       });
     } catch (err) {
       // "Only a single offscreen document may be created" -> already exists, fine.
@@ -209,6 +214,34 @@ async function webllmChatCompletions(request, settings) {
     return response;
   } catch (err) {
     return errorResponse(`WebLLM engine error: ${err.message}`, "engine_error");
+  }
+}
+
+async function wllamaChatCompletions(request, settings) {
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    return errorResponse(`Could not start local engine: ${err.message}`, "engine_error");
+  }
+
+  const model = request.model || settings?.wllamaModel;
+  if (!model) {
+    return errorResponse("No wllama model selected — open Settings and pick a GGUF model to download.", "model_not_loaded");
+  }
+
+  try {
+    const payload = stripUnsupportedNativeTools({ ...request, model }, settings);
+    const response = await chrome.runtime.sendMessage({
+      target: "wllama-engine",
+      type: "chat.completions",
+      request: payload,
+    });
+    if (!response) {
+      return errorResponse("wllama engine did not respond (offscreen document may have been evicted).", "engine_error");
+    }
+    return response;
+  } catch (err) {
+    return errorResponse(`wllama engine error: ${err.message}`, "engine_error");
   }
 }
 

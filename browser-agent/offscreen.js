@@ -1,4 +1,4 @@
-// Offscreen shell: owns chrome.runtime messaging and delegates ORT / WebLLM work to
+// Offscreen shell: owns chrome.runtime messaging and delegates ORT / WebLLM / wllama work to
 // Dedicated Workers (Atomics.wait is illegal on the window/offscreen main thread).
 
 const WORKERS = {
@@ -11,6 +11,11 @@ const WORKERS = {
     script: "webllm-worker.js",
     readyType: "webllm-worker-ready",
     label: "webllm",
+  },
+  "wllama-engine": {
+    script: "wllama-worker.js",
+    readyType: "wllama-worker-ready",
+    label: "wllama",
   },
 };
 
@@ -97,7 +102,9 @@ function callWorker(target, msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!msg || (msg.target !== "onnx-engine" && msg.target !== "webllm-engine")) return;
+  if (!msg || (msg.target !== "onnx-engine" && msg.target !== "webllm-engine" && msg.target !== "wllama-engine")) {
+    return;
+  }
 
   callWorker(msg.target, msg)
     .then(sendResponse)
@@ -109,4 +116,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-console.log("[local-engine] offscreen document ready (ORT + WebLLM worker host)");
+console.log("[local-engine] offscreen document ready (ORT + WebLLM + wllama worker host)");

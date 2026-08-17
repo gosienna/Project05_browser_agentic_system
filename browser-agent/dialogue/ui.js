@@ -37,6 +37,7 @@ import {
 } from "../openai-models.js";
 import { DEFAULT_NVIDIA_NIM_MODEL, listNvidiaNimModels } from "../nvidia-nim-models.js";
 import { isWebllmToolModel } from "../webllm-models.js";
+import { isWllamaToolModel } from "../wllama-models.js";
 import { initPdfViewer } from "../rag/pdf-viewer.js";
 import {
   bindPdfCitationOpener,
@@ -71,9 +72,9 @@ const DIALOGUE_SNAPSHOT_FIELD_CHARS = 6000;
 const UNTRUNCATED_TOOL_RESULTS = new Set(["list_components", "read_component"]);
 
 function dialogueToolResultCharLimit() {
-  return (getSettings?.().provider || "onnx") === "webllm"
-    ? DIALOGUE_WEBLLM_TOOL_RESULT_CHARS
-    : DIALOGUE_TOOL_RESULT_CHARS;
+  const provider = getSettings?.().provider || "onnx";
+  if (provider === "webllm" || provider === "wllama") return DIALOGUE_WEBLLM_TOOL_RESULT_CHARS;
+  return DIALOGUE_TOOL_RESULT_CHARS;
 }
 
 function stringifyToolResultForLlm(toolName, result) {
@@ -121,6 +122,8 @@ let llmModels;
 let modelMetaLabel;
 let webllmPickerLabel;
 let webllmMetaLabel;
+let wllamaPickerLabel;
+let wllamaMetaLabel;
 let ollamaMetaLabel;
 let startDownload;
 let formatTime;
@@ -161,6 +164,8 @@ export function createDialoguePanel(deps) {
   modelMetaLabel = deps.modelMetaLabel;
   webllmPickerLabel = deps.webllmPickerLabel;
   webllmMetaLabel = deps.webllmMetaLabel;
+  wllamaPickerLabel = deps.wllamaPickerLabel;
+  wllamaMetaLabel = deps.wllamaMetaLabel;
   ollamaMetaLabel = deps.ollamaMetaLabel;
   startDownload = deps.startDownload;
   formatTime = deps.formatTime;
@@ -1042,6 +1047,7 @@ function activeDialogueChatModelId() {
   const fromSelect = $("#dialogue-model-select")?.value || "";
   if (provider === "onnx") return fromSelect || getSettings().onnxModel || "";
   if (provider === "webllm") return fromSelect || getSettings().webllmModel || "";
+  if (provider === "wllama") return fromSelect || getSettings().wllamaModel || "";
   return fromSelect || getSettings().model || "";
 }
 
@@ -1055,6 +1061,9 @@ function dialogueCompletionTools(tools) {
   if (provider === "nvidia-nim" || isNvidiaNimProvider(provider, resolveLlmBaseUrl(settings))) return [];
   if (provider === "webllm") {
     return isWebllmToolModel(activeDialogueChatModelId()) ? tools : [];
+  }
+  if (provider === "wllama") {
+    return isWllamaToolModel(activeDialogueChatModelId()) ? tools : [];
   }
   return tools;
 }
@@ -1071,10 +1080,12 @@ async function dialogueChatCompletion(messages, tools) {
 function noteWebllmContextTrim(res) {
   const trim = res?.context_trimmed;
   if (!trim?.droppedTurns) return;
+  const provider = getSettings()?.provider || "webllm";
+  const label = provider === "wllama" ? "wllama" : "WebLLM";
   dialogueTurns.push({
     role: "assistant",
     content:
-      `ℹ WebLLM context limit (${formatDialogueTokenCount(trim.contextLimit)} tokens): ` +
+      `ℹ ${label} context limit (${formatDialogueTokenCount(trim.contextLimit)} tokens): ` +
       `dropped ${trim.droppedTurns} older message(s) from this request.`,
   });
 }
@@ -1406,7 +1417,7 @@ function renderDialogueContextBar() {
   const provider = getSettings().provider || "onnx";
   const est = dialogueContextEstimate;
   const limit = dialogueContextLimit(est);
-  if ((provider !== "onnx" && provider !== "webllm") || !est || est.error || limit == null) {
+  if ((provider !== "onnx" && provider !== "webllm" && provider !== "wllama") || !est || est.error || limit == null) {
     bar.classList.add("hidden");
     return;
   }
@@ -1431,13 +1442,18 @@ function renderDialogueContextBar() {
 /** Fetch context estimate for the active local dialogue model, then render. */
 async function refreshDialogueContextEstimate() {
   const provider = getSettings().provider || "onnx";
-  if (provider !== "onnx" && provider !== "webllm") {
+  if (provider !== "onnx" && provider !== "webllm" && provider !== "wllama") {
     dialogueContextEstimate = null;
     dialogueContextEstimateModelId = null;
     renderDialogueContextBar();
     return;
   }
-  const modelId = provider === "webllm" ? getSettings().webllmModel || "" : getSettings().onnxModel || "";
+  const modelId =
+    provider === "webllm"
+      ? getSettings().webllmModel || ""
+      : provider === "wllama"
+        ? getSettings().wllamaModel || ""
+        : getSettings().onnxModel || "";
   if (!modelId) {
     dialogueContextEstimate = null;
     dialogueContextEstimateModelId = null;
@@ -1449,7 +1465,8 @@ async function refreshDialogueContextEstimate() {
     return;
   }
   try {
-    const relay = provider === "webllm" ? "webllm.relay" : "onnx.relay";
+    const relay =
+      provider === "webllm" ? "webllm.relay" : provider === "wllama" ? "wllama.relay" : "onnx.relay";
     const est = await sendMessage({ type: relay, engineType: "engine.contextEstimate", model: modelId });
     dialogueContextEstimate = est || null;
     dialogueContextEstimateModelId = modelId;
@@ -1510,6 +1527,26 @@ async function refreshDialogueModelSelect() {
       models.find((m) => m.tier === "default")?.id ||
       models[0]?.id ||
       "";
+  } else if (provider === "wllama") {
+    if (getRegistry().length === 0) {
+      try {
+        const modelsRes = await sendMessage({ type: "wllama.relay", engineType: "engine.models" });
+        if (modelsRes?.models?.length) setRegistry(modelsRes.models);
+      } catch {
+        // engine may not be started yet
+      }
+    }
+    const models = downloadedLlmModels();
+    options = models.map((m) => ({
+      id: m.id,
+      label: wllamaPickerLabel ? wllamaPickerLabel(m) : `${m.label} (${wllamaMetaLabel ? wllamaMetaLabel(m) : modelMetaLabel(m)})`,
+    }));
+    const settingsModel = getSettings().wllamaModel || "";
+    selected =
+      (settingsModel && downloaded[settingsModel] ? settingsModel : "") ||
+      models.find((m) => m.tier === "default")?.id ||
+      models[0]?.id ||
+      "";
   } else if (provider === "ollama") {
     const all = await listOllamaModels();
     options = all.filter((m) => downloaded[m.id]);
@@ -1548,7 +1585,7 @@ async function refreshDialogueModelSelect() {
     opt.textContent =
       provider === "ollama"
         ? "No pulled models — open Settings"
-        : provider === "onnx" || provider === "webllm"
+        : provider === "onnx" || provider === "webllm" || provider === "wllama"
           ? "No downloaded models — open Settings"
           : "Set model in Settings";
     select.appendChild(opt);
@@ -1560,6 +1597,7 @@ async function refreshDialogueModelSelect() {
   select.disabled =
     provider !== "onnx" &&
     provider !== "webllm" &&
+    provider !== "wllama" &&
     provider !== "ollama" &&
     provider !== "nvidia-nim" &&
     provider !== "gemini" &&
@@ -1594,6 +1632,8 @@ async function refreshDialogueModelSelect() {
     await saveSettings({ onnxModel: chosen });
   } else if (provider === "webllm" && chosen && getSettings().webllmModel !== chosen) {
     await saveSettings({ webllmModel: chosen });
+  } else if (provider === "wllama" && chosen && getSettings().wllamaModel !== chosen) {
+    await saveSettings({ wllamaModel: chosen });
   }
 
   updateDialogueAttachUI();
@@ -1609,7 +1649,9 @@ async function onDialogueModelChange(e) {
       ? getSettings().onnxModel || ""
       : provider === "webllm"
         ? getSettings().webllmModel || ""
-        : getSettings().model || "";
+        : provider === "wllama"
+          ? getSettings().wllamaModel || ""
+          : getSettings().model || "";
 
   if (provider === "onnx") {
     if (!getDownloadedModels()[modelId]) {
@@ -1629,6 +1671,15 @@ async function onDialogueModelChange(e) {
       }
     }
     await saveSettings({ webllmModel: modelId });
+    startDownload(modelId);
+  } else if (provider === "wllama") {
+    if (!getDownloadedModels()[modelId]) {
+      if (!confirmLocalModelDownload(modelId)) {
+        select.value = previous;
+        return;
+      }
+    }
+    await saveSettings({ wllamaModel: modelId });
     startDownload(modelId);
   } else if (provider === "ollama") {
     if (!getDownloadedModels()[modelId]) {
@@ -1657,11 +1708,13 @@ function confirmLocalModelDownload(modelId) {
   const meta = entry
     ? provider === "webllm" && webllmMetaLabel
       ? webllmMetaLabel(entry)
-      : provider === "ollama" && ollamaMetaLabel
-        ? ollamaMetaLabel(entry)
-        : entry.contextWindow
-          ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
-          : modelMetaLabel(entry)
+      : provider === "wllama" && wllamaMetaLabel
+        ? wllamaMetaLabel(entry)
+        : provider === "ollama" && ollamaMetaLabel
+          ? ollamaMetaLabel(entry)
+          : entry.contextWindow
+            ? `${formatDialogueTokenCount(entry.contextWindow)} ctx`
+            : modelMetaLabel(entry)
     : "unknown size";
   const verb = provider === "ollama" ? "pulled" : "downloaded";
   const action = provider === "ollama" ? "Pull" : "Download";
@@ -1933,6 +1986,9 @@ async function sendDialogue() {
   }
   if (provider === "webllm" && getSettings().webllmModel && !getDownloadedModels()[getSettings().webllmModel]) {
     if (!confirmLocalModelDownload(getSettings().webllmModel)) return;
+  }
+  if (provider === "wllama" && getSettings().wllamaModel && !getDownloadedModels()[getSettings().wllamaModel]) {
+    if (!confirmLocalModelDownload(getSettings().wllamaModel)) return;
   }
 
   dialogueTriggerQuery = String(userTurn.content || "").trim();

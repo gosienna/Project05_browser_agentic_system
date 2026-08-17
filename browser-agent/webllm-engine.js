@@ -324,6 +324,7 @@ export async function loadModel(modelId) {
   if (loadedModelId === modelId) return status();
 
   requestPeerUnload("onnx-engine", { type: "engine.unloadLlm" });
+  requestPeerUnload("wllama-engine", { type: "engine.unload" });
 
   console.log(`[webllm] loading ${modelId} on WebGPU`);
   try {

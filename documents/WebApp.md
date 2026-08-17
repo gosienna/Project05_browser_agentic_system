@@ -53,7 +53,7 @@ Side panel WebApp tab
 
 ## Local engines
 
-`onnx` runs Transformers.js in [`engine.js`](../browser-agent/engine.js) (WebGPU or WASM fallback). `webllm` runs MLC [`webllm-engine.js`](../browser-agent/webllm-engine.js) (WebGPU only). Vision/audio MCP tools (`describe_image`, etc.) always use ONNX even when chat provider is WebLLM. Switching between ONNX and WebLLM chat unloads the other engine's LLM weights to save GPU memory.
+`onnx` runs Transformers.js in [`engine.js`](../browser-agent/engine.js) (WebGPU or WASM fallback). `webllm` runs MLC [`webllm-engine.js`](../browser-agent/webllm-engine.js) (WebGPU only). `wllama` runs llama.cpp WASM [`wllama-engine.js`](../browser-agent/wllama-engine.js) (WebGPU offload when available). Vision/audio MCP tools (`describe_image`, etc.) always use ONNX even when chat provider is WebLLM or wllama. Switching between local chat engines unloads the other engines' LLM weights to save memory.
 
 ---
 

@@ -1,6 +1,7 @@
 /** WebLLM model metadata helpers for model pickers and labels. */
 
 import { isQwen3ThinkingModel } from "./reasoning-content.js";
+import { isWllamaToolModel } from "./wllama-models.js";
 
 /** Hermes models with native OpenAI-style `tools` support in WebLLM. */
 export const WEBLLM_FUNCTION_CALLING_MODEL_IDS = [
@@ -31,11 +32,12 @@ export function supportsNativeChatTools(settings, modelId) {
   const provider = settings?.provider || "onnx";
   if (provider === "onnx") return false;
   if (provider === "webllm") {
-    const id =
-      modelId ||
-      settings?.webllmModel ||
-      "";
+    const id = modelId || settings?.webllmModel || "";
     return isWebllmToolModel(id);
+  }
+  if (provider === "wllama") {
+    const id = modelId || settings?.wllamaModel || "";
+    return isWllamaToolModel(id);
   }
   return true;
 }
@@ -48,9 +50,11 @@ export function stripUnsupportedNativeTools(request, settings) {
     request.model ||
     (provider === "webllm"
       ? settings?.webllmModel
-      : provider === "onnx"
-        ? settings?.onnxModel
-        : settings?.model);
+      : provider === "wllama"
+        ? settings?.wllamaModel
+        : provider === "onnx"
+          ? settings?.onnxModel
+          : settings?.model);
   if (supportsNativeChatTools(settings, modelId)) return request;
   const { tools: _tools, ...rest } = request;
   return rest;

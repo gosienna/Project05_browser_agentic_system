@@ -43,7 +43,7 @@ function createEmbedProgressListener() {
       setRagStatus(msg.message);
       return;
     }
-    if (msg?.target === "onnx-progress" || msg?.target === "webllm-progress") {
+    if (msg?.target === "onnx-progress" || msg?.target === "webllm-progress" || msg?.target === "wllama-progress") {
       const label = formatEngineProgress(msg);
       if (label) setRagStatus(`Downloading embedding model… ${label}`);
       return;

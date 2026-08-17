@@ -1,4 +1,4 @@
-# LLM API Schemas — ONNX, WebLLM, Ollama, OpenAI, NVIDIA NIM, Gemini
+# LLM API Schemas — ONNX, WebLLM, wllama, Ollama, OpenAI, NVIDIA NIM, Gemini
 
 Reference for how each LLM backend is called in this extension. All chat paths converge on a single **internal OpenAI Chat Completions shape** in [`llm.js`](../browser-agent/llm.js); each provider adapter translates to its own wire format.
 
@@ -42,7 +42,7 @@ Every provider is consumed through `chatCompletions(request, settings)`:
   }],
   usage: { prompt_tokens, completion_tokens, total_tokens },
   prompt?: string,        // rendered chat template (ONNX, Ollama debug)
-  context_trimmed?: object, // WebLLM only when history was trimmed
+  context_trimmed?: object, // WebLLM / wllama when history was trimmed
 }
 
 // Error response
@@ -57,6 +57,7 @@ Every provider is consumed through `chatCompletions(request, settings)`:
 |---------------------|---------|-------------------|
 | `onnx` | `onnxChatCompletions` → offscreen `onnx-engine` | `settings.onnxModel` |
 | `webllm` | `webllmChatCompletions` → offscreen `webllm-engine` | `settings.webllmModel` |
+| `wllama` | `wllamaChatCompletions` → offscreen `wllama-engine` | `settings.wllamaModel` |
 | `ollama` | `ollamaChatCompletions` → HTTP to local Ollama | `settings.model` |
 | `openai` | `openaiChatCompletions` → OpenAI Chat Completions HTTP | `settings.model` |
 | `openai-compatible` | `openaiChatCompletions` → custom `/v1` endpoint | `settings.model` |
@@ -213,7 +214,56 @@ Default embed model: `snowflake-arctic-embed-s-q0f32-MLC-b4`.
 
 ---
 
-## 3. Ollama (local server)
+## 3. wllama (local GGUF)
+
+**Stack:** [`@wllama/wllama`](https://github.com/ngxson/wllama) (llama.cpp WASM, Memory64) in `wllama-worker.js` → [`wllama-engine.js`](../browser-agent/wllama-engine.js). WebGPU offload when available; WASM/CPU fallback otherwise.
+
+### Extension IPC
+
+Messages use `target: "wllama-engine"`.
+
+| `type` | `request` / fields | Returns |
+|--------|-------------------|---------|
+| `chat.completions` | OpenAI-shaped chat request + `model` | `chat.completion` (+ optional `context_trimmed`) |
+| `engine.load` | `model` (`repo::file.gguf`) | `status()` |
+| `engine.unload` | — | `status()` |
+| `engine.status` | — | device, loaded model, registry, cache |
+| `engine.models` | — | curated registry |
+| `engine.contextEstimate` | `model` | context from registry (no ONNX 4GB wasm32 estimator) |
+| `engine.clearCache` / `engine.deleteModel` | `model` for delete | `status()` |
+
+Relay: `{ type: "wllama.relay", engineType, model?, request? }`.
+
+### Chat completions
+
+```js
+await wllama.loadModelFromHF({ repo, file }, { n_ctx, jinja: true, n_gpu_layers });
+await wllama.createChatCompletion({
+  messages, tools?, tool_choice?, temperature, max_tokens, stream: false
+});
+```
+
+**Model id:** `repo::file.gguf` (see [`wllama-models.js`](../browser-agent/wllama-models.js)). Custom HF repo/file allowed from Settings.
+
+**Tool gating:** `stripUnsupportedNativeTools()` / `isWllamaToolModel()` — curated entries mark `supportsTools`.
+
+**Memory:** Memory64 WASM (not the ONNX wasm32 4GB heap cap). Single GGUF file still limited to ~2GB ArrayBuffer unless split. Peer-unloads ONNX LLM and WebLLM when loading.
+
+**Embeddings / vision:** not wired in v1 (still use ONNX for vision/audio tools).
+
+### Execution
+
+| Aspect | Detail |
+|--------|--------|
+| Device | WebGPU layers when available, else WASM CPU |
+| Models | Curated GGUF list + optional custom HF `repo::file` |
+| Cache | IndexedDB via wllama `CacheManager` |
+| Vendor | `vendor/wllama/` (`wllama.min.js` + `wllama.wasm`) |
+| Prompt preview | Not supported |
+
+---
+
+## 4. Ollama (local server)
 
 **Stack:** HTTP to a running Ollama daemon. Default base URL: `http://127.0.0.1:11434` (`settings.baseUrl`).
 
@@ -292,7 +342,7 @@ Implemented in [`ollama-models.js`](../browser-agent/ollama-models.js). CORS may
 
 ---
 
-## 4. OpenAI (remote)
+## 5. OpenAI (remote)
 
 **Stack:** OpenAI Chat Completions REST API. Default base URL: `https://api.openai.com/v1` (`settings.baseUrl`, overridable) ([`llm-providers.js`](../browser-agent/llm-providers.js), [`openai-models.js`](../browser-agent/openai-models.js)).
 
@@ -356,7 +406,7 @@ No local model load/unload. No prompt-preview API. RAG embeddings use `POST /v1/
 
 ---
 
-## 5. NVIDIA NIM (remote)
+## 6. NVIDIA NIM (remote)
 
 **Stack:** OpenAI-compatible HTTPS API. Fixed endpoint: `https://integrate.api.nvidia.com/v1` ([`llm-providers.js`](../browser-agent/llm-providers.js)).
 
@@ -412,7 +462,7 @@ No local model load/unload. No prompt-preview API. RAG embeddings use OpenAI-com
 
 ---
 
-## 6. Google Gemini (remote)
+## 7. Google Gemini (remote)
 
 **Stack:** Google AI `generateContent` REST API. Fixed endpoint: `https://generativelanguage.googleapis.com/v1beta` ([`llm-providers.js`](../browser-agent/llm-providers.js), [`gemini-models.js`](../browser-agent/gemini-models.js)).
 
@@ -498,19 +548,19 @@ No local model load/unload. No prompt-preview API. RAG embeddings use `batchEmbe
 
 ## Comparison
 
-| | ONNX | WebLLM | Ollama | OpenAI | NVIDIA NIM | Gemini |
-|---|------|--------|--------|--------|------------|--------|
-| **Location** | Browser (offscreen) | Browser (offscreen) | Local HTTP server | Cloud HTTPS | Cloud HTTPS | Cloud HTTPS |
-| **Wire API** | Extension IPC → Transformers.js | Extension IPC → MLC OpenAI client | `/v1/chat/completions` or `/api/chat` | `/v1/chat/completions` | `/v1/chat/completions` | `/v1beta/models/{model}:generateContent` |
-| **Internal chat schema** | OpenAI | OpenAI | OpenAI (translated on fallback) | OpenAI (passthrough) | OpenAI (+ NIM kwargs) | OpenAI (translated) |
-| **Auth** | None | None | None (CORS) | `Bearer sk-…` | `Bearer nvapi-…` | `x-goog-api-key` |
-| **Streaming** | No | No | No | No | No | No |
-| **Tools** | Yes (template + generate) | Yes (subset of models) | Yes | Yes | Yes | Yes (`functionDeclarations`) |
-| **Thinking flag** | `enable_thinking` (Qwen3, Gemma 4) | `extra_body.enable_thinking` (Qwen3) | `think` | Not sent (`reasoning_effort` unsupported) | `chat_template_kwargs` | `thinkingConfig` |
-| **Prompt preview** | `chat.renderPrompt` | No | `_debug_render_only` | No | No | No |
-| **Embeddings** | `engine.run` feature-extraction | `embeddings.create` | `POST /api/embed` | `POST /v1/embeddings` (RAG) | `POST /v1/embeddings` (RAG) | `batchEmbedContents` (RAG) |
-| **Multimodal chat** | Gemma 4, Ministral VLMs | Vision models in MLC list | Model-dependent | Catalog lists image input; text-only wire path today | Nemotron VL (remote) | Catalog lists image/video/audio/PDF; text-only wire path today |
-| **Device** | WebGPU or WASM | WebGPU only | Server GPU/CPU | OpenAI cloud | NVIDIA cloud | Google cloud |
+| | ONNX | WebLLM | wllama | Ollama | OpenAI | NVIDIA NIM | Gemini |
+|---|------|--------|--------|--------|--------|------------|--------|
+| **Location** | Browser (offscreen) | Browser (offscreen) | Browser (offscreen) | Local HTTP server | Cloud HTTPS | Cloud HTTPS | Cloud HTTPS |
+| **Wire API** | Extension IPC → Transformers.js | Extension IPC → MLC OpenAI client | Extension IPC → wllama OAI API | `/v1/chat/completions` or `/api/chat` | `/v1/chat/completions` | `/v1/chat/completions` | `/v1beta/models/{model}:generateContent` |
+| **Internal chat schema** | OpenAI | OpenAI | OpenAI | OpenAI (translated on fallback) | OpenAI (passthrough) | OpenAI (+ NIM kwargs) | OpenAI (translated) |
+| **Auth** | None | None | None | None (CORS) | `Bearer sk-…` | `Bearer nvapi-…` | `x-goog-api-key` |
+| **Streaming** | No | No | No | No | No | No | No |
+| **Tools** | Yes (template + generate) | Yes (subset of models) | Yes (Jinja tool templates) | Yes | Yes | Yes | Yes (`functionDeclarations`) |
+| **Thinking flag** | `enable_thinking` (Qwen3, Gemma 4) | `extra_body.enable_thinking` (Qwen3) | Not sent | `think` | Not sent (`reasoning_effort` unsupported) | `chat_template_kwargs` | `thinkingConfig` |
+| **Prompt preview** | `chat.renderPrompt` | No | No | `_debug_render_only` | No | No | No |
+| **Embeddings** | `engine.run` feature-extraction | `embeddings.create` | Not wired (v1) | `POST /api/embed` | `POST /v1/embeddings` (RAG) | `POST /v1/embeddings` (RAG) | `batchEmbedContents` (RAG) |
+| **Multimodal chat** | Gemma 4, Ministral VLMs | Vision models in MLC list | Not wired (v1) | Model-dependent | Catalog lists image input; text-only wire path today | Nemotron VL (remote) | Catalog lists image/video/audio/PDF; text-only wire path today |
+| **Device** | WebGPU or WASM | WebGPU only | WebGPU + WASM fallback | Server GPU/CPU | OpenAI cloud | NVIDIA cloud | Google cloud |
 
 `openai-compatible` matches the **OpenAI** column except base URL is user-supplied and the API key is optional.
 
@@ -526,6 +576,9 @@ No local model load/unload. No prompt-preview API. RAG embeddings use `batchEmbe
 | [`ort-worker.js`](../browser-agent/ort-worker.js) | ONNX worker message dispatch |
 | [`webllm-engine.js`](../browser-agent/webllm-engine.js) | WebLLM / MLCEngine |
 | [`webllm-worker.js`](../browser-agent/webllm-worker.js) | WebLLM worker message dispatch |
+| [`wllama-engine.js`](../browser-agent/wllama-engine.js) | wllama / llama.cpp WASM |
+| [`wllama-worker.js`](../browser-agent/wllama-worker.js) | wllama worker message dispatch |
+| [`wllama-models.js`](../browser-agent/wllama-models.js) | Curated GGUF registry + tool gating |
 | [`ollama-models.js`](../browser-agent/ollama-models.js) | Ollama HTTP helpers (pull, tags, embed) |
 | [`embed-models.js`](../browser-agent/embed-models.js) | Curated remote embedding model lists |
 | [`openai-models.js`](../browser-agent/openai-models.js) | Curated OpenAI flagship model list |
