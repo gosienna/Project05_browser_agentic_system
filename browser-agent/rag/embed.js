@@ -5,7 +5,7 @@ import {
   isOllamaModelInstalled,
   listOllamaInstalled,
   pullOllamaModel,
-} from "../ollama-models.js";
+} from "../llm-API/ollama-models.js";
 import { resolveOllamaBaseUrl } from "../llm-providers.js";
 import {
   EMBED_BATCH_SIZE,

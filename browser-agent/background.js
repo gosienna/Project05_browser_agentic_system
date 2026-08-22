@@ -1,13 +1,12 @@
-import { getMaxTokens, getWllamaContextLimit } from "./agent-config.js";
+import { getMaxTokens, getWllamaContextLimit } from "./llm-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
-import { migrateGeminiModelSettings } from "./gemini-models.js";
+import { migrateGeminiModelSettings } from "./llm-API/gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
-import { runSystemEditor } from "./WebApp/system-editor.js";
-import { ensureSeeded, getSystem } from "./WebApp/system-store.js";
-import { handleTabBridge } from "./tab-bridge.js";
+import { ensureSeeded } from "./modes/WebApp/system-store.js";
+import { handleTabBridge } from "./modes/WebApp/tab-bridge.js";
 import { handleRagMessage } from "./rag/handlers.js";
-import { stripUnsupportedNativeTools } from "./webllm-models.js";
+import { stripUnsupportedNativeTools } from "./llm-browser/webllm-models.js";
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -50,37 +49,6 @@ async function setSettings(patch) {
   await chrome.storage.local.set({ settings: next });
   return next;
 }
-
-// Long-lived port for the unused system-editor ReAct loop (side panel uses Dialogue dock).
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "system-editor") return;
-  port.onMessage.addListener(async (msg) => {
-    if (msg?.type !== "run") return;
-    const settings = await getSettings();
-    const send = (event) => {
-      try {
-        port.postMessage(event);
-      } catch {
-        /* panel closed */
-      }
-    };
-
-    try {
-      await ensureSeeded();
-      const system = await getSystem(msg.systemId);
-      if (!system) throw new Error(`Unknown system "${msg.systemId}"`);
-      await runSystemEditor({
-        systemId: msg.systemId,
-        task: msg.task,
-        settings,
-        onEvent: send,
-      });
-      send({ type: "done" });
-    } catch (err) {
-      send({ type: "error", message: err?.message || String(err) });
-    }
-  });
-});
 
 async function markOnnxModelDownloaded(modelId) {
   const { onnxModels } = await chrome.storage.local.get("onnxModels");

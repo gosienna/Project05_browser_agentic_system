@@ -5,7 +5,8 @@
   "description": "Chrome MV3 browser agent with in-browser ONNX, WebLLM, and wllama engines.",
   "type": "module",
   "scripts": {
-    "build:vendor": "node build/build-vendor.mjs && node build/build-webllm-vendor.mjs && node build/build-wllama-vendor.mjs && node build/build-pdf-vendor.mjs"
+    "build:llm-vendor": "node llm-browser/build/build-vendor.mjs && node llm-browser/build/build-webllm-vendor.mjs && node llm-browser/build/build-wllama-vendor.mjs",
+    "build:vendor": "npm run build:llm-vendor && node build/build-pdf-vendor.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "4.2.0",

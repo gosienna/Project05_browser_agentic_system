@@ -1,8 +1,8 @@
 // LLM provider ids, defaults, and thinking-toggle availability for Settings UI.
 
-import { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE_URL, geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
-import { DEFAULT_NVIDIA_NIM_MODEL } from "./nvidia-nim-models.js";
-import { DEFAULT_OPENAI_MODEL, resolveOpenAiModel } from "./openai-models.js";
+import { DEFAULT_GEMINI_MODEL, GEMINI_API_BASE_URL, geminiModelSupportsThinking, resolveGeminiModel } from "./llm-API/gemini-models.js";
+import { DEFAULT_NVIDIA_NIM_MODEL } from "./llm-API/nvidia-nim-models.js";
+import { DEFAULT_OPENAI_MODEL, resolveOpenAiModel } from "./llm-API/openai-models.js";
 
 export const NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1";
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";

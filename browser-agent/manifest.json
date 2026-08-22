@@ -24,7 +24,7 @@
       {
         "id": "ollama_cors",
         "enabled": true,
-        "path": "rules/ollama-cors.json"
+        "path": "llm-API/ollama-cors.json"
       }
     ]
   },
@@ -40,7 +40,7 @@
     "type": "module"
   },
   "side_panel": {
-    "default_path": "sidepanel.html"
+    "default_path": "UI/sidepanel.html"
   },
   "action": {
     "default_title": "Browser Agent",
@@ -54,7 +54,7 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "sandbox": {
-    "pages": ["WebApp/sandbox.html"]
+    "pages": ["modes/WebApp/sandbox.html"]
   },
   "cross_origin_embedder_policy": {
     "value": "credentialless"
@@ -64,7 +64,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["vendor/transformers/*", "vendor/webllm/*", "vendor/wllama/*", "vendor/pdf/*"],
+      "resources": ["llm-browser/vendor/transformers/*", "llm-browser/vendor/webllm/*", "llm-browser/vendor/wllama/*", "vendor/pdf/*"],
       "matches": ["<all_urls>"]
     }
   ]

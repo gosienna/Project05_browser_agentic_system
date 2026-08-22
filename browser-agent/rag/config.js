@@ -5,7 +5,7 @@ import {
   DEFAULT_NVIDIA_EMBED_MODEL,
   DEFAULT_OPENAI_COMPATIBLE_EMBED_MODEL,
   DEFAULT_OPENAI_EMBED_MODEL,
-} from "../embed-models.js";
+} from "./embed-models.js";
 
 export const DEFAULT_ONNX_EMBED_MODEL = "Xenova/all-MiniLM-L6-v2";
 export const DEFAULT_WEBLLM_EMBED_MODEL = "snowflake-arctic-embed-s-q0f32-MLC-b4";

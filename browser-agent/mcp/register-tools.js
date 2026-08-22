@@ -1,10 +1,10 @@
 // Register built-in MCP tools for Dialogue (web search, browser automation, RAG, WebApp components).
 
 import { registerMcpTool } from "./server.js";
-import { tavilySearch, prepareSearchToolArgs } from "../dialogue/tool-runtime.js";
-import * as browserTools from "../dialogue/tools/index.js";
-import * as webAppTools from "../WebApp/tools/index.js";
-import { WEBAPP_MCP_TOOL_DEFS } from "../WebApp/tools/schema.js";
+import { tavilySearch, prepareSearchToolArgs } from "../modes/dialogue/tool-runtime.js";
+import * as browserTools from "../modes/dialogue/tools/index.js";
+import * as webAppTools from "../modes/WebApp/tools/index.js";
+import { WEBAPP_MCP_TOOL_DEFS } from "../modes/WebApp/tools/schema.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
 import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
