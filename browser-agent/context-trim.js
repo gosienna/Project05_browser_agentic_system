@@ -11,7 +11,7 @@ function messageContentChars(msg) {
   if (Array.isArray(c)) {
     return c.reduce((n, part) => {
       if (part?.type === "text") return n + (part.text?.length ?? 0);
-      if (part?.type === "image_url") return n + 512;
+      if (part?.type === "image_url" || part?.type === "image" || part?.type === "input_image") return n + 512;
       return n + 64;
     }, 0);
   }

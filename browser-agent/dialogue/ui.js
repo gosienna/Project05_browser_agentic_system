@@ -27,7 +27,7 @@ import {
   serializeDialogueRawPayload,
 } from "./raw-json-view.js";
 import { listOllamaModelsWithMeta, resolveOllamaInstalledName } from "../ollama-models.js";
-import { getDialogueMaxToolRounds } from "../agent-config.js";
+import { getDialogueMaxToolRounds, getWllamaContextLimit } from "../agent-config.js";
 import { DEFAULT_GEMINI_MODEL, formatGeminiPickerLabel, listGeminiModels, resolveGeminiModel } from "../gemini-models.js";
 import {
   DEFAULT_OPENAI_MODEL,
@@ -37,7 +37,7 @@ import {
 } from "../openai-models.js";
 import { DEFAULT_NVIDIA_NIM_MODEL, listNvidiaNimModels } from "../nvidia-nim-models.js";
 import { isWebllmToolModel } from "../webllm-models.js";
-import { isWllamaToolModel } from "../wllama-models.js";
+import { isWllamaToolModel, isWllamaVisionModel } from "../wllama-models.js";
 import { initPdfViewer } from "../rag/pdf-viewer.js";
 import {
   bindPdfCitationOpener,
@@ -1460,7 +1460,9 @@ async function refreshDialogueContextEstimate() {
     renderDialogueContextBar();
     return;
   }
-  if (dialogueContextEstimateModelId === modelId && dialogueContextEstimate) {
+  const estimateKey =
+    provider === "wllama" ? `${modelId}::${getWllamaContextLimit(getSettings())}` : modelId;
+  if (dialogueContextEstimateModelId === estimateKey && dialogueContextEstimate) {
     renderDialogueContextBar();
     return;
   }
@@ -1469,7 +1471,7 @@ async function refreshDialogueContextEstimate() {
       provider === "webllm" ? "webllm.relay" : provider === "wllama" ? "wllama.relay" : "onnx.relay";
     const est = await sendMessage({ type: relay, engineType: "engine.contextEstimate", model: modelId });
     dialogueContextEstimate = est || null;
-    dialogueContextEstimateModelId = modelId;
+    dialogueContextEstimateModelId = estimateKey;
   } catch {
     dialogueContextEstimate = null;
     dialogueContextEstimateModelId = null;
@@ -1735,6 +1737,9 @@ function dialogueModelSupportsImages() {
     const modelId = $("#dialogue-model-select")?.value || getSettings().onnxModel || "";
     return getRegistry().find((m) => m.id === modelId)?.task === "image-text-to-text";
   }
+  if (provider === "wllama") {
+    return isWllamaVisionModel(activeDialogueChatModelId());
+  }
   // OpenAI-shaped providers pass content parts through untouched; the
   // Anthropic converter doesn't translate image parts, so hide there.
   return provider !== "anthropic";
@@ -1754,10 +1759,36 @@ function updateDialogueAttachUI() {
 async function addDialogueImages(fileList) {
   const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
   for (const file of files) {
-    dialogueImages.push(await fileToDataUrl(file));
+    dialogueImages.push(await fileToCompressedDataUrl(file));
   }
   renderDialogueAttachments();
   notifyDialogueInputChanged();
+}
+
+const DIALOGUE_IMAGE_MAX_EDGE = 1280;
+
+/** JPEG data URL so chrome.runtime.sendMessage and llama.cpp both get a small, decodable image. */
+async function fileToCompressedDataUrl(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, DIALOGUE_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close();
+      throw new Error("canvas 2d unavailable");
+    }
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    return canvas.toDataURL("image/jpeg", 0.85);
+  } catch (err) {
+    console.warn("[dialogue] image compress failed, using original file:", err?.message || err);
+    return fileToDataUrl(file);
+  }
 }
 
 function fileToDataUrl(file) {
@@ -1920,7 +1951,8 @@ async function sendDialogue() {
   if (
     dialogueInputPreviewMode === "json" &&
     dialogueInputJsonViewMode === "edit" &&
-    isDialogueInputPreviewOpen()
+    isDialogueInputPreviewOpen() &&
+    (dialogueInputJsonDirty || dialogueInputPayloadOverride)
   ) {
     const editEl = $("#dialogue-preview-json-edit");
     if (editEl?.value.trim()) {

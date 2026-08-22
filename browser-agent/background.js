@@ -1,4 +1,4 @@
-import { getMaxTokens } from "./agent-config.js";
+import { getMaxTokens, getWllamaContextLimit } from "./agent-config.js";
 import { chatCompletions, ensureOffscreenDocument, renderChatPromptPreview } from "./llm.js";
 import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
 import { migrateGeminiModelSettings } from "./gemini-models.js";
@@ -286,7 +286,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         let request = msg.request;
         if (msg.engineType === "chat.completions" && request) {
           request = stripUnsupportedNativeTools(
-            { ...request, model: msg.model || request.model },
+            { ...request, model: msg.model || request.model, n_ctx: getWllamaContextLimit(settings) },
             settings
           );
         }
@@ -295,6 +295,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           type: msg.engineType,
           model: msg.model,
           request,
+          nCtx: getWllamaContextLimit(settings),
         });
       })
       .then(async (res) => {

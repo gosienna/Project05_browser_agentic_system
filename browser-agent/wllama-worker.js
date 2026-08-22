@@ -26,11 +26,16 @@ self.onmessage = async (event) => {
 async function handle(msg) {
   switch (msg.type) {
     case "chat.completions":
-      return engine.chatCompletions(msg.request);
+      return engine.chatCompletions({
+        ...msg.request,
+        n_ctx: msg.request?.n_ctx ?? msg.nCtx,
+      });
     case "engine.status":
       return engine.status();
     case "engine.load":
-      return engine.loadModel(msg.model || msg.request?.model);
+      return engine.loadModel(msg.model || msg.request?.model, {
+        nCtx: msg.nCtx ?? msg.request?.n_ctx,
+      });
     case "engine.unload":
       return engine.unload();
     case "engine.clearCache":
@@ -40,7 +45,9 @@ async function handle(msg) {
     case "engine.models":
       return { models: await engine.modelsForTask() };
     case "engine.contextEstimate":
-      return engine.getContextEstimate(msg.model || msg.request?.model);
+      return engine.getContextEstimate(msg.model || msg.request?.model, {
+        nCtx: msg.nCtx ?? msg.request?.n_ctx,
+      });
     default:
       return {
         error: {

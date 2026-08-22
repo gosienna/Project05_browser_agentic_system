@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_TOKENS,
   getDialogueMaxToolRounds,
   getMaxTokens,
+  getWllamaContextLimit,
 } from "./agent-config.js";
 import { chatCompletions, renderChatPromptPreview } from "./llm.js";
 import {
@@ -454,6 +455,13 @@ function wireSettingsForm() {
     e.target.value = n;
     saveSettings({ maxTokens: n });
   });
+  $("#wllama-nctx-input")?.addEventListener("change", async (e) => {
+    const n = getWllamaContextLimit({ wllamaContextLimit: e.target.value });
+    e.target.value = n;
+    await saveSettings({ wllamaContextLimit: n });
+    // n_ctx is allocated at load; drop the current instance so the next chat reloads.
+    await sendMessage({ type: "wllama.relay", engineType: "engine.unload" });
+  });
   $("#dialogue-max-tool-rounds-input")?.addEventListener("change", (e) => {
     const n = getDialogueMaxToolRounds({ dialogueMaxToolRounds: e.target.value });
     e.target.value = n;
@@ -790,6 +798,8 @@ function applySettingsToForm() {
   renderOpenAiModelSelect();
   $("#max-steps-input").value = settings.maxSteps || DEFAULT_MAX_STEPS;
   $("#max-tokens-input").value = getMaxTokens(settings);
+  const wllamaNctxInput = $("#wllama-nctx-input");
+  if (wllamaNctxInput) wllamaNctxInput.value = getWllamaContextLimit(settings);
   const toolRoundsInput = $("#dialogue-max-tool-rounds-input");
   if (toolRoundsInput) toolRoundsInput.value = getDialogueMaxToolRounds(settings);
   const thinkingCb = $("#enable-thinking-input");
@@ -1401,7 +1411,10 @@ function webllmMetaLabel(entry) {
 }
 
 function wllamaMetaLabel(entry) {
-  return formatWllamaRegistryMeta(entry, { sizeLabel });
+  return formatWllamaRegistryMeta(
+    { ...entry, contextWindow: getWllamaContextLimit(settings) },
+    { sizeLabel }
+  );
 }
 
 async function refreshWllamaSettings() {

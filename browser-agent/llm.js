@@ -2,7 +2,7 @@
 // chat.completions request/response shape. See ONNX_ENGINE_PLAN.md §3.
 
 import { toAnthropicTools, toGeminiTools } from "./dialogue/tools/schema.js";
-import { getMaxTokens, resolveMaxTokens } from "./agent-config.js";
+import { getMaxTokens, getWllamaContextLimit, resolveMaxTokens } from "./agent-config.js";
 import {
   isNvidiaNimProvider,
   providerRequiresApiKey,
@@ -230,7 +230,10 @@ async function wllamaChatCompletions(request, settings) {
   }
 
   try {
-    const payload = stripUnsupportedNativeTools({ ...request, model }, settings);
+    const payload = {
+      ...stripUnsupportedNativeTools({ ...request, model }, settings),
+      n_ctx: getWllamaContextLimit(settings),
+    };
     const response = await chrome.runtime.sendMessage({
       target: "wllama-engine",
       type: "chat.completions",

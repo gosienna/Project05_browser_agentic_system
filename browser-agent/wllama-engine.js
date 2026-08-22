@@ -1,11 +1,12 @@
 // Wllama chat engine: GGUF via llama.cpp WASM. OpenAI-shaped chat.completions.
 // Runs inside wllama-worker.js (Dedicated Worker). Wllama spawns its own nested wasm worker.
 
-import { resolveMaxTokens } from "./agent-config.js";
+import { resolveMaxTokens, resolveWllamaContextLimit } from "./agent-config.js";
 import { estimateChatTokens, trimChatMessagesForContext } from "./context-trim.js";
 import {
   DEFAULT_WLLAMA_MODEL,
   isWllamaToolModel,
+  isWllamaVisionModel,
   resolveWllamaModelEntry,
   WLLAMA_MODEL_REGISTRY,
 } from "./wllama-models.js";
@@ -18,6 +19,8 @@ let wllamaModule = null;
 /** @type {import("@wllama/wllama").Wllama | null} */
 let wllama = null;
 let loadedModelId = null;
+/** n_ctx used for the currently loaded GGUF (llama.cpp KV cache). */
+let loadedNCtx = null;
 /** @type {"webgpu"|"wasm"|null} */
 let device = null;
 let busy = false;
@@ -107,7 +110,12 @@ export async function status() {
     cachedModels = (models || [])
       .map((m) => {
         const hay = `${m?.name || ""} ${m?.metadata?.originalURL || ""}`;
-        const hit = registry.find((r) => hay.includes(r.file) || hay.includes(r.repo));
+        const hit = registry.find(
+          (r) =>
+            hay.includes(r.file) ||
+            (r.mmprojFile && hay.includes(r.mmprojFile)) ||
+            hay.includes(r.repo)
+        );
         return hit?.id || null;
       })
       .filter(Boolean);
@@ -120,7 +128,15 @@ export async function status() {
   return {
     device: probed,
     loadedModel: loadedModelId,
-    loaded: loadedModelId ? [{ task: "text-generation", model: loadedModelId }] : [],
+    nCtx: loadedNCtx,
+    loaded: loadedModelId
+      ? [
+          {
+            task: isWllamaVisionModel(loadedModelId) ? "image-text-to-text" : "text-generation",
+            model: loadedModelId,
+          },
+        ]
+      : [],
     busy,
     registry,
     cacheBackend: "indexeddb",
@@ -139,6 +155,7 @@ export async function unload() {
     wllama = null;
   }
   loadedModelId = null;
+  loadedNCtx = null;
   return status();
 }
 
@@ -157,6 +174,7 @@ export async function clearCache() {
     }
     wllama = null;
     loadedModelId = null;
+    loadedNCtx = null;
   }
   return status();
 }
@@ -177,7 +195,11 @@ export async function deleteModel(modelId) {
     const cached = await inst.cacheManager.list();
     for (const item of cached || []) {
       const hay = `${item?.name || ""} ${item?.metadata?.originalURL || ""}`;
-      if (hay.includes(entry.file) || hay.includes(entry.repo)) {
+      if (
+        hay.includes(entry.file) ||
+        (entry.mmprojFile && hay.includes(entry.mmprojFile)) ||
+        hay.includes(entry.repo)
+      ) {
         try {
           await inst.cacheManager.delete(item.name);
         } catch (err) {
@@ -191,8 +213,8 @@ export async function deleteModel(modelId) {
   return status();
 }
 
-function loadParamsForEntry(entry, probed) {
-  const n_ctx = Math.min(entry.contextWindow || 4096, 8192);
+function loadParamsForEntry(entry, probed, nCtx) {
+  const n_ctx = resolveWllamaContextLimit(nCtx);
   /** @type {Record<string, unknown>} */
   const params = {
     n_ctx,
@@ -212,8 +234,10 @@ function loadParamsForEntry(entry, probed) {
   // Offload all layers when WebGPU is available; 0 forces CPU/WASM.
   if (probed === "webgpu") {
     params.n_gpu_layers = 999;
+    if (entry.mmprojFile) params.mmproj_offload = true;
   } else {
     params.n_gpu_layers = 0;
+    if (entry.mmprojFile) params.mmproj_offload = false;
   }
   return params;
 }
@@ -226,26 +250,76 @@ function isMissingCacheError(err) {
   return /Model file not found/i.test(String(err?.message || err));
 }
 
-async function loadGgufIntoEngine(inst, entry, probed, { useCache = true } = {}) {
-  const params = { ...loadParamsForEntry(entry, probed), useCache };
-  const url = hfResolveUrl(entry.repo, entry.file);
-  // Prefer direct URL load — avoids HF tree-API + cache key mismatches on large GGUFs.
-  await inst.loadModelFromUrl(url, params);
+function loadedModelHasImageInput(inst = wllama) {
+  try {
+    return !!inst?.supportInputModality?.("image");
+  } catch {
+    return false;
+  }
 }
 
-export async function loadModel(modelId) {
+function logLoadedModalities(inst, entry) {
+  let info = null;
+  try {
+    info = inst?.getLoadedContextInfo?.() || null;
+  } catch {
+    info = null;
+  }
+  console.log(
+    `[wllama] ${entry.id} modalities: has_image_input=${!!info?.has_image_input} ` +
+      `has_audio_input=${!!info?.has_audio_input} media_marker=${info?.media_marker || "(none)"}`
+  );
+}
+
+async function loadGgufIntoEngine(inst, entry, probed, { useCache = true, nCtx } = {}) {
+  const params = { ...loadParamsForEntry(entry, probed, nCtx), useCache };
+  /** @type {{ url: string, mmprojUrl?: string }} */
+  const source = { url: hfResolveUrl(entry.repo, entry.file) };
+  if (entry.mmprojFile) {
+    source.mmprojUrl = hfResolveUrl(entry.repo, entry.mmprojFile);
+  }
+  // Prefer direct URL load — avoids HF tree-API + cache key mismatches on large GGUFs.
+  await inst.loadModelFromUrl(source, params);
+  logLoadedModalities(inst, entry);
+  // Cached text-only GGUF can match by URL and skip the mmproj download.
+  if (entry.mmprojFile && !loadedModelHasImageInput(inst)) {
+    throw new Error("VISION_MMPROJ_MISSING");
+  }
+}
+
+async function purgeCachedGgufs(inst, entry) {
+  const urls = [hfResolveUrl(entry.repo, entry.file)];
+  if (entry.mmprojFile) urls.push(hfResolveUrl(entry.repo, entry.mmprojFile));
+  for (const url of urls) {
+    try {
+      await inst.cacheManager.delete(url);
+    } catch (delErr) {
+      console.warn("[wllama] cache delete:", delErr);
+    }
+  }
+}
+
+export async function loadModel(modelId, options = {}) {
   if (!modelId) throw new Error("No model specified.");
   const entry = resolveWllamaModelEntry(modelId);
   if (!entry) {
     throw new Error(`Unknown wllama model "${modelId}". Use repo::file.gguf or pick from Settings.`);
   }
+  const nCtx = resolveWllamaContextLimit(options.nCtx);
 
-  if (loadedModelId === modelId && wllama?.isModelLoaded?.()) return status();
+  if (
+    loadedModelId === modelId &&
+    wllama?.isModelLoaded?.() &&
+    loadedNCtx === nCtx &&
+    (!entry.mmprojFile || loadedModelHasImageInput())
+  ) {
+    return status();
+  }
 
   requestPeerUnload("onnx-engine", { type: "engine.unloadLlm" });
   requestPeerUnload("webllm-engine", { type: "engine.unload" });
 
-  // Switching models: tear down previous instance (single context).
+  // Switching models or n_ctx: tear down previous instance (single context).
   if (wllama?.isModelLoaded?.()) {
     try {
       await wllama.exit();
@@ -254,24 +328,23 @@ export async function loadModel(modelId) {
     }
     wllama = null;
     loadedModelId = null;
+    loadedNCtx = null;
   }
 
   const probed = await probeDevice();
   const inst = await ensureInstance();
-  console.log(`[wllama] loading ${entry.repo}/${entry.file} on ${probed}`);
+  const mmprojNote = entry.mmprojFile ? ` + ${entry.mmprojFile}` : "";
+  console.log(`[wllama] loading ${entry.repo}/${entry.file}${mmprojNote} on ${probed} n_ctx=${nCtx}`);
 
   try {
     try {
-      await loadGgufIntoEngine(inst, entry, probed, { useCache: true });
+      await loadGgufIntoEngine(inst, entry, probed, { useCache: true, nCtx });
     } catch (err) {
-      if (!isMissingCacheError(err)) throw err;
-      // Stale/partial IndexedDB cache after an interrupted multi-GB download.
+      const missingMmproj = /VISION_MMPROJ_MISSING/.test(String(err?.message || err));
+      if (!isMissingCacheError(err) && !missingMmproj) throw err;
+      // Stale/partial IndexedDB cache, or a text-only cache entry from before mmproj was added.
       console.warn("[wllama] cache miss after download; purging and retrying:", err?.message || err);
-      try {
-        await inst.cacheManager.delete(hfResolveUrl(entry.repo, entry.file));
-      } catch (delErr) {
-        console.warn("[wllama] cache delete:", delErr);
-      }
+      await purgeCachedGgufs(inst, entry);
       try {
         await inst.exit();
       } catch {
@@ -279,10 +352,11 @@ export async function loadModel(modelId) {
       }
       wllama = null;
       const retry = await ensureInstance();
-      await loadGgufIntoEngine(retry, entry, probed, { useCache: false });
+      await loadGgufIntoEngine(retry, entry, probed, { useCache: false, nCtx });
     }
   } catch (err) {
     loadedModelId = null;
+    loadedNCtx = null;
     try {
       await (wllama || inst)?.exit?.();
     } catch {
@@ -290,6 +364,11 @@ export async function loadModel(modelId) {
     }
     wllama = null;
     const msg = String(err?.message || err);
+    if (/VISION_MMPROJ_MISSING/.test(msg)) {
+      throw new Error(
+        `Vision projector (mmproj) did not load for ${entry.id}. Clear wllama cache in Settings and reload the model.`
+      );
+    }
     if (isMissingCacheError(err) || /Failed to fetch|HTTP 40[34]/i.test(msg)) {
       throw new Error(
         `${msg} — Clear wllama cache in Settings and retry. Multi-GB GGUFs need a stable network; ` +
@@ -300,6 +379,7 @@ export async function loadModel(modelId) {
   }
 
   loadedModelId = entry.id;
+  loadedNCtx = nCtx;
   markDownloaded(entry.id);
   broadcastProgress({
     status: "ready",
@@ -309,39 +389,52 @@ export async function loadModel(modelId) {
     loaded: 100,
     total: 100,
   });
-  console.log(`[wllama] ${entry.id} ready (multithread=${wllama?.isMultithread?.()})`);
+  console.log(`[wllama] ${entry.id} ready (n_ctx=${nCtx}, multithread=${wllama?.isMultithread?.()})`);
   return status();
 }
 
-export async function getContextEstimate(modelId) {
+export async function getContextEstimate(modelId, options = {}) {
   const entry = resolveWllamaModelEntry(modelId);
   if (!entry) {
     return { modelId, error: { message: `Unknown model "${modelId}"`, type: "engine_error" } };
   }
+  const nCtx = resolveWllamaContextLimit(options.nCtx ?? loadedNCtx);
   const probed = await probeDevice();
   return {
     modelId,
-    trainedMaxContext: entry.contextWindow,
-    effectiveMaxContext: entry.contextWindow,
+    trainedMaxContext: nCtx,
+    effectiveMaxContext: nCtx,
     bindingConstraint: null,
     device: probed,
+    nCtx,
     caveats: [
-      "Context window from the curated wllama registry (or 4K default for custom GGUF).",
+      `llama.cpp n_ctx is ${nCtx.toLocaleString()} (Settings → wllama context limit).`,
       "Wllama uses Memory64 WASM (not the ONNX wasm32 4GB heap cap).",
       "WebGPU offload used when available; otherwise CPU/WASM.",
-      "Vision/audio tools still use the ONNX engine.",
+      "Larger n_ctx uses more RAM/VRAM; reload the model after changing the setting.",
+      isWllamaVisionModel(entry)
+        ? "This GGUF loads with an mmproj projector (image+text → text). MCP vision/audio tools still use ONNX."
+        : "Vision/audio tools still use the ONNX engine.",
     ],
   };
 }
 
-async function ensureLoaded(modelId) {
+async function ensureLoaded(modelId, nCtx) {
   if (!modelId) return errorResponse("No model specified.", "model_not_loaded");
-  if (!resolveWllamaModelEntry(modelId)) {
+  const entry = resolveWllamaModelEntry(modelId);
+  if (!entry) {
     return errorResponse(`Unknown wllama model "${modelId}".`, "model_not_loaded");
   }
-  if (loadedModelId !== modelId || !wllama?.isModelLoaded?.()) {
+  const resolvedNCtx = resolveWllamaContextLimit(nCtx);
+  const needsVision = Boolean(entry.mmprojFile);
+  if (
+    loadedModelId !== modelId ||
+    !wllama?.isModelLoaded?.() ||
+    loadedNCtx !== resolvedNCtx ||
+    (needsVision && !loadedModelHasImageInput())
+  ) {
     try {
-      await loadModel(modelId);
+      await loadModel(modelId, { nCtx: resolvedNCtx });
     } catch (err) {
       return errorResponse(String(err?.message || err), "download_failed");
     }
@@ -352,19 +445,182 @@ async function ensureLoaded(modelId) {
   return null;
 }
 
-function sanitizeMessages(messages) {
-  return (messages || []).map((m) => {
-    const out = { role: m.role, content: m.content ?? "" };
-    if (m.tool_calls) out.tool_calls = m.tool_calls;
-    if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
-    if (m.name) out.name = m.name;
-    return out;
-  });
+function copyMessageMeta(m) {
+  const out = { role: m.role };
+  if (m.tool_calls) out.tool_calls = m.tool_calls;
+  if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+  if (m.name) out.name = m.name;
+  return out;
+}
+
+function isImagePart(part) {
+  if (part == null || typeof part !== "object") return false;
+  if (part.type === "image" || part.type === "image_url" || part.type === "input_image") return true;
+  if (part.image_url || part.image || part.url) return true;
+  return part.data instanceof ArrayBuffer || part.data instanceof Uint8Array;
+}
+
+function messageContentParts(content) {
+  if (Array.isArray(content)) return content;
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && typeof parsed === "object") return [parsed];
+      } catch {
+        /* plain text */
+      }
+    }
+  }
+  return null;
+}
+
+function countImageParts(messages) {
+  let n = 0;
+  for (const m of messages || []) {
+    const parts = messageContentParts(m?.content);
+    if (!parts) continue;
+    for (const part of parts) {
+      if (isImagePart(part)) n += 1;
+    }
+  }
+  return n;
+}
+
+function extractImageSource(part) {
+  if (part == null || typeof part !== "object") return null;
+  if (part.data instanceof Uint8Array) {
+    return part.data.buffer.slice(part.data.byteOffset, part.data.byteOffset + part.data.byteLength);
+  }
+  if (part.data instanceof ArrayBuffer) return part.data;
+  if (part.type === "image_url" || part.image_url) {
+    const u = part.image_url;
+    return typeof u === "string" ? u : u?.url ?? null;
+  }
+  if (typeof part.url === "string") return part.url;
+  if (typeof part.image === "string") return part.image;
+  if (typeof part.source === "string") return part.source;
+  return part.data ?? null;
+}
+
+function copyBytes(src) {
+  if (src instanceof Uint8Array) return src.slice();
+  if (src instanceof ArrayBuffer) return new Uint8Array(src).slice();
+  throw new Error("Image bytes are empty");
+}
+
+function decodeDataUrlToBytes(dataUrl) {
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) throw new Error("Invalid image data URL");
+  const header = dataUrl.slice(0, comma);
+  const payload = dataUrl.slice(comma + 1);
+  if (/;base64/i.test(header)) {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  return new TextEncoder().encode(decodeURIComponent(payload));
+}
+
+async function decodeImageSource(src) {
+  if (src instanceof ArrayBuffer || src instanceof Uint8Array) return copyBytes(src);
+  if (typeof src !== "string" || !src.trim()) {
+    throw new Error("Image part is missing a URL or buffer");
+  }
+  const value = src.trim();
+  if (value.startsWith("data:")) return decodeDataUrlToBytes(value);
+  if (/^https?:\/\//i.test(value)) {
+    const res = await fetch(value);
+    if (!res.ok) throw new Error(`Failed to fetch image (${res.status})`);
+    return copyBytes(await res.arrayBuffer());
+  }
+  throw new Error("Unsupported image source — use a data URL or http(s) URL");
+}
+
+const WLLAMA_IMAGE_MAX_EDGE = 1280;
+
+function isJpegBytes(bytes) {
+  return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
+/** llama.cpp/stb_image is picky; JPEG is the safe common format. */
+async function toWllamaImageBytes(src) {
+  const original = await decodeImageSource(src);
+  if (!original.byteLength) throw new Error("Decoded image is empty");
+  try {
+    const blob = new Blob([original]);
+    const bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, WLLAMA_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close();
+      throw new Error("OffscreenCanvas 2d unavailable");
+    }
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    const jpeg = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+    const bytes = copyBytes(await jpeg.arrayBuffer());
+    if (bytes.byteLength) return bytes;
+  } catch (err) {
+    console.warn("[wllama] JPEG re-encode failed, using original bytes:", err?.message || err);
+  }
+  if (isJpegBytes(original) || original.byteLength) return original;
+  throw new Error("Could not decode attached image");
+}
+
+/**
+ * OpenAI image_url / image parts → wllama `{ type: "image", data: ArrayBuffer }`.
+ * Never leave image_url in the payload: vendor treats any non-text part as media
+ * and pushes `c.data` (undefined) into llama.cpp as an empty file.
+ */
+async function toWllamaMessages(messages) {
+  const out = [];
+  const imageSizes = [];
+  for (const m of messages || []) {
+    const next = copyMessageMeta(m);
+    const parts = messageContentParts(m.content);
+    if (!parts) {
+      next.content = m.content ?? "";
+      out.push(next);
+      continue;
+    }
+    const content = [];
+    for (const part of parts) {
+      if (isImagePart(part)) {
+        const bytes = await toWllamaImageBytes(extractImageSource(part));
+        imageSizes.push(bytes.byteLength);
+        content.push({ type: "image", data: bytes.buffer });
+        continue;
+      }
+      if (typeof part === "string") {
+        content.push({ type: "text", text: part });
+        continue;
+      }
+      if (part?.type === "text" || part?.text != null) {
+        content.push({ type: "text", text: String(part.text ?? "") });
+      }
+    }
+    if (content.some((p) => p.type === "image")) {
+      if (!content.some((p) => p.type === "text")) content.push({ type: "text", text: "Describe this image." });
+      next.content = content;
+    } else {
+      next.content = content.map((p) => p.text).join("\n");
+    }
+    out.push(next);
+  }
+  return { messages: out, imageSizes };
 }
 
 async function runChatCompletions(request) {
   const modelId = request?.model;
-  const loadErr = await ensureLoaded(modelId);
+  const nCtx = resolveWllamaContextLimit(request?.n_ctx);
+  const loadErr = await ensureLoaded(modelId, nCtx);
   if (loadErr) return loadErr;
 
   if (!Array.isArray(request?.messages)) {
@@ -374,8 +630,7 @@ async function runChatCompletions(request) {
   busy = true;
   try {
     const maxTokens = resolveMaxTokens(request.max_tokens);
-    const entry = resolveWllamaModelEntry(modelId);
-    const contextLimit = entry?.contextWindow ?? 4096;
+    const contextLimit = loadedNCtx ?? nCtx;
     const tools =
       Array.isArray(request.tools) && request.tools.length && isWllamaToolModel(modelId)
         ? request.tools
@@ -389,9 +644,35 @@ async function runChatCompletions(request) {
       );
     }
 
+    const imageCount = countImageParts(trim.messages);
+    if (imageCount && !loadedModelHasImageInput()) {
+      return errorResponse(
+        isWllamaVisionModel(modelId)
+          ? "This VLM did not enable image input (mmproj missing or failed to load). Clear wllama cache in Settings, then reload the model."
+          : "This wllama model is text-only. Pick a vision GGUF (text+image→text) to attach images.",
+        "unsupported_modality"
+      );
+    }
+
+    let messages;
+    try {
+      const converted = await toWllamaMessages(trim.messages);
+      messages = converted.messages;
+      if (converted.imageSizes.length) {
+        console.log(
+          `[wllama] forwarding ${converted.imageSizes.length} image(s) ` +
+            `(${converted.imageSizes.join(", ")} bytes) has_image_input=${loadedModelHasImageInput()}`
+        );
+      } else if (imageCount) {
+        return errorResponse("Attached image(s) were dropped before reaching llama.cpp.", "engine_error");
+      }
+    } catch (err) {
+      return errorResponse(String(err?.message || err), "engine_error");
+    }
+
     /** @type {Record<string, unknown>} */
     const body = {
-      messages: sanitizeMessages(trim.messages),
+      messages,
       stream: false,
       temperature: request.temperature ?? 0.2,
       max_tokens: maxTokens,
@@ -436,17 +717,17 @@ async function runChatCompletions(request) {
     console.error(`[wllama] chat failed for ${modelId}:`, message);
     const type = err?.type || "";
     if (type === "kv_cache_full" || /kv_cache_full|context.*(full|exceed)/i.test(message)) {
-      const entry = resolveWllamaModelEntry(modelId);
-      const contextLimit = entry?.contextWindow ?? 4096;
+      const contextLimit = loadedNCtx ?? resolveWllamaContextLimit(request?.n_ctx);
       const est = estimateChatTokens(request.messages, request.tools);
       return errorResponse(
         `Prompt is too long for wllama (~${est.toLocaleString()} tokens estimated; ` +
-          `context ${contextLimit.toLocaleString()}). Start a new chat or pick a larger-context model.`,
+          `n_ctx ${contextLimit.toLocaleString()}). Start a new chat or raise the wllama context limit in Settings.`,
         "context_exceeded"
       );
     }
     if (/out of memory|oom|Failed to allocate/i.test(message)) {
       loadedModelId = null;
+      loadedNCtx = null;
       try {
         await wllama?.exit();
       } catch {
@@ -454,7 +735,7 @@ async function runChatCompletions(request) {
       }
       wllama = null;
       return errorResponse(
-        `${message} Try a smaller GGUF, unload other models, or enable WebGPU.`,
+        `${message} Try a smaller GGUF, a lower context limit (n_ctx), unload other models, or enable WebGPU.`,
         "oom"
       );
     }
