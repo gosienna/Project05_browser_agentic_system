@@ -1433,8 +1433,10 @@ function renderDialogueContextBar() {
   fill.classList.toggle("warn", pct >= 90 || (memoryBinds && pct >= 75));
 
   const wasmCap = provider === "onnx" && est.bindingConstraint === "wasm" ? ", WASM 4GB cap" : "";
+  const nCtxCap =
+    provider === "wllama" && est.bindingConstraint === "n_ctx_setting" ? ", n_ctx setting" : "";
   const limitLabel = memoryBinds
-    ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)}${wasmCap})`
+    ? `~${formatDialogueTokenCount(limit)} tokens (model max ${formatDialogueTokenCount(est.trainedMaxContext)}${wasmCap}${nCtxCap})`
     : `${formatDialogueTokenCount(limit)} tokens`;
   $("#dialogue-context-label").textContent = `Context: ${formatDialogueTokenCount(used)} / ${limitLabel}`;
   bar.title = (est.caveats || []).join("\n");
@@ -2044,6 +2046,10 @@ async function sendDialogue() {
 
   try {
     const maxToolRounds = getDialogueMaxToolRounds(getSettings());
+    // Only use OpenAI-style role:"tool" messages when this request actually includes
+    // native tools. Otherwise (ONNX / NIM / non-tool WebLLM) providers often drop
+    // tool-role turns — the UI still shows the result, but the next completion never sees it.
+    const useNativeToolProtocol = dialogueCompletionTools(tools).length > 0;
     for (let round = 0; round < maxToolRounds; round++) {
       btn.textContent = round === 0 ? "Sending…" : "Thinking…";
       const inputRaw = snapshotDialogueRawInput(messages, tools);
@@ -2094,9 +2100,9 @@ async function sendDialogue() {
       renderDialogue();
 
       const nativeCalls = calls.filter((c) => c.source === "native");
-      const textCalls = calls.filter((c) => c.source === "text");
+      const feedNativeToolResults = useNativeToolProtocol && nativeCalls.length > 0;
 
-      if (nativeCalls.length) {
+      if (feedNativeToolResults) {
         const assistantMsg = {
           role: "assistant",
           content: msg.content || null,
@@ -2107,20 +2113,27 @@ async function sendDialogue() {
         }
         messages.push(assistantMsg);
       } else {
-        messages.push({ role: "assistant", content: msg.content || callDisplay });
+        // Prefer callDisplay over raw content so premature "no components" prose
+        // (or thinking) does not poison the next turn before the tool result arrives.
+        messages.push({ role: "assistant", content: callDisplay });
       }
 
       const textResultBlocks = [];
       for (const call of calls) {
         const { resultText } = await executeDialogueToolTurn(call, btn);
-        if (call.source === "native") {
-          messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
+        if (feedNativeToolResults && call.source === "native") {
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            name: call.name,
+            content: resultText,
+          });
         } else {
           textResultBlocks.push(`Tool ${call.name} result:\n${resultText}`);
         }
       }
 
-      if (textCalls.length) {
+      if (textResultBlocks.length) {
         messages.push({ role: "user", content: textResultBlocks.join("\n\n") });
       }
     }

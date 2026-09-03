@@ -1404,10 +1404,7 @@ function webllmMetaLabel(entry) {
 }
 
 function wllamaMetaLabel(entry) {
-  return formatWllamaRegistryMeta(
-    { ...entry, contextWindow: getWllamaContextLimit(settings) },
-    { sizeLabel }
-  );
+  return formatWllamaRegistryMeta(entry, { sizeLabel });
 }
 
 async function refreshWllamaSettings() {

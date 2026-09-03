@@ -399,16 +399,19 @@ export async function getContextEstimate(modelId, options = {}) {
     return { modelId, error: { message: `Unknown model "${modelId}"`, type: "engine_error" } };
   }
   const nCtx = resolveWllamaContextLimit(options.nCtx ?? loadedNCtx);
+  const trainedMaxContext = entry.contextWindow || nCtx;
   const probed = await probeDevice();
   return {
     modelId,
-    trainedMaxContext: nCtx,
+    // Designed model max from the registry (may exceed MAX_WLLAMA_CONTEXT_LIMIT).
+    trainedMaxContext,
+    // Runtime KV-cache size from Settings → wllama n_ctx (clamped by MAX_WLLAMA_CONTEXT_LIMIT).
     effectiveMaxContext: nCtx,
-    bindingConstraint: null,
+    bindingConstraint: nCtx < trainedMaxContext ? "n_ctx_setting" : null,
     device: probed,
     nCtx,
     caveats: [
-      `llama.cpp n_ctx is ${nCtx.toLocaleString()} (Settings → wllama context limit).`,
+      `Model designed context is ${trainedMaxContext.toLocaleString()} tokens; runtime n_ctx is ${nCtx.toLocaleString()} (Settings → wllama context limit).`,
       "Wllama uses Memory64 WASM (not the ONNX wasm32 4GB heap cap).",
       "WebGPU offload used when available; otherwise CPU/WASM.",
       "Larger n_ctx uses more RAM/VRAM; reload the model after changing the setting.",
@@ -460,15 +463,28 @@ function isImagePart(part) {
   return part.data instanceof ArrayBuffer || part.data instanceof Uint8Array;
 }
 
+function looksLikeMultimodalPart(part) {
+  if (part == null) return false;
+  if (typeof part === "string") return true;
+  if (typeof part !== "object") return false;
+  if (part.type === "text" || part.text != null) return true;
+  return isImagePart(part);
+}
+
+/**
+ * Detect OpenAI-style multimodal content parts. Important: do NOT treat an
+ * arbitrary JSON object string as parts — tool results like
+ * `{"kind":"script","content":"..."}` would be parsed, fail the text/image
+ * checks, and collapse to "" before llama.cpp (UI/raw still show the real JSON).
+ */
 function messageContentParts(content) {
   if (Array.isArray(content)) return content;
   if (typeof content === "string") {
     const trimmed = content.trim();
-    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    if (trimmed.startsWith("[")) {
       try {
         const parsed = JSON.parse(trimmed);
-        if (Array.isArray(parsed)) return parsed;
-        if (parsed && typeof parsed === "object") return [parsed];
+        if (Array.isArray(parsed) && parsed.some(looksLikeMultimodalPart)) return parsed;
       } catch {
         /* plain text */
       }
@@ -604,13 +620,21 @@ async function toWllamaMessages(messages) {
       }
       if (part?.type === "text" || part?.text != null) {
         content.push({ type: "text", text: String(part.text ?? "") });
+        continue;
+      }
+      // Unknown object in a parts array — keep payload rather than dropping to "".
+      try {
+        content.push({ type: "text", text: JSON.stringify(part) });
+      } catch {
+        content.push({ type: "text", text: String(part) });
       }
     }
     if (content.some((p) => p.type === "image")) {
       if (!content.some((p) => p.type === "text")) content.push({ type: "text", text: "Describe this image." });
       next.content = content;
     } else {
-      next.content = content.map((p) => p.text).join("\n");
+      const text = content.map((p) => p.text).join("\n");
+      next.content = text || (typeof m.content === "string" ? m.content : "");
     }
     out.push(next);
   }

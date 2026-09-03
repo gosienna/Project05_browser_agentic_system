@@ -44,6 +44,13 @@ window.addEventListener("message", async (event) => {
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
 
+  // Sandbox console → background ring buffer (get_console_messages)
+  if (msg.type === "sandbox-console" && msg.entry) {
+    if (event.source !== frame.contentWindow) return;
+    chrome.runtime.sendMessage({ type: "webapp-console", entry: msg.entry }).catch(() => {});
+    return;
+  }
+
   // Only accept api calls from our sandbox iframe
   if (msg.type === "api") {
     if (event.source !== frame.contentWindow) return;

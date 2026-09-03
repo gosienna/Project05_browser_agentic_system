@@ -2,7 +2,7 @@
 // Each export takes a single args object (always includes systemId) and returns
 // a plain object suitable for feeding back into the chat transcript.
 
-import { getComponent, listComponents, writeComponent } from "../system-store.js";
+import { getComponent, listComponents, writeComponent } from "../../../modes/WebApp/system-store.js";
 
 export function resolveWebAppSystemId(context = {}) {
   const id = context.systemId || context.settings?.webAppSystemId;

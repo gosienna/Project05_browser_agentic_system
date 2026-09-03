@@ -1,5 +1,5 @@
 // Injected into the page (isolated world) for accessibility snapshots and ref-based clicks.
-// Loaded via chrome.scripting.executeScript({ files: ["modes/dialogue/tools/a11y/injected.js"] }).
+// Loaded via chrome.scripting.executeScript({ files: ["mcp/tools/a11y/injected.js"] }).
 
 (function () {
   if (globalThis.__baA11yInjected) return;

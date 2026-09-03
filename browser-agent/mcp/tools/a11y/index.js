@@ -1,12 +1,26 @@
 // Accessibility snapshot + ref-based click tools (Playwright MCP-inspired).
 
+import { isWebAppHostTab, runInWebAppSandbox } from "../../../modes/WebApp/dom-bridge.js";
 import { renderSnapshotYaml } from "./render-yaml.js";
 
-const INJECTED_FILE = "modes/dialogue/tools/a11y/injected.js";
+const INJECTED_FILE = "mcp/tools/a11y/injected.js";
 const DEFAULT_SNAPSHOT_CHARS = 14000;
 
 /** @type {Map<number, number>} */
 const tabGenerations = new Map();
+
+/** @type {Promise<string>|null} */
+let injectedSourcePromise = null;
+
+function getInjectedSource() {
+  if (!injectedSourcePromise) {
+    injectedSourcePromise = fetch(chrome.runtime.getURL(INJECTED_FILE)).then(async (res) => {
+      if (!res.ok) throw new Error(`Failed to load ${INJECTED_FILE}`);
+      return res.text();
+    });
+  }
+  return injectedSourcePromise;
+}
 
 export function getTabGeneration(tabId) {
   return tabGenerations.get(tabId) ?? 0;
@@ -14,6 +28,19 @@ export function getTabGeneration(tabId) {
 
 export async function ensureInjected(tabId) {
   const id = requireTabId(tabId);
+  if (await isWebAppHostTab(id)) {
+    // Extension pages block chrome.scripting; inject into the sandbox via postMessage.
+    const source = await getInjectedSource();
+    await runInWebAppSandbox(
+      id,
+      function injectA11y(src) {
+        (0, eval)(src);
+      }.toString(),
+      [source],
+    );
+    return id;
+  }
+
   let tab;
   try {
     tab = await chrome.tabs.get(id);
@@ -34,9 +61,12 @@ export async function ensureInjected(tabId) {
 }
 
 async function runInTab(tabId, func, args = []) {
-  await ensureInjected(tabId);
+  const id = await ensureInjected(tabId);
+  if (await isWebAppHostTab(id)) {
+    return runInWebAppSandbox(id, func.toString(), args);
+  }
   const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: requireTabId(tabId) },
+    target: { tabId: id },
     world: "ISOLATED",
     func,
     args,

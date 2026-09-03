@@ -5,6 +5,8 @@ let styleEl = null;
 let pending = new Map();
 let reqSeq = 0;
 
+installConsoleBridge();
+
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (!msg || typeof msg !== "object") return;
@@ -34,6 +36,66 @@ window.addEventListener("message", (event) => {
       );
   }
 });
+
+/** Forward console / uncaught errors to the host so MCP can read them. */
+function installConsoleBridge() {
+  const levels = ["log", "info", "warn", "error", "debug"];
+  for (const level of levels) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      emitConsole(level, args.map(stringifyArg).join(" "));
+      return orig(...args);
+    };
+  }
+
+  window.addEventListener("error", (ev) => {
+    const where = ev.filename ? `\n  at ${ev.filename}:${ev.lineno}:${ev.colno}` : "";
+    emitConsole("exception", `${ev.message || "Uncaught error"}${where}`, {
+      url: ev.filename || undefined,
+      lineNumber: ev.lineno,
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (ev) => {
+    const reason = ev.reason;
+    const text =
+      reason instanceof Error
+        ? `${reason.name}: ${reason.message}${reason.stack ? `\n${reason.stack}` : ""}`
+        : `Unhandled rejection: ${stringifyArg(reason)}`;
+    emitConsole("exception", text);
+  });
+}
+
+function emitConsole(type, text, extra = {}) {
+  try {
+    parent.postMessage(
+      {
+        type: "sandbox-console",
+        entry: {
+          type,
+          text,
+          timestamp: Date.now(),
+          ...extra,
+        },
+      },
+      "*"
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function stringifyArg(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) {
+    return `${value.name}: ${value.message}${value.stack ? `\n${value.stack}` : ""}`;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 function loadSystem({ html, css, script, ui }) {
   pending.forEach((p) => p.reject(new Error("System reloaded")));

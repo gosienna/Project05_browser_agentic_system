@@ -2,8 +2,9 @@
 // object (always includes tabId when relevant) and returns a plain
 // string/object result suitable for feeding back into the chat transcript.
 
-import { ensureOffscreenDocument } from "../../../llm.js";
-import { isWebAppHostTab, runInWebAppSandbox } from "../../WebApp/dom-bridge.js";
+import { ensureOffscreenDocument } from "../../llm.js";
+import { isWebAppHostTab, runInWebAppSandbox } from "../../modes/WebApp/dom-bridge.js";
+import { getConsoleMessages, clearConsoleMessages } from "./console-capture.js";
 export { browser_snapshot, browser_click } from "./a11y/index.js";
 
 const DEFAULT_PAGE_HTML_CHARS = 14000;
@@ -248,6 +249,16 @@ export function wait({ ms = 1000 }) {
   return new Promise((resolve) => setTimeout(() => resolve({ ok: true }), Math.min(ms, 15000)));
 }
 
+/** Read DevTools-style console messages for a tab (attaches chrome.debugger on first use). */
+export async function get_console_messages(args) {
+  return getConsoleMessages(args);
+}
+
+/** Clear the buffered console messages for a tab (does not detach the debugger). */
+export async function clear_console_messages(args) {
+  return clearConsoleMessages(args);
+}
+
 /** Caption an image via local Transformers.js image-to-text. */
 export async function describe_image({ tabId, imageUrl, dataUrl } = {}) {
   const image = await resolveImageInput({ tabId, imageUrl, dataUrl });
@@ -384,6 +395,8 @@ async function assertRunnableTab(tabId) {
     throw new Error(`Tab ${tabId} not found`);
   }
   const url = tab.url || "";
+  // WebApp host tabs are handled via runInWebAppSandbox in runInTab / execute_script.
+  if (await isWebAppHostTab(tabId)) return;
   if (/^(chrome|chrome-extension|edge|about|devtools):/i.test(url)) {
     throw new Error(`Cannot run browser tools on restricted page: ${url}`);
   }

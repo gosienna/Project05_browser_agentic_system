@@ -2,9 +2,9 @@
 
 import { registerMcpTool } from "./server.js";
 import { tavilySearch, prepareSearchToolArgs } from "../modes/dialogue/tool-runtime.js";
-import * as browserTools from "../modes/dialogue/tools/index.js";
-import * as webAppTools from "../modes/WebApp/tools/index.js";
-import { WEBAPP_MCP_TOOL_DEFS } from "../modes/WebApp/tools/schema.js";
+import * as browserTools from "./tools/index.js";
+import * as webAppTools from "./tools/webapp/index.js";
+import { WEBAPP_MCP_TOOL_DEFS } from "./tools/webapp/schema.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
 import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
@@ -373,6 +373,50 @@ export function registerBuiltinMcpTools() {
     },
     isEnabled: browserToolsEnabled,
     handler: (args) => browserTools.wait(args),
+  });
+
+  registerMcpTool({
+    name: "get_console_messages",
+    description:
+      "Return DevTools-style console messages for a tab (console.log/warn/error, uncaught exceptions). On normal web pages, attaches the Chrome debugger on first use (yellow debug banner); only messages after attach are available. On WebApp system-host tabs, reads the sandbox console bridge (no debugger). Pass level to filter (e.g. error includes error + exception). Set clear:true to empty the buffer after reading.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: TAB_ID_PROP,
+        level: {
+          type: "string",
+          enum: ["debug", "log", "info", "warn", "error"],
+          description: "Minimum severity to return (that level and more severe; default: all)",
+        },
+        maxEntries: {
+          type: "integer",
+          description: "Max messages to return (default 100)",
+        },
+        clear: {
+          type: "boolean",
+          description: "If true, clear the buffer after reading (default false)",
+        },
+        maxChars: {
+          type: "integer",
+          description: "Max characters in the returned payload (default 14000; omit or use ≤0 for default)",
+        },
+      },
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.get_console_messages(args)),
+  });
+
+  registerMcpTool({
+    name: "clear_console_messages",
+    description: "Clear buffered console messages for a tab. Does not detach the debugger.",
+    groups: ["dialogue", "browser"],
+    inputSchema: {
+      type: "object",
+      properties: { tabId: TAB_ID_PROP },
+    },
+    isEnabled: browserToolsEnabled,
+    handler: withTabId((args) => browserTools.clear_console_messages(args)),
   });
 
   registerMcpTool({

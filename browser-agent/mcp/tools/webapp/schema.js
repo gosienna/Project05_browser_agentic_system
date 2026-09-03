@@ -1,6 +1,6 @@
 // MCP schemas for WebApp component tools.
 
-import { COMPONENT_KINDS } from "../system-store.js";
+import { COMPONENT_KINDS } from "../../../modes/WebApp/system-store.js";
 
 export const WEBAPP_MCP_TOOLS = new Set([
   "list_components",

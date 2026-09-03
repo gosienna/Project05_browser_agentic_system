@@ -242,7 +242,7 @@
 
             <label for="wllama-nctx-input">Context limit (n_ctx)</label>
             <input id="wllama-nctx-input" type="number" min="1024" max="131072" step="1024" placeholder="16384" />
-            <p class="hint">KV-cache size allocated when the GGUF loads. Default 16384. Larger uses more RAM/VRAM and can OOM; the model reloads on the next chat after you change this.</p>
+            <p class="hint">Runtime KV-cache size when the GGUF loads (capped at 131072). Model cards below show each GGUF’s designed max context separately — that label is not this n_ctx setting. Default 16384. Larger uses more RAM/VRAM and can OOM; reload happens on the next chat after you change this.</p>
 
             <h3 class="onnx-section-title">Chat model (LLM)</h3>
             <ul id="wllama-registry" class="onnx-registry"></ul>

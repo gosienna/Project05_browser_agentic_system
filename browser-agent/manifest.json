@@ -17,7 +17,8 @@
     "sidePanel",
     "offscreen",
     "declarativeNetRequest",
-    "downloads"
+    "downloads",
+    "debugger"
   ],
   "declarative_net_request": {
     "rule_resources": [
