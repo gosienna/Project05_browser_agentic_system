@@ -60,10 +60,13 @@ import {
 import { formatWebllmPickerLabel, formatWebllmRegistryMeta } from "../llm-browser/webllm-models.js";
 import {
   DEFAULT_WLLAMA_MODEL,
+  DEFAULT_WLLAMA_MODEL_SORT,
   encodeWllamaModelId,
   formatWllamaPickerLabel,
   formatWllamaRegistryMeta,
+  groupWllamaModelsByFamily,
   parseWllamaModelId,
+  sortWllamaModels,
   WLLAMA_MODEL_REGISTRY,
 } from "../llm-browser/wllama-models.js";
 import {
@@ -456,6 +459,11 @@ function wireSettingsForm() {
     // n_ctx is allocated at load; drop the current instance so the next chat reloads.
     await sendMessage({ type: "wllama.relay", engineType: "engine.unload" });
   });
+  $("#wllama-model-sort")?.addEventListener("change", async (e) => {
+    const mode = e.target.value || DEFAULT_WLLAMA_MODEL_SORT;
+    await saveSettings({ wllamaModelSort: mode });
+    renderWllamaRegistry();
+  });
   $("#dialogue-max-tool-rounds-input")?.addEventListener("change", (e) => {
     const n = getDialogueMaxToolRounds({ dialogueMaxToolRounds: e.target.value });
     e.target.value = n;
@@ -793,6 +801,8 @@ function applySettingsToForm() {
   $("#max-tokens-input").value = getMaxTokens(settings);
   const wllamaNctxInput = $("#wllama-nctx-input");
   if (wllamaNctxInput) wllamaNctxInput.value = getWllamaContextLimit(settings);
+  const wllamaSortSelect = $("#wllama-model-sort");
+  if (wllamaSortSelect) wllamaSortSelect.value = settings.wllamaModelSort || DEFAULT_WLLAMA_MODEL_SORT;
   const toolRoundsInput = $("#dialogue-max-tool-rounds-input");
   if (toolRoundsInput) toolRoundsInput.value = getDialogueMaxToolRounds(settings);
   const thinkingCb = $("#enable-thinking-input");
@@ -1449,11 +1459,13 @@ function renderWllamaRegistry(loadedModel) {
   const list = $("#wllama-registry");
   if (!list) return;
   list.innerHTML = "";
-  const models = wllamaRegistry.length ? wllamaRegistry : WLLAMA_MODEL_REGISTRY;
+  const catalog = wllamaRegistry.length ? wllamaRegistry : WLLAMA_MODEL_REGISTRY;
+  const sortMode = settings.wllamaModelSort || DEFAULT_WLLAMA_MODEL_SORT;
+  const models = sortWllamaModels(catalog, sortMode);
   const selectedId =
     settings.wllamaModel || models.find((m) => m.tier === "default")?.id || models[0]?.id;
 
-  for (const m of models) {
+  const appendModelRow = (m) => {
     const li = document.createElement("li");
     li.className = m.id === selectedId ? "selected" : "";
     const isDownloaded = !!downloadedWllamaModels[m.id];
@@ -1499,6 +1511,18 @@ function renderWllamaRegistry(loadedModel) {
     }
     li.appendChild(actions);
     list.appendChild(li);
+  };
+
+  if (sortMode === "family") {
+    for (const group of groupWllamaModelsByFamily(models)) {
+      const header = document.createElement("li");
+      header.className = "model-family-header";
+      header.textContent = group.label;
+      list.appendChild(header);
+      for (const m of group.models) appendModelRow(m);
+    }
+  } else {
+    for (const m of models) appendModelRow(m);
   }
 }
 

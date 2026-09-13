@@ -366,6 +366,17 @@ async function refreshDialogueSessionsList() {
       `<span class="dialogue-session-meta">${formatTime(item.updatedAt)} · ${item.turnCount} msgs${imgHint}</span>`;
     main.addEventListener("click", () => openDialogueSession(item.id));
 
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "dialogue-session-copy";
+    copy.title = "Copy dialogue";
+    copy.setAttribute("aria-label", "Copy dialogue");
+    copy.textContent = "⧉";
+    copy.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyDialogueSessionUi(item.id, copy);
+    });
+
     const del = document.createElement("button");
     del.type = "button";
     del.className = "dialogue-session-del";
@@ -378,6 +389,7 @@ async function refreshDialogueSessionsList() {
     });
 
     row.appendChild(main);
+    row.appendChild(copy);
     row.appendChild(del);
     list.appendChild(row);
   }
@@ -448,6 +460,88 @@ function startNewDialogueSession() {
   renderDialogueContextBar();
   refreshDialogueSessionsList();
   notifyDialogueInputChanged();
+}
+
+function formatDialogueTranscript(session) {
+  const turns = Array.isArray(session?.turns) ? session.turns : [];
+  const parts = [];
+  const title = String(session?.title || "").trim();
+  if (title) parts.push(title);
+
+  for (const turn of turns) {
+    if (!turn || typeof turn !== "object") continue;
+    const content = String(turn.content || "").trim();
+    const lines = [];
+
+    if (turn.role === "tool") {
+      lines.push(`Tool result · ${turn.toolName || "tool"}:`);
+      if (turn.error) lines.push(`Error: ${turn.error}`);
+      else if (content) lines.push(content);
+      else if (turn.pending) lines.push("Running…");
+    } else if (turn.toolCall) {
+      lines.push("Tool request:");
+      if (content) lines.push(content);
+    } else if (turn.role === "user") {
+      lines.push("User:");
+      if (content) lines.push(content);
+      const n = turn.images?.length || 0;
+      if (n) lines.push(`[${n} image${n === 1 ? "" : "s"}]`);
+    } else if (turn.role === "assistant") {
+      lines.push("Assistant:");
+      if (content) lines.push(content);
+      const reasoning = String(turn.reasoning || "").trim();
+      if (reasoning) {
+        lines.push("Thinking:");
+        lines.push(reasoning);
+      }
+    } else {
+      continue;
+    }
+
+    if (lines.length > 1) parts.push(lines.join("\n"));
+  }
+
+  return parts.join("\n\n").trim();
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = value;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("clipboard copy failed");
+}
+
+async function copyDialogueSessionUi(id, btn) {
+  if (!id) return;
+  try {
+    const session = await getDialogueSession(id);
+    if (!session) return;
+    const text = formatDialogueTranscript(session);
+    if (!text) return;
+    await copyTextToClipboard(text);
+    if (btn) {
+      const prev = btn.textContent;
+      btn.textContent = "✓";
+      btn.title = "Copied";
+      setTimeout(() => {
+        btn.textContent = prev;
+        btn.title = "Copy dialogue";
+      }, 1200);
+    }
+  } catch (err) {
+    console.error("[dialogue] copy session failed", err);
+  }
 }
 
 async function deleteDialogueSessionUi(id, title) {

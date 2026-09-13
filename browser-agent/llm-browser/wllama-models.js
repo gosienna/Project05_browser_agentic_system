@@ -145,6 +145,52 @@ export const WLLAMA_MODEL_REGISTRY = [
     supportsTools: true,
     quant: "Q4_K_M",
   },
+  // Qwen3.8 — dense 27B (coding / agents). Prefer Q8 on high-RAM Macs.
+  {
+    id: "ggml-org/Qwen3.8-27B-GGUF::Qwen3.8-27B-Q4_K_M.gguf",
+    label: "Qwen3.8 27B (Q4_K_M)",
+    repo: "ggml-org/Qwen3.8-27B-GGUF",
+    file: "Qwen3.8-27B-Q4_K_M.gguf",
+    approxSizeMB: 19000,
+    tier: "max",
+    contextWindow: 262144,
+    supportsTools: true,
+    quant: "Q4_K_M",
+  },
+  {
+    id: "ggml-org/Qwen3.8-27B-GGUF::Qwen3.8-27B-Q8_0.gguf",
+    label: "Qwen3.8 27B (Q8_0)",
+    repo: "ggml-org/Qwen3.8-27B-GGUF",
+    file: "Qwen3.8-27B-Q8_0.gguf",
+    approxSizeMB: 28600,
+    tier: "max",
+    contextWindow: 262144,
+    supportsTools: true,
+    quant: "Q8_0",
+  },
+  // Qwen3.5-122B-A10B MoE — workstation-scale (sharded). Q8 (~130GB) exceeds 128GB unified memory.
+  {
+    id: "unsloth/Qwen3.5-122B-A10B-GGUF::Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
+    label: "Qwen3.5 122B-A10B (Q4_K_M)",
+    repo: "unsloth/Qwen3.5-122B-A10B-GGUF",
+    file: "Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
+    approxSizeMB: 76500,
+    tier: "max",
+    contextWindow: 262144,
+    supportsTools: true,
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/Qwen3.5-122B-A10B-GGUF::Q5_K_M/Qwen3.5-122B-A10B-Q5_K_M-00001-of-00003.gguf",
+    label: "Qwen3.5 122B-A10B (Q5_K_M)",
+    repo: "unsloth/Qwen3.5-122B-A10B-GGUF",
+    file: "Q5_K_M/Qwen3.5-122B-A10B-Q5_K_M-00001-of-00003.gguf",
+    approxSizeMB: 91500,
+    tier: "max",
+    contextWindow: 262144,
+    supportsTools: true,
+    quant: "Q5_K_M",
+  },
   // GLM-4.x — text GGUFs under ~30GB (Q4_K_M). Needs llama.cpp with glm4 / glm4moe support.
   {
     id: "unsloth/GLM-4.7-Flash-GGUF::GLM-4.7-Flash-Q4_K_M.gguf",
@@ -168,7 +214,7 @@ export const WLLAMA_MODEL_REGISTRY = [
     supportsTools: true,
     quant: "Q4_K_M",
   },
-  // OpenAI gpt-oss-20b — MoE with native MXFP4 experts. Needs llama.cpp gpt-oss support.
+  // OpenAI gpt-oss — MoE with native MXFP4 experts. Needs llama.cpp gpt-oss support.
   {
     id: "unsloth/gpt-oss-20b-GGUF::gpt-oss-20b-Q4_K_M.gguf",
     label: "gpt-oss-20b (Q4_K_M)",
@@ -179,6 +225,28 @@ export const WLLAMA_MODEL_REGISTRY = [
     contextWindow: 131072,
     supportsTools: true,
     quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/gpt-oss-120b-GGUF::Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+    label: "gpt-oss-120b (Q4_K_M)",
+    repo: "unsloth/gpt-oss-120b-GGUF",
+    file: "Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+    approxSizeMB: 62800,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/gpt-oss-120b-GGUF::Q8_0/gpt-oss-120b-Q8_0-00001-of-00002.gguf",
+    label: "gpt-oss-120b (Q8_0)",
+    repo: "unsloth/gpt-oss-120b-GGUF",
+    file: "Q8_0/gpt-oss-120b-Q8_0-00001-of-00002.gguf",
+    approxSizeMB: 63400,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    quant: "Q8_0",
   },
   // Moonshot Moonlight — 16B-A3B MoE (Kimi-family precursor). Needs deepseek2/MLA MoE support.
   {
@@ -221,11 +289,33 @@ export const WLLAMA_MODEL_REGISTRY = [
     label: "Kimi-Linear-48B-A3B Instruct (Q4_K_M)",
     repo: "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF",
     file: "moonshotai_Kimi-Linear-48B-A3B-Instruct-Q4_K_M.gguf",
-    approxSizeMB: 28700,
+    approxSizeMB: 30100,
     tier: "max",
     contextWindow: 1048576,
     supportsTools: true,
     quant: "Q4_K_M",
+  },
+  {
+    id: "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF::moonshotai_Kimi-Linear-48B-A3B-Instruct-Q5_K_M.gguf",
+    label: "Kimi-Linear-48B-A3B Instruct (Q5_K_M)",
+    repo: "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF",
+    file: "moonshotai_Kimi-Linear-48B-A3B-Instruct-Q5_K_M.gguf",
+    approxSizeMB: 35100,
+    tier: "max",
+    contextWindow: 1048576,
+    supportsTools: true,
+    quant: "Q5_K_M",
+  },
+  {
+    id: "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF::moonshotai_Kimi-Linear-48B-A3B-Instruct-Q8_0/moonshotai_Kimi-Linear-48B-A3B-Instruct-Q8_0-00001-of-00002.gguf",
+    label: "Kimi-Linear-48B-A3B Instruct (Q8_0)",
+    repo: "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF",
+    file: "moonshotai_Kimi-Linear-48B-A3B-Instruct-Q8_0/moonshotai_Kimi-Linear-48B-A3B-Instruct-Q8_0-00001-of-00002.gguf",
+    approxSizeMB: 52200,
+    tier: "max",
+    contextWindow: 1048576,
+    supportsTools: true,
+    quant: "Q8_0",
   },
   {
     id: "second-state/Mixtral-8x7B-Instruct-v0.1-GGUF::Mixtral-8x7B-Instruct-v0.1-Q5_K_M.gguf",
@@ -309,11 +399,22 @@ export const WLLAMA_MODEL_REGISTRY = [
     label: "Llama 3.3 70B Instruct (Q4_K_M)",
     repo: "unsloth/Llama-3.3-70B-Instruct-GGUF",
     file: "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
-    approxSizeMB: 40600,
+    approxSizeMB: 42500,
     tier: "max",
     contextWindow: 131072,
     supportsTools: true,
     quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/Llama-3.3-70B-Instruct-GGUF::Llama-3.3-70B-Instruct-Q8_0/Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf",
+    label: "Llama 3.3 70B Instruct (Q8_0)",
+    repo: "unsloth/Llama-3.3-70B-Instruct-GGUF",
+    file: "Llama-3.3-70B-Instruct-Q8_0/Llama-3.3-70B-Instruct-Q8_0-00001-of-00002.gguf",
+    approxSizeMB: 75000,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    quant: "Q8_0",
   },
   {
     id: "bartowski/Qwen2.5-72B-Instruct-GGUF::Qwen2.5-72B-Instruct-Q4_K_M.gguf",
@@ -348,6 +449,99 @@ export const WLLAMA_MODEL_REGISTRY = [
     contextWindow: 262144,
     supportsTools: true,
     quant: "Q4_0",
+  },
+  // Google MedGemma — medical Gemma 3 (Health AI Developer Foundations license).
+  {
+    id: "unsloth/medgemma-1.5-4b-it-GGUF::medgemma-1.5-4b-it-Q4_K_M.gguf",
+    label: "MedGemma 1.5 4B Instruct (Q4_K_M)",
+    repo: "unsloth/medgemma-1.5-4b-it-GGUF",
+    file: "medgemma-1.5-4b-it-Q4_K_M.gguf",
+    mmprojFile: "mmproj-F16.gguf",
+    approxSizeMB: 3340,
+    tier: "default",
+    contextWindow: 131072,
+    supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/medgemma-4b-it-GGUF::medgemma-4b-it-Q4_K_M.gguf",
+    label: "MedGemma 4B Instruct (Q4_K_M)",
+    repo: "unsloth/medgemma-4b-it-GGUF",
+    file: "medgemma-4b-it-Q4_K_M.gguf",
+    mmprojFile: "mmproj-F16.gguf",
+    approxSizeMB: 3340,
+    tier: "default",
+    contextWindow: 131072,
+    supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/medgemma-4b-it-GGUF::medgemma-4b-it-Q8_0.gguf",
+    label: "MedGemma 4B Instruct (Q8_0)",
+    repo: "unsloth/medgemma-4b-it-GGUF",
+    file: "medgemma-4b-it-Q8_0.gguf",
+    mmprojFile: "mmproj-F16.gguf",
+    approxSizeMB: 4980,
+    tier: "default",
+    contextWindow: 131072,
+    supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q8_0",
+  },
+  {
+    id: "unsloth/medgemma-27b-text-it-GGUF::medgemma-27b-text-it-Q4_K_M.gguf",
+    label: "MedGemma 27B Text Instruct (Q4_K_M)",
+    repo: "unsloth/medgemma-27b-text-it-GGUF",
+    file: "medgemma-27b-text-it-Q4_K_M.gguf",
+    approxSizeMB: 16500,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/medgemma-27b-text-it-GGUF::medgemma-27b-text-it-Q8_0.gguf",
+    label: "MedGemma 27B Text Instruct (Q8_0)",
+    repo: "unsloth/medgemma-27b-text-it-GGUF",
+    file: "medgemma-27b-text-it-Q8_0.gguf",
+    approxSizeMB: 28700,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    quant: "Q8_0",
+  },
+  {
+    id: "unsloth/medgemma-27b-it-GGUF::medgemma-27b-it-Q4_K_M.gguf",
+    label: "MedGemma 27B Instruct (Q4_K_M)",
+    repo: "unsloth/medgemma-27b-it-GGUF",
+    file: "medgemma-27b-it-Q4_K_M.gguf",
+    mmprojFile: "mmproj-F16.gguf",
+    approxSizeMB: 17400,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q4_K_M",
+  },
+  {
+    id: "unsloth/medgemma-27b-it-GGUF::medgemma-27b-it-Q8_0.gguf",
+    label: "MedGemma 27B Instruct (Q8_0)",
+    repo: "unsloth/medgemma-27b-it-GGUF",
+    file: "medgemma-27b-it-Q8_0.gguf",
+    mmprojFile: "mmproj-F16.gguf",
+    approxSizeMB: 29600,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q8_0",
   },
   // Image + text → text (smallest). Sizes include matching mmproj.
   {
@@ -422,11 +616,11 @@ export const WLLAMA_MODEL_REGISTRY = [
   },
   // Moonshot Kimi-VL — 16B-A3B thinking VLM. Size includes mmproj-Q8_0.
   {
-    id: "mradermacher/Kimi-VL-A3B-Thinking-2506-GGUF::Kimi-VL-A3B-Thinking-2506.Q4_K_M.gguf",
+    id: "ggml-org/Kimi-VL-A3B-Thinking-2506-GGUF::Kimi-VL-A3B-Thinking-2506-Q4_K_M.gguf",
     label: "Kimi-VL-A3B Thinking 2506 (Q4_K_M)",
-    repo: "mradermacher/Kimi-VL-A3B-Thinking-2506-GGUF",
-    file: "Kimi-VL-A3B-Thinking-2506.Q4_K_M.gguf",
-    mmprojFile: "Kimi-VL-A3B-Thinking-2506.mmproj-Q8_0.gguf",
+    repo: "ggml-org/Kimi-VL-A3B-Thinking-2506-GGUF",
+    file: "Kimi-VL-A3B-Thinking-2506-Q4_K_M.gguf",
+    mmprojFile: "mmproj-Kimi-VL-A3B-Thinking-2506-Q8_0.gguf",
     approxSizeMB: 11200,
     tier: "max",
     contextWindow: 131072,
@@ -434,6 +628,20 @@ export const WLLAMA_MODEL_REGISTRY = [
     supportsVision: true,
     inputs: ["text", "image"],
     quant: "Q4_K_M",
+  },
+  {
+    id: "ggml-org/Kimi-VL-A3B-Thinking-2506-GGUF::Kimi-VL-A3B-Thinking-2506-Q8_0.gguf",
+    label: "Kimi-VL-A3B Thinking 2506 (Q8_0)",
+    repo: "ggml-org/Kimi-VL-A3B-Thinking-2506-GGUF",
+    file: "Kimi-VL-A3B-Thinking-2506-Q8_0.gguf",
+    mmprojFile: "mmproj-Kimi-VL-A3B-Thinking-2506-Q8_0.gguf",
+    approxSizeMB: 17600,
+    tier: "max",
+    contextWindow: 131072,
+    supportsTools: false,
+    supportsVision: true,
+    inputs: ["text", "image"],
+    quant: "Q8_0",
   },
   // NVIDIA Nemotron-3 Nano Omni — multimodal reasoning MoE. Size includes mmproj-F16.
   {
@@ -702,4 +910,131 @@ export function formatWllamaRegistryMeta(entry = {}, { sizeLabel } = {}) {
   if (entry.supportsTools) parts.push("tools");
   parts.push(formatWllamaIoLabel(entry));
   return parts.filter(Boolean).join(" · ");
+}
+
+/** @typedef {"catalog"|"size-desc"|"size-asc"|"family"} WllamaModelSortMode */
+
+export const WLLAMA_MODEL_SORT_MODES = [
+  { id: "catalog", label: "Catalog order" },
+  { id: "size-desc", label: "Size: largest → smallest" },
+  { id: "size-asc", label: "Size: smallest → largest" },
+  { id: "family", label: "Group by family" },
+];
+
+export const DEFAULT_WLLAMA_MODEL_SORT = "catalog";
+
+const WLLAMA_FAMILY_ORDER = [
+  "llama",
+  "qwen",
+  "kimi",
+  "gemma",
+  "medgemma",
+  "glm",
+  "gpt-oss",
+  "nemotron",
+  "mistral",
+  "internvl",
+  "liquid",
+  "smolvlm",
+  "holo",
+  "moondream",
+  "other",
+];
+
+const WLLAMA_FAMILY_LABELS = {
+  llama: "Llama",
+  qwen: "Qwen",
+  kimi: "Kimi / Moonshot",
+  gemma: "Gemma",
+  medgemma: "MedGemma",
+  glm: "GLM",
+  "gpt-oss": "gpt-oss",
+  nemotron: "Nemotron",
+  mistral: "Mistral / Mixtral",
+  internvl: "InternVL",
+  liquid: "Liquid",
+  smolvlm: "SmolVLM",
+  holo: "Holo",
+  moondream: "Moondream",
+  other: "Other",
+};
+
+/** Infer model family from label / repo / id for grouping. */
+export function inferWllamaModelFamily(entry = {}) {
+  const hay = `${entry.label || ""} ${entry.repo || ""} ${entry.id || ""}`.toLowerCase();
+  if (/medgemma/.test(hay)) return "medgemma";
+  if (/kimi|moonshot|moonlight/.test(hay)) return "kimi";
+  if (/llama/.test(hay)) return "llama";
+  if (/qwen|qwq/.test(hay)) return "qwen";
+  if (/gemma/.test(hay)) return "gemma";
+  if (/\bglm\b/.test(hay)) return "glm";
+  if (/gpt-oss|gpt_oss/.test(hay)) return "gpt-oss";
+  if (/nemotron/.test(hay)) return "nemotron";
+  if (/mixtral|mistral/.test(hay)) return "mistral";
+  if (/internvl/.test(hay)) return "internvl";
+  if (/\blfm\b|liquid/.test(hay)) return "liquid";
+  if (/smolvlm/.test(hay)) return "smolvlm";
+  if (/holo2|holo-/.test(hay)) return "holo";
+  if (/moondream/.test(hay)) return "moondream";
+  return "other";
+}
+
+export function formatWllamaFamilyLabel(familyId) {
+  return WLLAMA_FAMILY_LABELS[familyId] || familyId || "Other";
+}
+
+function sizeOf(entry) {
+  const n = Number(entry?.approxSizeMB);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function compareByLabel(a, b) {
+  return String(a.label || a.id || "").localeCompare(String(b.label || b.id || ""), undefined, {
+    sensitivity: "base",
+  });
+}
+
+/**
+ * Sort a wllama registry list. Returns a new array.
+ * @param {object[]} models
+ * @param {WllamaModelSortMode} [mode]
+ */
+export function sortWllamaModels(models, mode = DEFAULT_WLLAMA_MODEL_SORT) {
+  const list = Array.isArray(models) ? models.slice() : [];
+  if (mode === "size-desc") {
+    return list.sort((a, b) => sizeOf(b) - sizeOf(a) || compareByLabel(a, b));
+  }
+  if (mode === "size-asc") {
+    return list.sort((a, b) => sizeOf(a) - sizeOf(b) || compareByLabel(a, b));
+  }
+  if (mode === "family") {
+    const familyRank = new Map(WLLAMA_FAMILY_ORDER.map((id, i) => [id, i]));
+    return list.sort((a, b) => {
+      const fa = inferWllamaModelFamily(a);
+      const fb = inferWllamaModelFamily(b);
+      const ra = familyRank.has(fa) ? familyRank.get(fa) : familyRank.get("other");
+      const rb = familyRank.has(fb) ? familyRank.get(fb) : familyRank.get("other");
+      if (ra !== rb) return ra - rb;
+      return sizeOf(b) - sizeOf(a) || compareByLabel(a, b);
+    });
+  }
+  return list;
+}
+
+/**
+ * Group sorted models into family sections (for family sort mode UI).
+ * @param {object[]} models already sorted (preferably with mode "family")
+ */
+export function groupWllamaModelsByFamily(models) {
+  const groups = [];
+  let current = null;
+  for (const m of models || []) {
+    const family = inferWllamaModelFamily(m);
+    if (!current || current.family !== family) {
+      current = { family, label: formatWllamaFamilyLabel(family), models: [] };
+      groups.push(current);
+    }
+    current.models.push(m);
+  }
+  return groups;
 }

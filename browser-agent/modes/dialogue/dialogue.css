@@ -436,6 +436,7 @@ body.dialogue-panel-resizing {
   font-size: 10px;
   color: #888;
 }
+.dialogue-session-copy,
 .dialogue-session-del {
   flex-shrink: 0;
   width: 28px;
@@ -446,6 +447,7 @@ body.dialogue-panel-resizing {
   cursor: pointer;
   font-size: 12px;
 }
+.dialogue-session-copy:hover { background: #eef1f8; color: #2557d6; }
 .dialogue-session-del:hover { background: #fce8e8; color: #c62828; }
 .dialogue-sessions-empty {
   font-size: 11px;

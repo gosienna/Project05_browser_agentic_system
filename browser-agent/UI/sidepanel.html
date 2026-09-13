@@ -244,8 +244,17 @@
             <input id="wllama-nctx-input" type="number" min="1024" max="131072" step="1024" placeholder="16384" />
             <p class="hint">Runtime KV-cache size when the GGUF loads (capped at 131072). Model cards below show each GGUF’s designed max context separately — that label is not this n_ctx setting. Default 16384. Larger uses more RAM/VRAM and can OOM; reload happens on the next chat after you change this.</p>
 
-            <h3 class="onnx-section-title">Chat model (LLM)</h3>
-            <ul id="wllama-registry" class="onnx-registry"></ul>
+            <div class="wllama-catalog-toolbar">
+              <h3 class="onnx-section-title">Chat model (LLM)</h3>
+              <label class="wllama-sort-label" for="wllama-model-sort">Order</label>
+              <select id="wllama-model-sort" title="Order the model list">
+                <option value="catalog">Catalog order</option>
+                <option value="size-desc">Size: largest → smallest</option>
+                <option value="size-asc">Size: smallest → largest</option>
+                <option value="family">Group by family</option>
+              </select>
+            </div>
+            <ul id="wllama-registry" class="onnx-registry wllama-registry-scroll"></ul>
 
             <h3 class="onnx-section-title">Custom Hugging Face GGUF</h3>
             <label for="wllama-custom-repo">HF repo</label>
