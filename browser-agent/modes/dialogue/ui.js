@@ -62,6 +62,7 @@ import {
   resolveDialogueToolCalls,
   toOpenAiToolCall,
 } from "./tool-runtime.js";
+import { renderMarkdown } from "./markdown.js";
 
 let pdfViewer = null;
 
@@ -195,6 +196,7 @@ export function createDialoguePanel(deps) {
     onSettingsChanged() {
       refreshDialogueModelSelect();
       syncDialogueMcpTogglesFromSettings();
+      syncDialogueMarkdownToggleUi();
       syncRagChunkInputs();
       renderDialogueToolsForm();
       refreshDialogueContextEstimate();
@@ -234,6 +236,7 @@ function syncDialogueToolbarHighlights() {
     "#dialogue-preview-toggle",
     !$("#dialogue-preview-wrap")?.classList.contains("hidden")
   );
+  syncDialogueMarkdownToggleUi();
 }
 
 function wire() {
@@ -294,6 +297,13 @@ function wire() {
     e.target.value = ""; // allow re-picking the same file
   });
   syncDialogueMcpTogglesFromSettings();
+  syncDialogueMarkdownToggleUi();
+  $("#dialogue-md-toggle")?.addEventListener("click", async () => {
+    const next = !isDialogueMarkdownEnabled();
+    await saveSettings({ dialogueRenderMarkdown: next });
+    syncDialogueMarkdownToggleUi();
+    renderDialogue();
+  });
   const webSearchCb = $("#dialogue-web-search-enabled");
   if (webSearchCb) {
     webSearchCb.addEventListener("change", (e) => {
@@ -977,6 +987,23 @@ function isDialogueWebSearchEnabled() {
 
 function isDialogueBrowserToolsEnabled() {
   return getSettings().dialogueBrowserTools !== false && $("#dialogue-browser-tools-enabled")?.checked !== false;
+}
+
+/** Default on — assistant bubbles render Markdown unless settings.dialogueRenderMarkdown === false. */
+function isDialogueMarkdownEnabled() {
+  return getSettings()?.dialogueRenderMarkdown !== false;
+}
+
+function syncDialogueMarkdownToggleUi() {
+  const btn = $("#dialogue-md-toggle");
+  if (!btn) return;
+  const on = isDialogueMarkdownEnabled();
+  btn.classList.toggle("active", on);
+  btn.setAttribute("aria-pressed", String(on));
+  btn.textContent = on ? "Markdown" : "Plain text";
+  btn.title = on
+    ? "Showing Markdown. Click for plain text."
+    : "Showing plain text. Click for Markdown.";
 }
 
 function syncDialogueMcpTogglesFromSettings() {
@@ -2096,6 +2123,21 @@ function turnToMessage(t) {
   };
 }
 
+/** Body for user/assistant text turns — Markdown for assistants when enabled. */
+function createDialogueContentEl(turn) {
+  const el = document.createElement("div");
+  const useMarkdown =
+    turn.role === "assistant" && isDialogueMarkdownEnabled() && typeof turn.content === "string";
+  if (useMarkdown) {
+    el.className = "dialogue-md";
+    el.innerHTML = renderMarkdown(turn.content);
+  } else {
+    el.className = "dialogue-plain";
+    el.textContent = turn.content;
+  }
+  return el;
+}
+
 function renderDialogue() {
   const chat = $("#dialogue-chat");
   chat.innerHTML = "";
@@ -2146,9 +2188,7 @@ function renderDialogue() {
       bubble.appendChild(imgs);
     }
     if (turn.content) {
-      const text = document.createElement("div");
-      text.textContent = turn.content;
-      bubble.appendChild(text);
+      bubble.appendChild(createDialogueContentEl(turn));
     } else if (turn.streaming && turn.pending) {
       const pendingEl = document.createElement("div");
       pendingEl.className = "dialogue-stream-pending";
