@@ -2,6 +2,7 @@
 // Runs inside wllama-worker.js (Dedicated Worker). Wllama spawns its own nested wasm worker.
 
 import { resolveMaxTokens, resolveWllamaContextLimit } from "../llm-config.js";
+import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 import { estimateChatTokens, trimChatMessagesForContext } from "./context-trim.js";
 import {
   DEFAULT_WLLAMA_MODEL,
@@ -25,6 +26,8 @@ let loadedNCtx = null;
 let device = null;
 let busy = false;
 let queue = Promise.resolve();
+/** @type {AbortController|null} */
+let activeChatAbort = null;
 
 function vendorUrl(file) {
   const path = VENDOR_DIR + file;
@@ -652,6 +655,8 @@ async function runChatCompletions(request) {
   }
 
   busy = true;
+  const chatAbort = new AbortController();
+  activeChatAbort = chatAbort;
   try {
     const maxTokens = resolveMaxTokens(request.max_tokens);
     const contextLimit = loadedNCtx ?? nCtx;
@@ -697,18 +702,73 @@ async function runChatCompletions(request) {
     /** @type {Record<string, unknown>} */
     const body = {
       messages,
-      stream: false,
+      stream: true,
       temperature: request.temperature ?? 0.2,
       max_tokens: maxTokens,
+      abortSignal: chatAbort.signal,
     };
     if (tools?.length) {
       body.tools = tools;
       body.tool_choice = request.tool_choice || "auto";
     }
 
-    const completion = await wllama.createChatCompletion(body);
+    let completion = null;
+    let contentParts = [];
+    let toolCalls = null;
+    let finishReason = "stop";
+    let stepCount = 0;
+    const progress = createGenerationProgressTracker(request.requestId);
+    await wllama.createChatCompletion({
+      ...body,
+      onData: (chunk) => {
+        completion = chunk;
+        const choice = chunk?.choices?.[0];
+        if (!choice) return;
+        let delta = "";
+        if (choice.message) {
+          if (typeof choice.message.content === "string") contentParts = [choice.message.content];
+          if (choice.message.tool_calls) toolCalls = choice.message.tool_calls;
+        }
+        if (choice.delta) {
+          if (typeof choice.delta.content === "string") {
+            delta = choice.delta.content;
+            contentParts.push(delta);
+          }
+          if (choice.delta.tool_calls) toolCalls = choice.delta.tool_calls;
+        }
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        stepCount += 1;
+        const text = contentParts.join("");
+        const usageTokens = completion?.usage?.completion_tokens;
+        progress.push(delta, {
+          text,
+          completionTokens:
+            typeof usageTokens === "number" && usageTokens > 0 ? usageTokens : stepCount,
+        });
+      },
+    });
+    if (!completion) {
+      if (chatAbort.signal.aborted) {
+        progress.done();
+        return errorResponse("Generation stopped.", "aborted");
+      }
+      return errorResponse("wllama returned an empty completion.", "engine_error");
+    }
     const choice = completion.choices?.[0];
-    const message = choice?.message ?? { role: "assistant", content: "" };
+    const message = {
+      role: "assistant",
+      content: contentParts.join("") || choice?.message?.content || "",
+      ...(toolCalls?.length || choice?.message?.tool_calls?.length
+        ? { tool_calls: toolCalls || choice.message.tool_calls }
+        : {}),
+    };
+    const usage = completion.usage ?? {
+      prompt_tokens: 0,
+      completion_tokens: stepCount,
+      total_tokens: stepCount,
+    };
+    if (!usage.completion_tokens) usage.completion_tokens = stepCount;
+    progress.done({ text: message.content, completionTokens: usage.completion_tokens });
     return {
       id: completion.id || `chatcmpl-${crypto.randomUUID()}`,
       object: "chat.completion",
@@ -718,14 +778,10 @@ async function runChatCompletions(request) {
         {
           index: 0,
           message,
-          finish_reason: choice?.finish_reason ?? "stop",
+          finish_reason: finishReason || choice?.finish_reason || "stop",
         },
       ],
-      usage: completion.usage ?? {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-      },
+      usage,
       ...(trim.trimmed
         ? {
             context_trimmed: {
@@ -737,6 +793,9 @@ async function runChatCompletions(request) {
         : {}),
     };
   } catch (err) {
+    if (chatAbort.signal.aborted || err?.name === "AbortError") {
+      return errorResponse("Generation stopped.", "aborted");
+    }
     const message = String(err?.message || err);
     console.error(`[wllama] chat failed for ${modelId}:`, message);
     const type = err?.type || "";
@@ -765,8 +824,13 @@ async function runChatCompletions(request) {
     }
     return errorResponse(message, "engine_error");
   } finally {
+    if (activeChatAbort === chatAbort) activeChatAbort = null;
     busy = false;
   }
+}
+
+export function abortChat() {
+  activeChatAbort?.abort();
 }
 
 export function chatCompletions(request) {

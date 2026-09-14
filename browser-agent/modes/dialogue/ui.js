@@ -138,6 +138,14 @@ let dialogueTurns = [];
 let dialogueTriggerQuery = "";
 let dialogueImages = [];
 let dialogueSending = false;
+/** @type {AbortController|null} */
+let dialogueAbortController = null;
+/** Active generation requestId for llm-generation progress events. */
+let dialogueActiveRequestId = null;
+/** @type {{ turn: object, text: string, completionTokens: number, dirty: boolean }|null} */
+let dialogueStreamState = null;
+/** @type {ReturnType<typeof setInterval>|null} */
+let dialogueStreamFlushTimer = null;
 let dialogueSessionId = null;
 let dialogueLastUsage = null;
 let dialogueContextEstimate = null;
@@ -195,6 +203,9 @@ export function createDialoguePanel(deps) {
     onWebAppContextChanged() {
       renderDialogueToolsForm();
       notifyDialogueInputChanged();
+    },
+    onGenerationProgress(msg) {
+      handleDialogueGenerationProgress(msg);
     },
   };
 }
@@ -259,12 +270,20 @@ function wire() {
   });
   $("#dialogue-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    if (dialogueSending) {
+      stopDialogue();
+      return;
+    }
     sendDialogue();
   });
   // Enter sends; Shift+Enter inserts a newline. Skip while composing (IME).
   $("#dialogue-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
+      if (dialogueSending) {
+        stopDialogue();
+        return;
+      }
       sendDialogue();
     }
   });
@@ -1115,7 +1134,14 @@ async function executeDialogueToolTurn(call, btn) {
   dialogueTurns.push(toolTurn);
   renderDialogue();
 
-  if (btn) btn.textContent = `Running ${call.name}…`;
+  if (btn) {
+    // Keep Stop available during tool runs so the user can cancel the overall turn.
+    if (dialogueAbortController && !dialogueAbortController.signal.aborted) {
+      setDialogueSendBusy(btn, "Stop");
+    } else {
+      btn.textContent = `Running ${call.name}…`;
+    }
+  }
   let result = null;
   let errMsg = null;
   try {
@@ -1163,13 +1189,147 @@ function dialogueCompletionTools(tools) {
   return tools;
 }
 
-async function dialogueChatCompletion(messages, tools) {
+async function dialogueChatCompletion(messages, tools, signal, requestId) {
   const apiTools = dialogueCompletionTools(tools);
   return sendMessage({
     type: "dialogue.send",
     messages,
     ...(apiTools.length ? { tools: apiTools } : {}),
+    ...(signal ? { signal } : {}),
+    ...(requestId ? { requestId } : {}),
   });
+}
+
+function stopDialogue() {
+  dialogueAbortController?.abort();
+}
+
+function isDialogueAbortError(errOrRes) {
+  if (!errOrRes) return false;
+  if (errOrRes?.error?.type === "aborted") return true;
+  if (errOrRes?.name === "AbortError") return true;
+  const msg = String(errOrRes?.message || errOrRes?.error?.message || "");
+  return /generation stopped|aborted|AbortError/i.test(msg);
+}
+
+function formatDialogueCompactTokens(n) {
+  const num = Math.max(0, Math.floor(Number(n) || 0));
+  if (num < 1000) return String(num);
+  if (num < 10000) {
+    const k = num / 1000;
+    const rounded = Math.round(k * 10) / 10;
+    return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}k`;
+  }
+  return `${Math.round(num / 1000)}k`;
+}
+
+function stopBusyLabel(completionTokens) {
+  if (typeof completionTokens === "number" && completionTokens > 0) {
+    return `Stop · ${formatDialogueCompactTokens(completionTokens)}`;
+  }
+  return "Stop";
+}
+
+function setDialogueSendBusy(btn, label) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = label;
+  const isStop = String(label).startsWith("Stop");
+  btn.classList.toggle("is-stop", isStop);
+  btn.classList.toggle("is-running", isStop && dialogueSending);
+  btn.setAttribute("aria-label", isStop ? "Stop generation" : "Send message");
+}
+
+function resetDialogueSendBtn(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = "Send";
+  btn.classList.remove("is-stop", "is-running");
+  btn.setAttribute("aria-label", "Send message");
+}
+
+function beginDialogueStreamTurn(requestId) {
+  clearDialogueStreamFlush(false);
+  const turn = {
+    role: "assistant",
+    content: "",
+    pending: true,
+    streaming: true,
+  };
+  dialogueTurns.push(turn);
+  dialogueActiveRequestId = requestId;
+  dialogueStreamState = { turn, text: "", completionTokens: 0, dirty: true };
+  dialogueStreamFlushTimer = setInterval(() => flushDialogueStreamUi(false), 500);
+  flushDialogueStreamUi(true);
+  return turn;
+}
+
+function handleDialogueGenerationProgress(msg) {
+  if (!msg || msg.requestId !== dialogueActiveRequestId || !dialogueStreamState) return;
+  if (typeof msg.text === "string") dialogueStreamState.text = msg.text;
+  else if (typeof msg.delta === "string" && msg.delta) dialogueStreamState.text += msg.delta;
+  if (typeof msg.completionTokens === "number") {
+    dialogueStreamState.completionTokens = msg.completionTokens;
+  }
+  dialogueStreamState.dirty = true;
+  if (msg.done) flushDialogueStreamUi(true);
+}
+
+function flushDialogueStreamUi(force) {
+  if (!dialogueStreamState) return;
+  if (!force && !dialogueStreamState.dirty) return;
+  dialogueStreamState.dirty = false;
+  const { turn, text, completionTokens } = dialogueStreamState;
+  turn.content = text;
+  turn.completionTokens = completionTokens;
+  const btn = $("#dialogue-send-btn");
+  if (dialogueSending && btn?.classList.contains("is-stop")) {
+    setDialogueSendBusy(btn, stopBusyLabel(completionTokens));
+  }
+  renderDialogue();
+}
+
+function clearDialogueStreamFlush(removePendingTurn) {
+  if (dialogueStreamFlushTimer) {
+    clearInterval(dialogueStreamFlushTimer);
+    dialogueStreamFlushTimer = null;
+  }
+  if (removePendingTurn && dialogueStreamState?.turn) {
+    const idx = dialogueTurns.indexOf(dialogueStreamState.turn);
+    if (idx >= 0) dialogueTurns.splice(idx, 1);
+  }
+  dialogueStreamState = null;
+  dialogueActiveRequestId = null;
+}
+
+/**
+ * Replace the pending streaming turn with the final assistant turn (or keep partial on abort).
+ * @returns {object|null} the finalized turn if kept
+ */
+function finalizeDialogueStreamTurn(finalTurn, { aborted = false } = {}) {
+  flushDialogueStreamUi(true);
+  const pending = dialogueStreamState?.turn;
+  const streamedText = dialogueStreamState?.text || "";
+  const streamedTokens = dialogueStreamState?.completionTokens || 0;
+  clearDialogueStreamFlush(false);
+
+  if (pending) {
+    const idx = dialogueTurns.indexOf(pending);
+    if (idx >= 0) dialogueTurns.splice(idx, 1);
+  }
+
+  if (finalTurn) {
+    dialogueTurns.push(finalTurn);
+    return finalTurn;
+  }
+
+  if (aborted) {
+    const content = streamedText.trim() ? streamedText : "(stopped)";
+    const turn = { role: "assistant", content, completionTokens: streamedTokens };
+    dialogueTurns.push(turn);
+    return turn;
+  }
+  return null;
 }
 
 function noteWebllmContextTrim(res) {
@@ -1941,7 +2101,7 @@ function renderDialogue() {
   chat.innerHTML = "";
   for (const turn of dialogueTurns) {
     const bubble = document.createElement("div");
-    bubble.className = `dialogue-bubble ${turn.role}${turn.toolCall ? " tool-call" : ""}${turn.pending ? " pending" : ""}`;
+    bubble.className = `dialogue-bubble ${turn.role}${turn.toolCall ? " tool-call" : ""}${turn.pending ? " pending" : ""}${turn.streaming ? " streaming" : ""}`;
 
     if (turn.role === "tool") {
       const header = document.createElement("div");
@@ -1989,6 +2149,17 @@ function renderDialogue() {
       const text = document.createElement("div");
       text.textContent = turn.content;
       bubble.appendChild(text);
+    } else if (turn.streaming && turn.pending) {
+      const pendingEl = document.createElement("div");
+      pendingEl.className = "dialogue-stream-pending";
+      pendingEl.textContent = "Generating…";
+      bubble.appendChild(pendingEl);
+    }
+    if (turn.streaming && turn.pending && typeof turn.completionTokens === "number" && turn.completionTokens > 0) {
+      const meta = document.createElement("div");
+      meta.className = "dialogue-stream-tokens";
+      meta.textContent = `${formatDialogueCompactTokens(turn.completionTokens)} tokens`;
+      bubble.appendChild(meta);
     }
     if (turn.citations?.length) renderCitationChips(turn.citations, bubble);
     if (turn.reasoning) appendDialogueThinkingBlock(bubble, turn.reasoning);
@@ -2132,11 +2303,13 @@ async function sendDialogue() {
   renderDialogue();
 
   dialogueSending = true;
+  dialogueAbortController = new AbortController();
+  const signal = dialogueAbortController.signal;
   const btn = $("#dialogue-send-btn");
-  btn.disabled = true;
-  btn.textContent = "Sending…";
+  setDialogueSendBusy(btn, "Stop");
 
   let gotAssistantReply = false;
+  let stoppedByUser = false;
 
   try {
     const maxToolRounds = getDialogueMaxToolRounds(getSettings());
@@ -2145,10 +2318,24 @@ async function sendDialogue() {
     // tool-role turns — the UI still shows the result, but the next completion never sees it.
     const useNativeToolProtocol = dialogueCompletionTools(tools).length > 0;
     for (let round = 0; round < maxToolRounds; round++) {
-      btn.textContent = round === 0 ? "Sending…" : "Thinking…";
+      if (signal.aborted) {
+        stoppedByUser = true;
+        break;
+      }
+      const requestId = crypto.randomUUID();
+      beginDialogueStreamTurn(requestId);
       const inputRaw = snapshotDialogueRawInput(messages, tools);
-      const res = await dialogueChatCompletion(messages, tools);
-      if (res?.error) throw new Error(res.error.message);
+      const res = await dialogueChatCompletion(messages, tools, signal, requestId);
+      if (signal.aborted || isDialogueAbortError(res)) {
+        finalizeDialogueStreamTurn(null, { aborted: true });
+        stoppedByUser = true;
+        gotAssistantReply = true;
+        break;
+      }
+      if (res?.error) {
+        clearDialogueStreamFlush(true);
+        throw new Error(res.error.message);
+      }
       noteWebllmContextTrim(res);
       if (res.usage) {
         dialogueLastUsage = res.usage;
@@ -2175,7 +2362,7 @@ async function sendDialogue() {
         );
       }
       if (!calls.length) {
-        dialogueTurns.push({
+        finalizeDialogueStreamTurn({
           ...assistantTurnFromCompletion(msg, choice),
           raw: buildDialogueRawFromCompletion(inputRaw, res),
         });
@@ -2183,9 +2370,16 @@ async function sendDialogue() {
         break;
       }
 
+      if (signal.aborted) {
+        finalizeDialogueStreamTurn(null, { aborted: true });
+        stoppedByUser = true;
+        gotAssistantReply = true;
+        break;
+      }
+
       calls = resolveDialogueToolCalls(calls, dialogueTriggerQuery);
       const callDisplay = formatAssistantToolCallDisplay(msg, calls);
-      dialogueTurns.push({
+      finalizeDialogueStreamTurn({
         role: "assistant",
         content: callDisplay,
         toolCall: true,
@@ -2214,6 +2408,10 @@ async function sendDialogue() {
 
       const textResultBlocks = [];
       for (const call of calls) {
+        if (signal.aborted) {
+          stoppedByUser = true;
+          break;
+        }
         const { resultText } = await executeDialogueToolTurn(call, btn);
         if (feedNativeToolResults && call.source === "native") {
           messages.push({
@@ -2226,39 +2424,67 @@ async function sendDialogue() {
           textResultBlocks.push(`Tool ${call.name} result:\n${resultText}`);
         }
       }
+      if (stoppedByUser) break;
 
       if (textResultBlocks.length) {
         messages.push({ role: "user", content: textResultBlocks.join("\n\n") });
       }
+      if (btn?.classList.contains("is-stop")) setDialogueSendBusy(btn, "Stop");
     }
 
-    if (!gotAssistantReply) {
-      btn.textContent = "Sending…";
-      const inputRaw = snapshotDialogueRawInput(messages, tools);
-      const res = await dialogueChatCompletion(messages, tools);
-      if (res?.error) throw new Error(res.error.message);
-      noteWebllmContextTrim(res);
-      if (res.usage) {
-        dialogueLastUsage = res.usage;
-        renderDialogueContextBar();
+    if (stoppedByUser) {
+      if (!gotAssistantReply) {
+        dialogueTurns.push({ role: "assistant", content: "(stopped)" });
+        gotAssistantReply = true;
       }
-      const finalChoice = res.choices?.[0] ?? {};
-      const finalMsg = finalChoice.message ?? {};
-      let turn = assistantTurnFromCompletion(finalMsg, finalChoice);
-      if (turn.content === "(empty response)") turn = { ...turn, content: "(stopped: tool round limit)" };
-      dialogueTurns.push({
-        ...turn,
-        raw: buildDialogueRawFromCompletion(inputRaw, res),
-      });
+    } else if (!gotAssistantReply) {
+      if (signal.aborted) {
+        dialogueTurns.push({ role: "assistant", content: "(stopped)" });
+      } else {
+        const requestId = crypto.randomUUID();
+        beginDialogueStreamTurn(requestId);
+        const inputRaw = snapshotDialogueRawInput(messages, tools);
+        const res = await dialogueChatCompletion(messages, tools, signal, requestId);
+        if (signal.aborted || isDialogueAbortError(res)) {
+          finalizeDialogueStreamTurn(null, { aborted: true });
+        } else {
+          if (res?.error) {
+            clearDialogueStreamFlush(true);
+            throw new Error(res.error.message);
+          }
+          noteWebllmContextTrim(res);
+          if (res.usage) {
+            dialogueLastUsage = res.usage;
+            renderDialogueContextBar();
+          }
+          const finalChoice = res.choices?.[0] ?? {};
+          const finalMsg = finalChoice.message ?? {};
+          let turn = assistantTurnFromCompletion(finalMsg, finalChoice);
+          if (turn.content === "(empty response)") turn = { ...turn, content: "(stopped: tool round limit)" };
+          finalizeDialogueStreamTurn({
+            ...turn,
+            raw: buildDialogueRawFromCompletion(inputRaw, res),
+          });
+        }
+      }
     }
   } catch (err) {
-    dialogueTurns.push({ role: "assistant", content: `✗ ${err.message}` });
+    if (isDialogueAbortError(err) || signal.aborted) {
+      if (dialogueStreamState) finalizeDialogueStreamTurn(null, { aborted: true });
+      else if (!gotAssistantReply) {
+        dialogueTurns.push({ role: "assistant", content: "(stopped)" });
+      }
+    } else {
+      clearDialogueStreamFlush(true);
+      dialogueTurns.push({ role: "assistant", content: `✗ ${err.message}` });
+    }
   } finally {
+    if (dialogueStreamState) clearDialogueStreamFlush(true);
     renderDialogue();
     await persistDialogueSession();
     dialogueSending = false;
-    btn.disabled = false;
-    btn.textContent = "Send";
+    dialogueAbortController = null;
+    resetDialogueSendBtn(btn);
   }
 }
 

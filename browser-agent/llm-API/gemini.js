@@ -6,11 +6,14 @@ import { resolveApiKey, resolveChatModel, resolveLlmBaseUrl } from "../llm-provi
 import { geminiModelSupportsThinking, resolveGeminiModel } from "./gemini-models.js";
 import {
   errorResponse,
+  mergeAbortSignals,
   openAiFetchErrorMessage,
   readJsonResponse,
   readOpenAiCompatibleResponse,
+  readSseJsonStream,
   REMOTE_LLM_FETCH_TIMEOUT_MS,
 } from "./shared.js";
+import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 
 function appendGeminiContent(contents, role, parts) {
   if (!parts.length) return;
@@ -255,36 +258,103 @@ export async function geminiChatCompletions(request, settings) {
     body.toolConfig = { functionCallingConfig: { mode: "AUTO" } };
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REMOTE_LLM_FETCH_TIMEOUT_MS);
+  const { signal, cleanup, didUserAbort } = mergeAbortSignals(request.signal, REMOTE_LLM_FETCH_TIMEOUT_MS);
+  const progress = createGenerationProgressTracker(request.requestId);
   try {
-    const res = await fetch(`${baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const parsed = await readOpenAiCompatibleResponse(res);
+    const res = await fetch(
+      `${baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(body),
+        signal,
+      }
+    );
     if (!res.ok) {
+      const parsed = await readOpenAiCompatibleResponse(res);
       const detail = parsed.body
         ? geminiUnavailableModelMessage(model, geminiErrorMessage(parsed.body, res.status))
         : parsed.error || `HTTP ${res.status}`;
       return errorResponse(detail, "engine_error");
     }
-    if (parsed.error || !parsed.body) {
-      return errorResponse(parsed.error || `empty response (HTTP ${res.status})`, "engine_error");
-    }
-    if (parsed.body.error) {
-      return errorResponse(geminiErrorMessage(parsed.body, res.status), "engine_error");
-    }
-    return geminiChatCompletionFromBody(parsed.body, model);
+
+    let content = "";
+    let reasoning = "";
+    /** @type {object[]|null} */
+    let toolCalls = null;
+    /** @type {object[]|null} */
+    let geminiParts = null;
+    let finishReason = "stop";
+    let usage = {};
+
+    await readSseJsonStream(res, (chunk) => {
+      if (chunk?.error) throw new Error(geminiErrorMessage(chunk, res.status));
+      if (chunk?.usageMetadata) usage = chunk.usageMetadata;
+      const candidate = chunk?.candidates?.[0];
+      if (!candidate) return;
+      if (candidate.finishReason === "MAX_TOKENS") finishReason = "length";
+      const parts = candidate?.content?.parts || [];
+      if (parts.length) {
+        geminiParts = [...(geminiParts || []), ...parts];
+        for (const part of parts) {
+          if (typeof part.text === "string" && part.text) {
+            content += part.text;
+            progress.push(part.text, {
+              text: content,
+              completionTokens: usage.candidatesTokenCount,
+            });
+          }
+          if (part.functionCall) {
+            if (!toolCalls) toolCalls = [];
+            toolCalls.push({
+              id: `call_${toolCalls.length}`,
+              type: "function",
+              function: {
+                name: part.functionCall.name,
+                arguments: JSON.stringify(part.functionCall.args || {}),
+              },
+            });
+          }
+          if (typeof part.thought === "string") reasoning += part.thought;
+        }
+      } else if (typeof usage.candidatesTokenCount === "number") {
+        progress.push(undefined, { text: content, completionTokens: usage.candidatesTokenCount });
+      }
+    });
+
+    if (toolCalls?.length) finishReason = "tool_calls";
+    const message = {
+      role: "assistant",
+      content: content || null,
+      ...(reasoning ? { reasoning } : {}),
+      ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+      ...(geminiParts?.length ? { gemini_parts: geminiParts } : {}),
+    };
+    const completionTokens = usage.candidatesTokenCount ?? 0;
+    progress.done({ text: content, completionTokens });
+    return {
+      id: `chatcmpl-${crypto.randomUUID()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, message, finish_reason: finishReason }],
+      usage: {
+        prompt_tokens: usage.promptTokenCount ?? 0,
+        completion_tokens: completionTokens,
+        total_tokens: usage.totalTokenCount ?? 0,
+      },
+    };
   } catch (err) {
-    return errorResponse(openAiFetchErrorMessage(err, baseUrl, settings), "engine_error");
+    const userAborted = didUserAbort();
+    return errorResponse(
+      openAiFetchErrorMessage(err, baseUrl, settings, { userAborted }),
+      userAborted ? "aborted" : "engine_error"
+    );
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 

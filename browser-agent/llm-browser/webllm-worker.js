@@ -4,7 +4,14 @@ import * as engine from "./webllm-engine.js";
 
 self.onmessage = async (event) => {
   const { id, msg } = event.data || {};
-  if (id == null || !msg) return;
+  if (!msg) return;
+
+  if (msg.type === "chat.abort") {
+    engine.abortChat?.();
+    return;
+  }
+
+  if (id == null) return;
 
   try {
     const result = await handle(msg);

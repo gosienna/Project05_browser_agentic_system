@@ -11,7 +11,8 @@ import {
   resolveOllamaRequestModel,
 } from "./llm-API/ollama.js";
 import { openaiChatCompletions, openaiEmbeddings } from "./llm-API/openai.js";
-import { errorResponse } from "./llm-API/shared.js";
+import { errorResponse, mergeAbortSignals, readSseJsonStream, REMOTE_LLM_FETCH_TIMEOUT_MS } from "./llm-API/shared.js";
+import { createGenerationProgressTracker } from "./llm-generation-progress.js";
 import { resolveApiKey, resolveOllamaBaseUrl } from "./llm-providers.js";
 import { isThinkingEnabled, normalizeChatCompletion } from "./reasoning-content.js";
 import { stripUnsupportedNativeTools } from "./llm-browser/webllm-models.js";
@@ -35,7 +36,12 @@ function finalizeChatCompletion(response, settings) {
 }
 
 export async function chatCompletions(request, settings) {
-  const req = stripUnsupportedNativeTools(withThinkingRequest(request, settings), settings);
+  const signal = request?.signal;
+  const requestId = request?.requestId;
+  const { signal: _omitSignal, requestId: _omitId, ...requestWithoutMeta } = request || {};
+  const req = stripUnsupportedNativeTools(withThinkingRequest(requestWithoutMeta, settings), settings);
+  if (signal) req.signal = signal;
+  if (requestId) req.requestId = requestId;
   if (req.max_tokens == null) req.max_tokens = getMaxTokens(settings);
   const provider = settings?.provider || "onnx";
   let response;
@@ -108,6 +114,37 @@ export async function chat(messages, settings) {
 
 // --- in-browser (llm-browser) ------------------------------------------
 
+/** Fire-and-forget interrupt for a local offscreen worker. */
+function requestLocalEngineAbort(target) {
+  chrome.runtime.sendMessage({ target, type: "chat.abort" }).catch(() => {});
+}
+
+/**
+ * Run a local engine call while forwarding AbortSignal → chat.abort.
+ * @param {"onnx-engine"|"webllm-engine"|"wllama-engine"} target
+ * @param {AbortSignal|undefined} signal
+ * @param {() => Promise<object>} run
+ */
+async function withLocalEngineAbort(target, signal, run) {
+  if (signal?.aborted) return errorResponse("Generation stopped.", "aborted");
+
+  const onAbort = () => requestLocalEngineAbort(target);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await run();
+    if (signal?.aborted) return errorResponse("Generation stopped.", "aborted");
+    if (response?.error?.type === "aborted") return response;
+    return response;
+  } catch (err) {
+    if (signal?.aborted || err?.name === "AbortError") {
+      return errorResponse("Generation stopped.", "aborted");
+    }
+    throw err;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 export async function ensureOffscreenDocument() {
   if (offscreenReadyPromise) return offscreenReadyPromise;
 
@@ -147,16 +184,19 @@ async function onnxChatCompletions(request, settings) {
     return errorResponse("No ONNX model selected — open Settings and pick a model to download.", "model_not_loaded");
   }
 
+  const { signal, ...requestBody } = request;
   try {
-    const response = await chrome.runtime.sendMessage({
-      target: "onnx-engine",
-      type: "chat.completions",
-      request: { ...request, model },
+    return await withLocalEngineAbort("onnx-engine", signal, async () => {
+      const response = await chrome.runtime.sendMessage({
+        target: "onnx-engine",
+        type: "chat.completions",
+        request: { ...requestBody, model },
+      });
+      if (!response) {
+        return errorResponse("Local engine did not respond (offscreen document may have been evicted).", "engine_error");
+      }
+      return response;
     });
-    if (!response) {
-      return errorResponse("Local engine did not respond (offscreen document may have been evicted).", "engine_error");
-    }
-    return response;
   } catch (err) {
     return errorResponse(`Local engine error: ${err.message}`, "engine_error");
   }
@@ -199,17 +239,20 @@ async function webllmChatCompletions(request, settings) {
     return errorResponse("No WebLLM model selected — open Settings and pick a model to download.", "model_not_loaded");
   }
 
+  const { signal, ...requestBody } = request;
   try {
-    const payload = stripUnsupportedNativeTools({ ...request, model }, settings);
-    const response = await chrome.runtime.sendMessage({
-      target: "webllm-engine",
-      type: "chat.completions",
-      request: payload,
+    return await withLocalEngineAbort("webllm-engine", signal, async () => {
+      const payload = stripUnsupportedNativeTools({ ...requestBody, model }, settings);
+      const response = await chrome.runtime.sendMessage({
+        target: "webllm-engine",
+        type: "chat.completions",
+        request: payload,
+      });
+      if (!response) {
+        return errorResponse("WebLLM engine did not respond (offscreen document may have been evicted).", "engine_error");
+      }
+      return response;
     });
-    if (!response) {
-      return errorResponse("WebLLM engine did not respond (offscreen document may have been evicted).", "engine_error");
-    }
-    return response;
   } catch (err) {
     return errorResponse(`WebLLM engine error: ${err.message}`, "engine_error");
   }
@@ -227,20 +270,23 @@ async function wllamaChatCompletions(request, settings) {
     return errorResponse("No wllama model selected — open Settings and pick a GGUF model to download.", "model_not_loaded");
   }
 
+  const { signal, ...requestBody } = request;
   try {
-    const payload = {
-      ...stripUnsupportedNativeTools({ ...request, model }, settings),
-      n_ctx: getWllamaContextLimit(settings),
-    };
-    const response = await chrome.runtime.sendMessage({
-      target: "wllama-engine",
-      type: "chat.completions",
-      request: payload,
+    return await withLocalEngineAbort("wllama-engine", signal, async () => {
+      const payload = {
+        ...stripUnsupportedNativeTools({ ...requestBody, model }, settings),
+        n_ctx: getWllamaContextLimit(settings),
+      };
+      const response = await chrome.runtime.sendMessage({
+        target: "wllama-engine",
+        type: "chat.completions",
+        request: payload,
+      });
+      if (!response) {
+        return errorResponse("wllama engine did not respond (offscreen document may have been evicted).", "engine_error");
+      }
+      return response;
     });
-    if (!response) {
-      return errorResponse("wllama engine did not respond (offscreen document may have been evicted).", "engine_error");
-    }
-    return response;
   } catch (err) {
     return errorResponse(`wllama engine error: ${err.message}`, "engine_error");
   }
@@ -291,6 +337,8 @@ async function anthropicChatCompletions(request, settings) {
   const tools =
     Array.isArray(request.tools) && request.tools.length ? toAnthropicTools(request.tools) : undefined;
 
+  const { signal, cleanup, didUserAbort } = mergeAbortSignals(request.signal, REMOTE_LLM_FETCH_TIMEOUT_MS);
+  const progress = createGenerationProgressTracker(request.requestId);
   try {
     const res = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
@@ -306,54 +354,94 @@ async function anthropicChatCompletions(request, settings) {
         ...(tools ? { tools } : {}),
         max_tokens: request.max_tokens,
         temperature: request.temperature,
+        stream: true,
       }),
+      signal,
     });
-    const body = await res.json();
-    if (!res.ok) return errorResponse(body?.error?.message || `HTTP ${res.status}`, "engine_error");
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return errorResponse(body?.error?.message || `HTTP ${res.status}`, "engine_error");
+    }
 
-    const blocks = body.content || [];
-    const text = blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
-    const toolUses = blocks.filter((b) => b.type === "tool_use");
-    const tool_calls = toolUses.map((tu) => ({
-      id: tu.id,
-      type: "function",
-      function: {
-        name: tu.name,
-        arguments: JSON.stringify(tu.input && typeof tu.input === "object" ? tu.input : {}),
-      },
-    }));
+    let content = "";
+    /** @type {object[]} */
+    const toolCalls = [];
+    let finishReason = "stop";
+    let messageId = `chatcmpl-${crypto.randomUUID()}`;
+    let modelOut = request.model || settings.model || "claude-sonnet-5";
+    let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    /** @type {object|null} */
+    let currentTool = null;
 
-    const finishReason =
-      body.stop_reason === "tool_use"
-        ? "tool_calls"
-        : body.stop_reason === "end_turn"
-          ? "stop"
-          : "length";
+    await readSseJsonStream(res, (event) => {
+      const type = event?.type;
+      if (type === "message_start") {
+        if (event.message?.id) messageId = event.message.id;
+        if (event.message?.model) modelOut = event.message.model;
+        if (event.message?.usage) {
+          usage.prompt_tokens = event.message.usage.input_tokens ?? 0;
+        }
+      } else if (type === "content_block_start" && event.content_block?.type === "tool_use") {
+        currentTool = {
+          id: event.content_block.id,
+          type: "function",
+          function: { name: event.content_block.name || "", arguments: "" },
+        };
+      } else if (type === "content_block_delta") {
+        const delta = event.delta || {};
+        if (delta.type === "text_delta" && typeof delta.text === "string") {
+          content += delta.text;
+          progress.push(delta.text, { text: content });
+        } else if (delta.type === "input_json_delta" && currentTool && typeof delta.partial_json === "string") {
+          currentTool.function.arguments += delta.partial_json;
+        }
+      } else if (type === "content_block_stop") {
+        if (currentTool) {
+          toolCalls.push(currentTool);
+          currentTool = null;
+        }
+      } else if (type === "message_delta") {
+        if (event.delta?.stop_reason === "tool_use") finishReason = "tool_calls";
+        else if (event.delta?.stop_reason === "max_tokens") finishReason = "length";
+        if (event.usage?.output_tokens != null) {
+          usage.completion_tokens = event.usage.output_tokens;
+          progress.push(undefined, { text: content, completionTokens: usage.completion_tokens });
+        }
+      } else if (type === "message_stop") {
+        /* done */
+      }
+    });
 
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+    progress.done({ text: content, completionTokens: usage.completion_tokens });
     return {
-      id: body.id || `chatcmpl-${crypto.randomUUID()}`,
+      id: messageId,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: body.model,
+      model: modelOut,
       choices: [
         {
           index: 0,
           message: {
             role: "assistant",
-            content: text || null,
-            ...(tool_calls.length ? { tool_calls } : {}),
+            content: content || null,
+            ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
           },
           finish_reason: finishReason,
         },
       ],
-      usage: {
-        prompt_tokens: body.usage?.input_tokens ?? 0,
-        completion_tokens: body.usage?.output_tokens ?? 0,
-        total_tokens: (body.usage?.input_tokens ?? 0) + (body.usage?.output_tokens ?? 0),
-      },
+      usage,
     };
   } catch (err) {
+    if (didUserAbort() || err?.name === "AbortError") {
+      return errorResponse(
+        didUserAbort() ? "Generation stopped." : `Request timed out after ${Math.round(REMOTE_LLM_FETCH_TIMEOUT_MS / 1000)}s.`,
+        didUserAbort() ? "aborted" : "engine_error"
+      );
+    }
     return errorResponse(err.message, "engine_error");
+  } finally {
+    cleanup();
   }
 }
 

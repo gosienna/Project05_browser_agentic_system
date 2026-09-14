@@ -3,6 +3,7 @@
 // text-generation. Intended to run inside ort-worker.js (Dedicated Worker).
 
 import { resolveMaxTokens } from "../llm-config.js";
+import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 import { applyIndexedDbCache, clearModelCache, deleteModelFromCache, listCachedFiles } from "./model-cache.js";
 import { isQwen3ThinkingModel } from "../reasoning-content.js";
 
@@ -232,6 +233,8 @@ let dtype = null;
 /** @type {Map<string, { pipeline: object, task: string, modelId: string }>} */
 const loaded = new Map();
 let busy = false;
+/** @type {import("@xenova/transformers").InterruptableStoppingCriteria|null} */
+let activeStoppingCriteria = null;
 let queue = Promise.resolve();
 
 /** @type {Map<string, object>} successful getContextEstimate() results only. */
@@ -774,6 +777,32 @@ function errorResponse(message, type) {
   return { error: { message, type, code: null } };
 }
 
+export function abortChat() {
+  try {
+    activeStoppingCriteria?.interrupt?.();
+  } catch (err) {
+    console.warn("[onnx] interrupt stopping criteria failed:", err);
+  }
+}
+
+async function beginStoppingCriteria() {
+  const tf = await loadTransformers();
+  const Criteria = tf.InterruptableStoppingCriteria;
+  if (!Criteria) return null;
+  const criteria = new Criteria();
+  activeStoppingCriteria = criteria;
+  return criteria;
+}
+
+function endStoppingCriteria(criteria) {
+  if (activeStoppingCriteria === criteria) activeStoppingCriteria = null;
+}
+
+function isGenerationAbortedError(err) {
+  const message = String(err?.message || err || "");
+  return /interrupt|aborted|stopping.?criteria/i.test(message);
+}
+
 /** FIFO-serialize concurrent requests (chat + media tools may collide). */
 function enqueue(fn) {
   const run = queue.then(fn, fn);
@@ -836,6 +865,9 @@ async function runInference(request) {
     try {
       raw = await invokeEntry(entry, task, request.input, options);
     } catch (err) {
+      if (isGenerationAbortedError(err)) {
+        return errorResponse("Generation stopped.", "aborted");
+      }
       const message = String(err?.message || err);
       if (isGpuResourceError(message)) {
         const alreadyCpu = entry?.forceCpuEp === true;
@@ -899,19 +931,37 @@ async function invokeMinistral(entry, input, options) {
   const inputs = await processor(prompt, images, { add_special_tokens: false });
   const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
   const temperature = options.temperature ?? 0.2;
-  const outputs = await model.generate({
-    ...inputs,
-    max_new_tokens: maxNewTokens,
-    temperature,
-    do_sample: temperature > 0,
-    top_p: options.top_p ?? DEFAULT_TOP_P,
-  });
-  const promptLen = inputs.input_ids.dims.at(-1);
-  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
-  const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
-    skip_special_tokens: true,
-  });
-  return [{ generated_text: decoded?.[0] ?? "", prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen } }];
+  const progress = createGenerationProgressTracker(options.requestId);
+  let stepCount = 0;
+  const progressStreamer = {
+    put() {
+      stepCount += 1;
+      progress.push(undefined, { completionTokens: stepCount });
+    },
+    end() {},
+  };
+  const stoppingCriteria = await beginStoppingCriteria();
+  try {
+    const outputs = await model.generate({
+      ...inputs,
+      max_new_tokens: maxNewTokens,
+      temperature,
+      do_sample: temperature > 0,
+      top_p: options.top_p ?? DEFAULT_TOP_P,
+      streamer: progressStreamer,
+      ...(stoppingCriteria ? { stopping_criteria: stoppingCriteria } : {}),
+    });
+    const promptLen = inputs.input_ids.dims.at(-1);
+    const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
+    const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
+      skip_special_tokens: true,
+    });
+    const text = decoded?.[0] ?? "";
+    progress.done({ text, completionTokens: completionLen || stepCount });
+    return [{ generated_text: text, prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen || stepCount } }];
+  } finally {
+    endStoppingCriteria(stoppingCriteria);
+  }
 }
 
 async function invokeGemma4(entry, input, options) {
@@ -938,25 +988,54 @@ async function invokeGemma4(entry, input, options) {
   const inputs = await processor(prompt, images, null, { add_special_tokens: false });
   const maxNewTokens = resolveMaxTokens(options.max_new_tokens ?? options.max_tokens);
   const temperature = options.temperature ?? 0.2;
-  const outputs = await model.generate({
-    ...inputs,
-    max_new_tokens: maxNewTokens,
-    temperature,
-    do_sample: temperature > 0,
-    top_p: options.top_p ?? DEFAULT_TOP_P,
-  });
-  const promptLen = inputs.input_ids.dims.at(-1);
-  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
-  const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
-    skip_special_tokens: true,
-  });
-  return [{ generated_text: decoded?.[0] ?? "", prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen } }];
+  const progress = createGenerationProgressTracker(options.requestId);
+  let stepCount = 0;
+  const progressStreamer = {
+    put() {
+      stepCount += 1;
+      progress.push(undefined, { completionTokens: stepCount });
+    },
+    end() {},
+  };
+  const stoppingCriteria = await beginStoppingCriteria();
+  try {
+    const outputs = await model.generate({
+      ...inputs,
+      max_new_tokens: maxNewTokens,
+      temperature,
+      do_sample: temperature > 0,
+      top_p: options.top_p ?? DEFAULT_TOP_P,
+      streamer: progressStreamer,
+      ...(stoppingCriteria ? { stopping_criteria: stoppingCriteria } : {}),
+    });
+    const promptLen = inputs.input_ids.dims.at(-1);
+    const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
+    const decoded = processor.batch_decode(outputs.slice(null, [promptLen, null]), {
+      skip_special_tokens: true,
+    });
+    const text = decoded?.[0] ?? "";
+    progress.done({ text, completionTokens: completionLen || stepCount });
+    return [{ generated_text: text, prompt, usage: { prompt_tokens: promptLen, completion_tokens: completionLen || stepCount } }];
+  } finally {
+    endStoppingCriteria(stoppingCriteria);
+  }
 }
 
 async function invokeEntry(entry, task, input, options) {
   if (entry?.kind === "gemma4") return invokeGemma4(entry, input, options);
   if (entry?.kind === "ministral") return invokeMinistral(entry, input, options);
   if (task === TEXT_GENERATION) return invokeTextLlm(entry.pipeline, input, options, entry);
+  if (task === IMAGE_TEXT_TO_TEXT) {
+    const stoppingCriteria = await beginStoppingCriteria();
+    try {
+      return await invokePipeline(entry.pipeline, task, input, {
+        ...options,
+        ...(stoppingCriteria ? { stopping_criteria: stoppingCriteria } : {}),
+      });
+    } finally {
+      endStoppingCriteria(stoppingCriteria);
+    }
+  }
   return invokePipeline(entry.pipeline, task, input, options);
 }
 
@@ -1022,54 +1101,60 @@ async function invokeTextLlm(pipe, input, options, entry) {
   }
 
   const inputs = tokenizer(promptText, { add_special_tokens: false });
-  // TEMP diagnostics for the Qwen hang investigation — remove once root-caused.
-  const diagStart = Date.now();
-  let diagStepCount = 0;
-  const diagStreamer = {
+  const progress = createGenerationProgressTracker(options.requestId);
+  let stepCount = 0;
+  let streamedText = "";
+  const progressStreamer = {
     put(ids) {
-      diagStepCount++;
-      const flat = Array.isArray(ids) ? ids.flat(2) : ids;
-      console.log(`[onnx][diag] +${Date.now() - diagStart}ms step=${diagStepCount} ids=${flat.map(String).join(",")}`);
+      stepCount++;
+      try {
+        const flat = Array.isArray(ids) ? ids.flat(2) : ids;
+        const decoded = tokenizer.batch_decode([flat], { skip_special_tokens: true })?.[0] ?? "";
+        // Transformers streamer often sends cumulative token ids for the new piece.
+        const piece =
+          streamedText && decoded.startsWith(streamedText)
+            ? decoded.slice(streamedText.length)
+            : decoded;
+        if (piece) streamedText += piece;
+        else if (decoded && !streamedText) streamedText = decoded;
+        progress.push(piece || undefined, { text: streamedText || decoded, completionTokens: stepCount });
+      } catch {
+        progress.push(undefined, { text: streamedText, completionTokens: stepCount });
+      }
     },
     end() {
-      console.log(`[onnx][diag] stream end after ${Date.now() - diagStart}ms, ${diagStepCount} put() calls`);
+      /* finalized after generate */
     },
   };
-  const outputs = await model.generate({
-    ...inputs,
-    max_new_tokens: maxNewTokens,
-    temperature,
-    do_sample: temperature > 0,
-    streamer: diagStreamer,
-    top_p: options.top_p ?? DEFAULT_TOP_P,
-  });
-  const promptLen = inputs.input_ids.dims.at(-1);
-  const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
-  const completionSlice = outputs.slice(null, [promptLen, null]);
-  const decoded = tokenizer.batch_decode(completionSlice, {
-    skip_special_tokens: true,
-  });
-  // TEMP diagnostics for the Qwen garbling investigation — remove once root-caused.
+  const stoppingCriteria = await beginStoppingCriteria();
   try {
-    const ids = Array.from(completionSlice.data ?? completionSlice.ort_tensor?.data ?? []);
-    const eos = model.generation_config?.eos_token_id;
-    console.log(
-      `[onnx][diag] device=${entry?.sessionDevice} dtype=${entry?.modelDtype} vocab_size=${model.config?.vocab_size} ` +
-        `promptLen=${promptLen} completionLen=${completionLen} eos_token_id=${JSON.stringify(eos)}`
-    );
-    console.log(`[onnx][diag] first 40 completion ids: ${ids.slice(0, 40).join(",")}`);
-    console.log(`[onnx][diag] last 20 completion ids: ${ids.slice(-20).join(",")}`);
-    console.log(`[onnx][diag] raw decoded (no skip_special_tokens): ${JSON.stringify(tokenizer.batch_decode(completionSlice, { skip_special_tokens: false })?.[0]?.slice(0, 400))}`);
-  } catch (diagErr) {
-    console.warn("[onnx][diag] failed:", diagErr);
+    const outputs = await model.generate({
+      ...inputs,
+      max_new_tokens: maxNewTokens,
+      temperature,
+      do_sample: temperature > 0,
+      streamer: progressStreamer,
+      top_p: options.top_p ?? DEFAULT_TOP_P,
+      ...(stoppingCriteria ? { stopping_criteria: stoppingCriteria } : {}),
+    });
+    const promptLen = inputs.input_ids.dims.at(-1);
+    const completionLen = Math.max(0, outputs.dims.at(-1) - promptLen);
+    const completionSlice = outputs.slice(null, [promptLen, null]);
+    const decoded = tokenizer.batch_decode(completionSlice, {
+      skip_special_tokens: true,
+    });
+    const generated = decoded?.[0] ?? streamedText ?? "";
+    progress.done({ text: generated, completionTokens: completionLen || stepCount });
+    return [
+      {
+        generated_text: generated,
+        prompt: promptText,
+        usage: { prompt_tokens: promptLen, completion_tokens: completionLen || stepCount },
+      },
+    ];
+  } finally {
+    endStoppingCriteria(stoppingCriteria);
   }
-  return [
-    {
-      generated_text: decoded?.[0] ?? "",
-      prompt: promptText,
-      usage: { prompt_tokens: promptLen, completion_tokens: completionLen },
-    },
-  ];
 }
 
 async function invokePipeline(pipe, task, input, options) {
@@ -1088,6 +1173,7 @@ async function invokePipeline(pipe, task, input, options) {
       do_sample: temperature > 0,
       top_p: options.top_p ?? DEFAULT_TOP_P,
       return_full_text: false,
+      ...(options.stopping_criteria ? { stopping_criteria: options.stopping_criteria } : {}),
     });
     if (prompt != null && Array.isArray(raw) && raw[0] && typeof raw[0] === "object") {
       raw[0].prompt = prompt;
@@ -1222,6 +1308,7 @@ async function runChatCompletions(request) {
       max_new_tokens: resolveMaxTokens(request.max_tokens),
       temperature: request.temperature ?? 0.2,
       enable_thinking: thinkingEnabled,
+      requestId: request.requestId,
       ...(Array.isArray(request.tools) && request.tools.length ? { tools: request.tools } : {}),
     },
   });
@@ -1298,6 +1385,9 @@ async function handleLoadFailure(task, modelId, err) {
 }
 
 async function handleGenerationFailure(task, modelId, err) {
+  if (isGenerationAbortedError(err)) {
+    return errorResponse("Generation stopped.", "aborted");
+  }
   const message = String(err?.message || err);
   console.error(`[onnx] ${task} failed for ${modelId}:`, message);
   if (isGpuResourceError(message)) {

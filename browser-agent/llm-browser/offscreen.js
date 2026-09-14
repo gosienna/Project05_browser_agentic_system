@@ -101,9 +101,28 @@ function callWorker(target, msg) {
   );
 }
 
+/** Interrupt in-flight generation; no reply expected from the worker. */
+function abortWorker(target) {
+  const host = getHost(target);
+  return host.ready.then(() => {
+    host.worker.postMessage({ msg: { type: "chat.abort" } });
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || (msg.target !== "onnx-engine" && msg.target !== "webllm-engine" && msg.target !== "wllama-engine")) {
     return;
+  }
+
+  if (msg.type === "chat.abort") {
+    abortWorker(msg.target)
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) =>
+        sendResponse({
+          error: { message: err?.message || String(err), type: "engine_error", code: null },
+        })
+      );
+    return true;
   }
 
   callWorker(msg.target, msg)

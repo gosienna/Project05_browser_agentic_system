@@ -179,6 +179,7 @@ async function init() {
     if (msg?.target === "onnx-progress") onOnnxProgress(msg);
     if (msg?.target === "webllm-progress") onWebllmProgress(msg);
     if (msg?.target === "wllama-progress") onWllamaProgress(msg);
+    if (msg?.target === "llm-generation") dialoguePanel?.onGenerationProgress?.(msg);
     if (msg?.target === "onnx-model-ready" && msg.model) {
       downloadedModels = { ...downloadedModels, [msg.model]: true };
       dialoguePanel?.onSettingsChanged();
@@ -212,22 +213,27 @@ function isPanelRemoteLlmProvider(provider) {
 }
 
 async function sendMessage(msg) {
+  // Dialogue completions always run in-panel so AbortSignal stays in-process
+  // (covers local + remote, and avoids SW timeouts on long runs).
+  if (msg?.type === "dialogue.send") {
+    const model = resolveChatModel(settings);
+    const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
+    return chatCompletions(
+      {
+        model,
+        messages: msg.messages,
+        ...(tools ? { tools } : {}),
+        temperature: settings.temperature ?? 0.2,
+        max_tokens: getMaxTokens(settings),
+        ...(msg.signal ? { signal: msg.signal } : {}),
+        ...(msg.requestId ? { requestId: msg.requestId } : {}),
+      },
+      settings
+    );
+  }
+
   const provider = settings?.provider || "onnx";
   if (isPanelRemoteLlmProvider(provider)) {
-    if (msg?.type === "dialogue.send") {
-      const model = resolveChatModel(settings);
-      const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
-      return chatCompletions(
-        {
-          model,
-          messages: msg.messages,
-          ...(tools ? { tools } : {}),
-          temperature: settings.temperature ?? 0.2,
-          max_tokens: getMaxTokens(settings),
-        },
-        settings
-      );
-    }
     if (msg?.type === "dialogue.renderPrompt") {
       const model = resolveChatModel(settings);
       const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;

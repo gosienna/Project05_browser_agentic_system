@@ -2,6 +2,7 @@
 // Runs inside webllm-worker.js (Dedicated Worker).
 
 import { resolveMaxTokens } from "../llm-config.js";
+import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 import { estimateChatTokens, trimChatMessagesForContext } from "./context-trim.js";
 import { isQwen3ThinkingModel } from "../reasoning-content.js";
 import { enrichWebllmRegistryEntry, isWebllmToolModel } from "./webllm-models.js";
@@ -26,6 +27,8 @@ let loadedEmbedModelId = null;
 let device = null;
 let busy = false;
 let queue = Promise.resolve();
+/** Set while a chat completion is running so abortChat() can interrupt it. */
+let chatAbortRequested = false;
 
 function vendorUrl(file) {
   const path = VENDOR_DIR + file;
@@ -384,6 +387,7 @@ async function runChatCompletions(request) {
   }
 
   busy = true;
+  chatAbortRequested = false;
   try {
     const maxTokens = resolveMaxTokens(request.max_tokens);
     const entry = await registryEntry(modelId);
@@ -404,7 +408,7 @@ async function runChatCompletions(request) {
     const body = {
       model: modelId,
       messages: trim.messages,
-      stream: false,
+      stream: true,
       temperature: request.temperature ?? 0.2,
       max_tokens: maxTokens,
     };
@@ -413,26 +417,74 @@ async function runChatCompletions(request) {
       body.extra_body = { enable_thinking: request.thinkingEnabled !== false };
     }
 
-    const completion = await engine.chat.completions.create(body);
-    const choice = completion.choices?.[0];
-    const message = choice?.message ?? { role: "assistant", content: "" };
+    const progress = createGenerationProgressTracker(request.requestId);
+    const stream = await engine.chat.completions.create(body);
+    let content = "";
+    let reasoning = "";
+    let toolCalls = null;
+    let finishReason = "stop";
+    let completionId = `chatcmpl-${crypto.randomUUID()}`;
+    let usage = null;
+    let stepCount = 0;
+
+    for await (const chunk of stream) {
+      if (chatAbortRequested) break;
+      if (chunk?.id) completionId = chunk.id;
+      const choice = chunk?.choices?.[0];
+      if (chunk?.usage) usage = chunk.usage;
+      if (!choice) continue;
+      const delta = choice.delta || {};
+      let piece = "";
+      if (typeof delta.content === "string" && delta.content) {
+        piece = delta.content;
+        content += piece;
+      }
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        reasoning += delta.reasoning_content;
+      }
+      if (delta.tool_calls) toolCalls = delta.tool_calls;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      stepCount += 1;
+      progress.push(piece, {
+        text: content,
+        completionTokens:
+          typeof usage?.completion_tokens === "number" && usage.completion_tokens > 0
+            ? usage.completion_tokens
+            : stepCount,
+      });
+    }
+
+    if (chatAbortRequested) {
+      progress.done({ text: content, completionTokens: stepCount });
+      return errorResponse("Generation stopped.", "aborted");
+    }
+
+    const message = {
+      role: "assistant",
+      content,
+      ...(reasoning ? { reasoning } : {}),
+      ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+    };
+    const finalUsage = usage ?? {
+      prompt_tokens: 0,
+      completion_tokens: stepCount,
+      total_tokens: stepCount,
+    };
+    if (!finalUsage.completion_tokens) finalUsage.completion_tokens = stepCount;
+    progress.done({ text: content, completionTokens: finalUsage.completion_tokens });
     return {
-      id: completion.id || `chatcmpl-${crypto.randomUUID()}`,
+      id: completionId,
       object: "chat.completion",
-      created: completion.created ?? Math.floor(Date.now() / 1000),
-      model: completion.model || modelId,
+      created: Math.floor(Date.now() / 1000),
+      model: modelId,
       choices: [
         {
           index: 0,
           message,
-          finish_reason: choice?.finish_reason ?? "stop",
+          finish_reason: finishReason,
         },
       ],
-      usage: completion.usage ?? {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-      },
+      usage: finalUsage,
       ...(trim.trimmed
         ? {
             context_trimmed: {
@@ -444,6 +496,9 @@ async function runChatCompletions(request) {
         : {}),
     };
   } catch (err) {
+    if (chatAbortRequested || /interrupt|abort/i.test(String(err?.message || err))) {
+      return errorResponse("Generation stopped.", "aborted");
+    }
     const message = String(err?.message || err);
     console.error(`[webllm] chat failed for ${modelId}:`, message);
     if (/context window|ContextWindowSizeExceeded/i.test(message)) {
@@ -472,6 +527,16 @@ async function runChatCompletions(request) {
     return errorResponse(message, "engine_error");
   } finally {
     busy = false;
+    chatAbortRequested = false;
+  }
+}
+
+export function abortChat() {
+  chatAbortRequested = true;
+  try {
+    engine?.interruptGenerate?.();
+  } catch (err) {
+    console.warn("[webllm] interruptGenerate failed:", err);
   }
 }
 

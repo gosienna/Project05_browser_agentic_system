@@ -12,6 +12,47 @@ export function errorResponse(message, type) {
   return { error: { message, type, code: null } };
 }
 
+/** True when the caller aborted (vs timeout / other AbortError). */
+export function isAbortError(err) {
+  return err?.name === "AbortError" || err?.type === "aborted";
+}
+
+/**
+ * Merge an optional user AbortSignal with a timeout. Call cleanup() when done.
+ * @returns {{ signal: AbortSignal, cleanup: () => void, didUserAbort: () => boolean }}
+ */
+export function mergeAbortSignals(userSignal, timeoutMs = REMOTE_LLM_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let userAborted = false;
+
+  const onUserAbort = () => {
+    userAborted = true;
+    controller.abort();
+  };
+  if (userSignal?.aborted) {
+    userAborted = true;
+    controller.abort();
+  } else {
+    userSignal?.addEventListener("abort", onUserAbort, { once: true });
+  }
+
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          if (!controller.signal.aborted) controller.abort();
+        }, timeoutMs)
+      : null;
+
+  return {
+    signal: controller.signal,
+    didUserAbort: () => userAborted || !!userSignal?.aborted,
+    cleanup: () => {
+      if (timer != null) clearTimeout(timer);
+      userSignal?.removeEventListener("abort", onUserAbort);
+    },
+  };
+}
+
 export async function readJsonResponse(res) {
   const text = await res.text();
   if (!text) return { error: `empty response (HTTP ${res.status})` };
@@ -62,7 +103,7 @@ export function remoteHttpErrorMessage(status, provider, fallbackDetail) {
   return fallbackDetail || `HTTP ${status}`;
 }
 
-export function openAiFetchErrorMessage(err, baseUrl, settings) {
+export function openAiFetchErrorMessage(err, baseUrl, settings, { userAborted } = {}) {
   const host = (() => {
     try {
       return new URL(baseUrl).host;
@@ -71,6 +112,7 @@ export function openAiFetchErrorMessage(err, baseUrl, settings) {
     }
   })();
   if (err?.name === "AbortError") {
+    if (userAborted) return "Generation stopped.";
     const model = resolveChatModel(settings) || "";
     const slowHint = /glm|nemotron|550b|120b/i.test(model)
       ? " Large NVIDIA models like GLM-5.2 can take 60+ seconds."
@@ -92,4 +134,81 @@ export function openAiFetchErrorMessage(err, baseUrl, settings) {
     return `Network request failed reaching ${host}. Check your internet connection, API key, and reload the extension after updates.`;
   }
   return msg;
+}
+
+/**
+ * Iterate SSE `data:` JSON payloads from a fetch Response body.
+ * @param {Response} res
+ * @param {(obj: object) => void|Promise<void>} onEvent
+ */
+export async function readSseJsonStream(res, onEvent) {
+  if (!res.body) throw new Error("empty stream body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    for (const line of parts) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      try {
+        await onEvent(JSON.parse(data));
+      } catch {
+        /* skip malformed chunk */
+      }
+    }
+  }
+  const tail = buffer.trim();
+  if (tail.startsWith("data:")) {
+    const data = tail.slice(5).trim();
+    if (data && data !== "[DONE]") {
+      try {
+        await onEvent(JSON.parse(data));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * Iterate NDJSON lines from a fetch Response body (Ollama stream).
+ * @param {Response} res
+ * @param {(obj: object) => void|Promise<void>} onEvent
+ */
+export async function readNdjsonStream(res, onEvent) {
+  if (!res.body) throw new Error("empty stream body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    for (const line of parts) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        await onEvent(JSON.parse(trimmed));
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    try {
+      await onEvent(JSON.parse(tail));
+    } catch {
+      /* ignore */
+    }
+  }
 }

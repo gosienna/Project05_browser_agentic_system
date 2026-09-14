@@ -1,8 +1,9 @@
 // Ollama server chat, prompt preview, and embeddings.
 
 import { resolveOllamaBaseUrl } from "../llm-providers.js";
+import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 import { listOllamaInstalled, ollamaFetch, resolveOllamaInstalledName } from "./ollama-models.js";
-import { errorResponse, readJsonResponse } from "./shared.js";
+import { errorResponse, readJsonResponse, readNdjsonStream } from "./shared.js";
 
 function ollamaHttpError(baseUrl, status, detail) {
   if (status === 403) {
@@ -56,13 +57,13 @@ function toOllamaChatMessages(messages) {
     });
 }
 
-function buildOllamaNativeChatBody(model, request) {
+function buildOllamaNativeChatBody(model, request, { stream = false } = {}) {
   const options = { temperature: request.temperature };
   if (request.max_tokens != null) options.num_predict = request.max_tokens;
   const body = {
     model,
     messages: toOllamaChatMessages(request.messages),
-    stream: false,
+    stream,
     think: request.thinkingEnabled !== false,
     options,
   };
@@ -107,18 +108,67 @@ function ollamaChatCompletionFromNative(body, model) {
 }
 
 async function ollamaNativeChatCompletions(baseUrl, model, request) {
+  const progress = createGenerationProgressTracker(request.requestId);
   const res = await ollamaFetch(`${baseUrl}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildOllamaNativeChatBody(model, request)),
+    body: JSON.stringify(buildOllamaNativeChatBody(model, request, { stream: true })),
+    signal: request.signal,
   });
-  const parsed = await readJsonResponse(res);
-  if (parsed.error) {
-    return errorResponse(ollamaHttpError(baseUrl, res.status, parsed.error), "engine_error");
+  if (!res.ok) {
+    const parsed = await readJsonResponse(res);
+    return errorResponse(
+      ollamaHttpError(baseUrl, res.status, parsed.body?.error || parsed.error),
+      "engine_error"
+    );
   }
-  const body = parsed.body;
-  if (!res.ok) return errorResponse(ollamaHttpError(baseUrl, res.status, body?.error), "engine_error");
-  return ollamaChatCompletionFromNative(body, model);
+
+  let content = "";
+  let reasoning = "";
+  let toolCalls = null;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let done = false;
+
+  await readNdjsonStream(res, (chunk) => {
+    const msg = chunk?.message || {};
+    let piece = "";
+    if (typeof msg.content === "string" && msg.content) {
+      piece = msg.content;
+      content += piece;
+    }
+    const think = msg.thinking ?? msg.reasoning ?? msg.reasoning_content;
+    if (typeof think === "string" && think) reasoning += think;
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) toolCalls = msg.tool_calls;
+    if (typeof chunk.prompt_eval_count === "number") promptTokens = chunk.prompt_eval_count;
+    if (typeof chunk.eval_count === "number") completionTokens = chunk.eval_count;
+    if (chunk.done) done = true;
+    progress.push(piece || undefined, {
+      text: content,
+      completionTokens: completionTokens || undefined,
+    });
+  });
+
+  const message = {
+    role: "assistant",
+    content,
+    ...(reasoning.trim() ? { reasoning: reasoning.trim() } : {}),
+    ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+  };
+  const finishReason = message.tool_calls?.length ? "tool_calls" : done ? "stop" : "length";
+  progress.done({ text: content, completionTokens: completionTokens || undefined });
+  return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message, finish_reason: finishReason }],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    },
+  };
 }
 
 export async function resolveOllamaRequestModel(baseUrl, requested) {
@@ -133,7 +183,7 @@ export async function ollamaFetchRenderedPrompt(baseUrl, model, request) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...buildOllamaNativeChatBody(model, request),
+        ...buildOllamaNativeChatBody(model, request, { stream: false }),
         _debug_render_only: true,
       }),
     });
@@ -161,49 +211,14 @@ export async function ollamaChatCompletions(request, settings) {
     baseUrl,
     request.model || settings.model || "llama3.2"
   );
-  const hasTools = Array.isArray(request.tools) && request.tools.length > 0;
-
-  if (hasTools) {
-    try {
-      return await ollamaNativeChatCompletions(baseUrl, model, request);
-    } catch (err) {
-      return errorResponse(
-        `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
-        "engine_error"
-      );
-    }
-  }
-
-  const v1Body = {
-    ...request,
-    model,
-    stream: false,
-    think: request.thinkingEnabled !== false,
-  };
-  delete v1Body.tool_choice;
-
-  try {
-    const res = await ollamaFetch(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(v1Body),
-    });
-    if (res.status !== 404) {
-      const parsed = await readJsonResponse(res);
-      if (res.ok && parsed.body && !parsed.body.error) {
-        return parsed.body;
-      }
-      const detail =
-        parsed.body?.error?.message || parsed.error || (res.ok ? null : `HTTP ${res.status}`);
-      console.warn("[ollama] /v1/chat/completions failed, falling back to /api/chat:", detail);
-    }
-  } catch (err) {
-    console.warn("[ollama] /v1/chat/completions fetch failed:", err);
-  }
+  const signal = request.signal;
 
   try {
     return await ollamaNativeChatCompletions(baseUrl, model, request);
   } catch (err) {
+    if (err?.name === "AbortError" || signal?.aborted) {
+      return errorResponse("Generation stopped.", "aborted");
+    }
     return errorResponse(
       `Could not reach Ollama at ${baseUrl}. Is the Ollama app running? (${err.message})`,
       "engine_error"
