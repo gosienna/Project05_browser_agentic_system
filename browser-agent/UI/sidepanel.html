@@ -41,11 +41,13 @@
 
     <main>
       <section id="tab-dialogue" class="tab-panel webapp-dock">
-        <div class="dialogue-toolbar">
-          <button id="dialogue-sessions-toggle" type="button" class="secondary-btn" aria-expanded="false">Sessions</button>
-          <button id="dialogue-documents-toggle" type="button" class="secondary-btn" aria-expanded="false">Documents</button>
-          <button id="dialogue-pdf-toggle" type="button" class="secondary-btn" aria-expanded="false">PDF viewer</button>
-          <button id="dialogue-new-btn" type="button" class="secondary-btn">New chat</button>
+        <div class="dialogue-toolbar-rail" title="Hover for chat tools">
+          <div class="dialogue-toolbar">
+            <button id="dialogue-sessions-toggle" type="button" class="secondary-btn" aria-expanded="false">Sessions</button>
+            <button id="dialogue-documents-toggle" type="button" class="secondary-btn" aria-expanded="false">Documents</button>
+            <button id="dialogue-pdf-toggle" type="button" class="secondary-btn" aria-expanded="false">PDF viewer</button>
+            <button id="dialogue-new-btn" type="button" class="secondary-btn">New chat</button>
+          </div>
         </div>
         <div class="dialogue-layout">
           <aside id="dialogue-sessions-panel" class="dialogue-sessions-panel collapsed" aria-label="Stored dialogue sessions">
@@ -58,17 +60,19 @@
           <div class="dialogue-main">
             <div id="dialogue-chat" class="dialogue-chat"></div>
             <form id="dialogue-form" class="dialogue-input-panel">
-              <div class="dialogue-input-toolbar">
-                <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
-                <button id="dialogue-tools-toggle" type="button" class="secondary-btn">⚒ Tools</button>
-                <button id="dialogue-preview-toggle" type="button" class="secondary-btn">Show raw</button>
-                <button
-                  id="dialogue-md-toggle"
-                  type="button"
-                  class="secondary-btn active"
-                  title="Render assistant replies as Markdown"
-                  aria-pressed="true"
-                >Markdown</button>
+              <div class="dialogue-input-toolbar-rail" title="Hover for prompt tools">
+                <div class="dialogue-input-toolbar">
+                  <button id="dialogue-system-toggle" type="button" class="secondary-btn">⚙ System prompt</button>
+                  <button id="dialogue-tools-toggle" type="button" class="secondary-btn">⚒ Tools</button>
+                  <button id="dialogue-preview-toggle" type="button" class="secondary-btn">Show raw</button>
+                  <button
+                    id="dialogue-md-toggle"
+                    type="button"
+                    class="secondary-btn active"
+                    title="Render assistant replies as Markdown"
+                    aria-pressed="true"
+                  >Markdown</button>
+                </div>
               </div>
               <div id="dialogue-system-wrap" class="hidden">
                 <textarea id="dialogue-system-input" rows="3" placeholder="System prompt / instructions… (optional)"></textarea>

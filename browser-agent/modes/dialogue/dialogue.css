@@ -10,10 +10,51 @@
   border-top: 1px solid #e0e4ee;
   padding-top: 8px;
 }
+.dialogue-input-toolbar-rail {
+  flex-shrink: 0;
+  position: relative;
+  padding-top: 2px;
+}
+.dialogue-input-toolbar-rail::before {
+  content: "";
+  display: block;
+  width: 36px;
+  height: 3px;
+  margin: 0 auto 2px;
+  border-radius: 999px;
+  background: #d0d5e0;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, height 0.15s ease, margin 0.15s ease;
+}
 .dialogue-input-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  margin: 0;
+  transition: max-height 0.18s ease, opacity 0.15s ease, margin 0.15s ease;
+}
+.dialogue-input-toolbar-rail:hover .dialogue-input-toolbar,
+.dialogue-input-toolbar-rail:focus-within .dialogue-input-toolbar,
+.dialogue-input-panel:has(#dialogue-system-wrap:not(.hidden)) .dialogue-input-toolbar,
+.dialogue-input-panel:has(#dialogue-tools-wrap:not(.hidden)) .dialogue-input-toolbar,
+.dialogue-input-panel:has(#dialogue-preview-wrap:not(.hidden)) .dialogue-input-toolbar {
+  max-height: 72px;
+  opacity: 1;
+  pointer-events: auto;
+  margin-bottom: 2px;
+}
+.dialogue-input-toolbar-rail:hover::before,
+.dialogue-input-toolbar-rail:focus-within::before,
+.dialogue-input-panel:has(#dialogue-system-wrap:not(.hidden)) .dialogue-input-toolbar-rail::before,
+.dialogue-input-panel:has(#dialogue-tools-wrap:not(.hidden)) .dialogue-input-toolbar-rail::before,
+.dialogue-input-panel:has(#dialogue-preview-wrap:not(.hidden)) .dialogue-input-toolbar-rail::before {
+  opacity: 0;
+  height: 0;
+  margin: 0 auto;
 }
 .dialogue-input-toolbar .secondary-btn {
   font-size: 11px;
@@ -245,10 +286,47 @@
   margin: 0;
   max-height: 240px;
 }
+.dialogue-toolbar-rail {
+  flex-shrink: 0;
+  position: relative;
+  padding-top: 2px;
+  z-index: 2;
+}
+.dialogue-toolbar-rail::before {
+  content: "";
+  display: block;
+  width: 36px;
+  height: 3px;
+  margin: 0 auto 2px;
+  border-radius: 999px;
+  background: #d0d5e0;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, height 0.15s ease, margin 0.15s ease;
+}
 .dialogue-toolbar {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: max-height 0.18s ease, opacity 0.15s ease;
+}
+.dialogue-toolbar-rail:hover .dialogue-toolbar,
+.dialogue-toolbar-rail:focus-within .dialogue-toolbar,
+.dialogue-toolbar-rail:has(.secondary-btn.active) .dialogue-toolbar {
+  max-height: 72px;
+  opacity: 1;
+  pointer-events: auto;
+}
+.dialogue-toolbar-rail:hover::before,
+.dialogue-toolbar-rail:focus-within::before,
+.dialogue-toolbar-rail:has(.secondary-btn.active)::before {
+  opacity: 0;
+  height: 0;
+  margin: 0 auto;
 }
 .dialogue-toolbar .secondary-btn.active,
 .dialogue-input-toolbar .secondary-btn.active {
@@ -939,6 +1017,10 @@ body.dialogue-panel-resizing {
   .dialogue-raw-mode { background: #26262c; border-color: #3a3a42; color: #ccc; }
   .dialogue-raw-mode.active { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
   .dialogue-input-panel { border-top-color: #3a3a42; }
+  .dialogue-toolbar-rail::before,
+  .dialogue-input-toolbar-rail::before {
+    background: #4a4a55;
+  }
   .dialogue-tools-error { color: #f48fb1; }
   #dialogue-context-label { color: #999; }
   .dialogue-tool-card { background: #26262c; border-color: #3a3a42; }
