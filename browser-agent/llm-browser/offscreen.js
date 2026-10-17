@@ -110,6 +110,16 @@ function abortWorker(target) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "flow.sandbox.run") {
+    import("../modes/flow/offscreen-bridge.js")
+      .then(({ handleFlowSandboxMessage }) => {
+        const handled = handleFlowSandboxMessage(msg, sendResponse);
+        if (!handled) sendResponse({ error: "Flow sandbox run not handled" });
+      })
+      .catch((err) => sendResponse({ error: err?.message || String(err) }));
+    return true;
+  }
+
   if (!msg || (msg.target !== "onnx-engine" && msg.target !== "webllm-engine" && msg.target !== "wllama-engine")) {
     return;
   }

@@ -145,16 +145,20 @@ export const WLLAMA_MODEL_REGISTRY = [
     supportsTools: true,
     quant: "Q4_K_M",
   },
-  // Qwen3.8 — dense 27B (coding / agents). Prefer Q8 on high-RAM Macs.
+  // Qwen3.8 — dense 27B VLM (coding / agents). Prefer Q8 on high-RAM Macs.
+  // Official: https://huggingface.co/collections/Qwen/qwen38 — sizes include mmproj-Q8_0.
   {
     id: "ggml-org/Qwen3.8-27B-GGUF::Qwen3.8-27B-Q4_K_M.gguf",
     label: "Qwen3.8 27B (Q4_K_M)",
     repo: "ggml-org/Qwen3.8-27B-GGUF",
     file: "Qwen3.8-27B-Q4_K_M.gguf",
-    approxSizeMB: 19000,
+    mmprojFile: "mmproj-Qwen3.8-27B-Q8_0.gguf",
+    approxSizeMB: 18700,
     tier: "max",
     contextWindow: 262144,
     supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
     quant: "Q4_K_M",
   },
   {
@@ -162,10 +166,13 @@ export const WLLAMA_MODEL_REGISTRY = [
     label: "Qwen3.8 27B (Q8_0)",
     repo: "ggml-org/Qwen3.8-27B-GGUF",
     file: "Qwen3.8-27B-Q8_0.gguf",
-    approxSizeMB: 28600,
+    mmprojFile: "mmproj-Qwen3.8-27B-Q8_0.gguf",
+    approxSizeMB: 27900,
     tier: "max",
     contextWindow: 262144,
     supportsTools: true,
+    supportsVision: true,
+    inputs: ["text", "image"],
     quant: "Q8_0",
   },
   // Qwen3.5-122B-A10B MoE — workstation-scale (sharded). Q8 (~130GB) exceeds 128GB unified memory.

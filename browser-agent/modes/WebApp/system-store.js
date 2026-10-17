@@ -3,11 +3,12 @@
 import { CURVE_UI_SOURCE } from "./seeds/curve-ui.js";
 
 const DB_NAME = "agent-systems";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const SYSTEMS = "systems";
 const COMPONENTS = "components";
 const CONVERSATIONS = "conversations";
 const DIALOGUE_SESSIONS = "dialogueSessions";
+const FLOW_SESSIONS = "flowSessions";
 
 export const COMPONENT_KINDS = ["html", "css", "script"];
 
@@ -45,6 +46,11 @@ function openDb() {
       if (!db.objectStoreNames.contains(DIALOGUE_SESSIONS)) {
         // Mutable Dialogue-tab chats (turns + image data URLs), not tied to a system.
         const store = db.createObjectStore(DIALOGUE_SESSIONS, { keyPath: "id" });
+        store.createIndex("byUpdatedAt", "updatedAt", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(FLOW_SESSIONS)) {
+        // Flow-tab sessions: ordered nodes with inputs / script / outputs.
+        const store = db.createObjectStore(FLOW_SESSIONS, { keyPath: "id" });
         store.createIndex("byUpdatedAt", "updatedAt", { unique: false });
       }
     };

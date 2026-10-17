@@ -54,6 +54,7 @@ import {
 } from "./rag-ui.js";
 import { initDialoguePanelResize } from "./panel-resize.js";
 import { buildWebAppSystemMessages } from "../WebApp/prompt.js";
+import { buildFlowSystemMessages } from "../flow/prompt.js";
 import {
   formatAssistantToolCallDisplay,
   MCP_TOOL_HINT,
@@ -71,7 +72,12 @@ const DIALOGUE_TOOL_RESULT_CHARS = 8000;
 const DIALOGUE_WEBLLM_TOOL_RESULT_CHARS = 3000;
 const DIALOGUE_HTML_FIELD_CHARS = 6000;
 const DIALOGUE_SNAPSHOT_FIELD_CHARS = 6000;
-const UNTRUNCATED_TOOL_RESULTS = new Set(["list_components", "read_component"]);
+const UNTRUNCATED_TOOL_RESULTS = new Set([
+  "list_components",
+  "read_component",
+  "list_flow_nodes",
+  "read_flow_node",
+]);
 
 function dialogueToolResultCharLimit() {
   const provider = getSettings?.().provider || "onnx";
@@ -131,6 +137,8 @@ let startDownload;
 let formatTime;
 let escapeHtml;
 let getCurrentSystemId;
+let getCurrentFlowId;
+let onChatModelsChanged;
 
 let dialogueSystemPrompt = "";
 let dialogueToolDrafts = [];
@@ -181,11 +189,13 @@ export function createDialoguePanel(deps) {
   formatTime = deps.formatTime;
   escapeHtml = deps.escapeHtml;
   getCurrentSystemId = deps.getCurrentSystemId;
+  getCurrentFlowId = deps.getCurrentFlowId;
+  onChatModelsChanged = typeof deps.onChatModelsChanged === "function" ? deps.onChatModelsChanged : null;
 
   return {
     wire,
     onTabActivate() {
-      applyWebAppDockChrome();
+      applyModeDockChrome();
       refreshDialogueModelSelect();
       refreshDialogueSessionsList();
       refreshDialogueContextEstimate();
@@ -203,6 +213,10 @@ export function createDialoguePanel(deps) {
       refreshDocumentsPanel();
     },
     onWebAppContextChanged() {
+      renderDialogueToolsForm();
+      notifyDialogueInputChanged();
+    },
+    onFlowContextChanged() {
       renderDialogueToolsForm();
       notifyDialogueInputChanged();
     },
@@ -336,6 +350,14 @@ function wire() {
       notifyDialogueInputChanged();
     });
   }
+  const flowToolsCb = $("#dialogue-flow-tools-enabled");
+  if (flowToolsCb) {
+    flowToolsCb.addEventListener("change", (e) => {
+      saveSettings({ dialogueFlowTools: e.target.checked });
+      renderDialogueToolsForm();
+      notifyDialogueInputChanged();
+    });
+  }
   initRagUi({
     $,
     sendMessage,
@@ -354,7 +376,7 @@ function wire() {
   bindPdfCitationOpener((opts) => pdfViewer?.openCitation(opts));
   syncRagChunkInputs();
   wireDialogueInputPreview();
-  applyWebAppDockChrome();
+  applyModeDockChrome();
   renderDialogue();
   renderDialogueToolsForm();
   refreshDialogueModelSelect();
@@ -968,12 +990,25 @@ function createDialogueRawModeSwitcher({ getMode, setMode, onModeChange }) {
   return { modes, syncActive };
 }
 
-function isWebAppDock() {
-  return $("#tab-dialogue")?.classList.contains("webapp-dock");
+function isModeDock() {
+  const el = $("#tab-dialogue");
+  return Boolean(
+    el?.classList.contains("mode-dock") ||
+      el?.classList.contains("webapp-dock") ||
+      el?.classList.contains("flow-dock")
+  );
 }
 
-function applyWebAppDockChrome() {
-  if (!isWebAppDock()) return;
+function isWebAppDock() {
+  return isModeDock() && document.body.dataset.tab === "webapp";
+}
+
+function isFlowDock() {
+  return isModeDock() && document.body.dataset.tab === "flow";
+}
+
+function applyModeDockChrome() {
+  if (!isModeDock()) return;
   $("#dialogue-documents-panel")?.classList.add("collapsed");
   $("#dialogue-pdf-panel")?.classList.add("collapsed");
   $("#dialogue-documents-toggle")?.setAttribute("aria-expanded", "false");
@@ -1015,6 +1050,8 @@ function syncDialogueMcpTogglesFromSettings() {
   if (ragToolsCb) ragToolsCb.checked = getSettings().dialogueRagTools !== false;
   const webAppToolsCb = $("#dialogue-webapp-tools-enabled");
   if (webAppToolsCb) webAppToolsCb.checked = getSettings().dialogueWebAppTools !== false;
+  const flowToolsCb = $("#dialogue-flow-tools-enabled");
+  if (flowToolsCb) flowToolsCb.checked = getSettings().dialogueFlowTools !== false;
 }
 
 function isDialogueRagToolsEnabled() {
@@ -1025,15 +1062,24 @@ function isDialogueWebAppToolsEnabled() {
   return getSettings().dialogueWebAppTools !== false && $("#dialogue-webapp-tools-enabled")?.checked !== false;
 }
 
+function isDialogueFlowToolsEnabled() {
+  return getSettings().dialogueFlowTools !== false && $("#dialogue-flow-tools-enabled")?.checked !== false;
+}
+
 function dialogueMcpSettingsOverrides() {
-  const dock = isWebAppDock();
-  const systemId = dock ? getCurrentSystemId?.() || "" : "";
+  const webAppDock = isWebAppDock();
+  const flowDock = isFlowDock();
+  const modeDock = isModeDock();
+  const systemId = webAppDock ? getCurrentSystemId?.() || "" : "";
+  const flowSessionId = flowDock ? getCurrentFlowId?.() || "" : "";
   return {
     dialogueWebSearch: isDialogueWebSearchEnabled(),
     dialogueBrowserTools: isDialogueBrowserToolsEnabled(),
-    dialogueRagTools: dock ? false : isDialogueRagToolsEnabled(),
-    dialogueWebAppTools: dock && isDialogueWebAppToolsEnabled(),
+    dialogueRagTools: modeDock ? false : isDialogueRagToolsEnabled(),
+    dialogueWebAppTools: webAppDock && isDialogueWebAppToolsEnabled(),
+    dialogueFlowTools: flowDock && isDialogueFlowToolsEnabled(),
     webAppSystemId: systemId,
+    flowSessionId,
   };
 }
 
@@ -1044,6 +1090,7 @@ async function fetchMcpDialogueTools() {
     groups: ["dialogue"],
     settings: overrides,
     ...(overrides.webAppSystemId ? { systemId: overrides.webAppSystemId } : {}),
+    ...(overrides.flowSessionId ? { flowSessionId: overrides.flowSessionId } : {}),
   });
   return res || { tools: [], openAiTools: [] };
 }
@@ -1061,6 +1108,12 @@ async function buildDialogueTools(userTools) {
 function buildDialogueSystemMessages(mcpToolNames = []) {
   if (isWebAppDock()) {
     return buildWebAppSystemMessages({
+      customPrompt: dialogueSystemPrompt,
+      mcpToolNames,
+    });
+  }
+  if (isFlowDock()) {
+    return buildFlowSystemMessages({
       customPrompt: dialogueSystemPrompt,
       mcpToolNames,
     });
@@ -1083,6 +1136,7 @@ async function runDialogueTool(name, args) {
     userQuery: dialogueTriggerQuery,
     settings: overrides,
     ...(overrides.webAppSystemId ? { systemId: overrides.webAppSystemId } : {}),
+    ...(overrides.flowSessionId ? { flowSessionId: overrides.flowSessionId } : {}),
   });
   if (!res) {
     throw new Error("Tool runner did not respond — reload the extension and try again.");
@@ -1414,14 +1468,16 @@ async function renderDialogueToolsForm() {
   const status = $("#dialogue-mcp-status");
   const webOn = isDialogueWebSearchEnabled();
   const browserOn = isDialogueBrowserToolsEnabled();
-  const ragOn = !isWebAppDock() && isDialogueRagToolsEnabled();
+  const ragOn = !isModeDock() && isDialogueRagToolsEnabled();
   const webAppOn = isWebAppDock() && isDialogueWebAppToolsEnabled();
+  const flowOn = isFlowDock() && isDialogueFlowToolsEnabled();
   if (status) {
     const parts = [];
     if (webOn) parts.push("web search");
     if (browserOn) parts.push("browser automation");
     if (ragOn) parts.push("document RAG");
     if (webAppOn) parts.push("WebApp components");
+    if (flowOn) parts.push("Flow nodes");
     status.textContent = parts.length
       ? `MCP enabled: ${parts.join(" + ")}`
       : "No MCP tools enabled — check the boxes above.";
@@ -1877,6 +1933,7 @@ async function refreshDialogueModelSelect() {
     select.appendChild(opt);
     select.disabled = true;
     updateDialogueAttachUI();
+    onChatModelsChanged?.();
     return;
   }
 
@@ -1923,6 +1980,7 @@ async function refreshDialogueModelSelect() {
   }
 
   updateDialogueAttachUI();
+  onChatModelsChanged?.();
 }
 
 async function onDialogueModelChange(e) {

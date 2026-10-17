@@ -1,10 +1,12 @@
-// Register built-in MCP tools for Dialogue (web search, browser automation, RAG, WebApp components).
+// Register built-in MCP tools for Dialogue (web search, browser automation, RAG, WebApp components, Flow nodes).
 
 import { registerMcpTool } from "./server.js";
 import { tavilySearch, prepareSearchToolArgs } from "../modes/dialogue/tool-runtime.js";
 import * as browserTools from "./tools/index.js";
 import * as webAppTools from "./tools/webapp/index.js";
 import { WEBAPP_MCP_TOOL_DEFS } from "./tools/webapp/schema.js";
+import * as flowTools from "./tools/flow/index.js";
+import { FLOW_MCP_TOOL_DEFS } from "./tools/flow/schema.js";
 import { searchDocuments, formatSearchHit } from "../rag/search.js";
 import { resolveSearchDocIds, setActiveDocIds, getActiveDocIds } from "../rag/active-docs.js";
 import * as ragStore from "../rag/rag-store.js";
@@ -31,10 +33,21 @@ function webAppToolsEnabled(settings) {
   return settings.dialogueWebAppTools !== false && Boolean(settings.webAppSystemId);
 }
 
+function flowToolsEnabled(settings) {
+  return settings.dialogueFlowTools !== false && Boolean(settings.flowSessionId);
+}
+
 function withSystemId(fn) {
   return (args, context) => {
     const systemId = webAppTools.resolveWebAppSystemId(context);
     return fn({ ...args, systemId });
+  };
+}
+
+function withFlowSessionId(fn) {
+  return (args, context) => {
+    const flowSessionId = flowTools.resolveFlowSessionId(context);
+    return fn({ ...args, flowSessionId }, context);
   };
 }
 
@@ -515,6 +528,14 @@ export function registerBuiltinMcpTools() {
       ...def,
       isEnabled: webAppToolsEnabled,
       handler: withSystemId((args) => webAppTools[def.name](args)),
+    });
+  }
+
+  for (const def of FLOW_MCP_TOOL_DEFS) {
+    registerMcpTool({
+      ...def,
+      isEnabled: flowToolsEnabled,
+      handler: withFlowSessionId((args, context) => flowTools[def.name](args, context)),
     });
   }
 }

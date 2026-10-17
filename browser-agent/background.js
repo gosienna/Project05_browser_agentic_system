@@ -4,6 +4,7 @@ import { migrateApiKeySettings, resolveChatModel } from "./llm-providers.js";
 import { migrateGeminiModelSettings } from "./llm-API/gemini-models.js";
 import { callMcpTool, listMcpTools, listMcpToolsOpenAi, registerBuiltinMcpTools } from "./mcp/index.js";
 import { ensureSeeded } from "./modes/WebApp/system-store.js";
+import { ensureFlowSeeded } from "./modes/flow/flow-store.js";
 import { handleTabBridge } from "./modes/WebApp/tab-bridge.js";
 import { handleRagMessage } from "./rag/handlers.js";
 import { stripUnsupportedNativeTools } from "./llm-browser/webllm-models.js";
@@ -11,13 +12,16 @@ import { stripUnsupportedNativeTools } from "./llm-browser/webllm-models.js";
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   ensureSeeded().catch((err) => console.error("[systems] seed failed", err));
+  ensureFlowSeeded().catch((err) => console.error("[flow] seed failed", err));
 });
 
 chrome.runtime.onStartup?.addListener?.(() => {
   ensureSeeded().catch((err) => console.error("[systems] seed failed", err));
+  ensureFlowSeeded().catch((err) => console.error("[flow] seed failed", err));
 });
 
 ensureSeeded().catch((err) => console.error("[systems] seed failed", err));
+ensureFlowSeeded().catch((err) => console.error("[flow] seed failed", err));
 registerBuiltinMcpTools();
 
 chrome.action.onClicked.addListener((tab) => {
@@ -105,6 +109,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
+  if (msg.type === "flow.reload" || msg.type === "flow.updated") {
+    // Broadcast-only; Flow panel listens. No response needed.
+    return;
+  }
+
   if (msg.type === "settings.get") {
     replyAsync(getSettings(), sendResponse);
     return true;
@@ -128,7 +137,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "dialogue.send") {
     replyAsync(
       getSettings().then((settings) => {
-        const model = resolveChatModel(settings);
+        const override = typeof msg.model === "string" ? msg.model.trim() : "";
+        const model = override || resolveChatModel(settings);
         const tools = Array.isArray(msg.tools) && msg.tools.length ? msg.tools : undefined;
         return chatCompletions(
           {
@@ -190,6 +200,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           tabId: activeTab?.id,
           userQuery: msg.userQuery,
           systemId: msg.systemId || merged.webAppSystemId,
+          flowSessionId: msg.flowSessionId || merged.flowSessionId,
         });
       }).then((result) => ({ result })),
       sendResponse

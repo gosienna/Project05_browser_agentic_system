@@ -5,12 +5,14 @@
     <title>Browser Agent</title>
     <link rel="stylesheet" href="sidepanel.css" />
     <link rel="stylesheet" href="../modes/dialogue/dialogue.css" />
+    <link rel="stylesheet" href="../modes/flow/flow.css" />
   </head>
   <body data-tab="webapp">
     <header class="topbar">
       <div class="tabs">
         <button class="tab-btn" data-tab="dialogue">Dialogue</button>
         <button class="tab-btn active" data-tab="webapp">WebApp</button>
+        <button class="tab-btn" data-tab="flow">Flow</button>
       </div>
       <button id="settings-icon-btn" type="button" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
     </header>
@@ -95,6 +97,10 @@
                     <input type="checkbox" id="dialogue-webapp-tools-enabled" checked />
                     WebApp components (MCP)
                   </label>
+                  <label class="dialogue-web-search-label" id="dialogue-flow-tools-label">
+                    <input type="checkbox" id="dialogue-flow-tools-enabled" checked />
+                    Flow nodes (MCP)
+                  </label>
                 </div>
                 <p id="dialogue-mcp-status" class="dialogue-mcp-status"></p>
                 <div id="dialogue-tools-list" class="dialogue-tools-list"></div>
@@ -171,6 +177,19 @@
         </div>
       </section>
 
+      <section id="tab-flow" class="tab-panel">
+        <div class="flow-session-row">
+          <label class="flow-session-label" for="flow-session-select">Session</label>
+          <select id="flow-session-select" aria-label="Flow session"></select>
+          <button id="flow-add-session-btn" type="button" class="icon-btn" title="Create flow" aria-label="Create flow">+</button>
+          <button id="flow-delete-session-btn" type="button" class="icon-btn" title="Delete flow" aria-label="Delete flow">🗑</button>
+          <button id="flow-run-btn" type="button" class="secondary-btn" title="Run all nodes in order">Run session</button>
+        </div>
+        <p class="flow-hint">Each node is a self-contained async script with <code>inputs</code>, <code>outputs</code>, and <code>api</code> helpers (<code>open_tab</code>, <code>llm</code>, …). Scripts run in the extension context.</p>
+        <div id="flow-nodes" aria-label="Flow nodes"></div>
+        <button id="flow-add-node-btn" type="button" class="secondary-btn">+ Add node</button>
+      </section>
+
     </main>
 
     <div id="settings-modal" class="modal-overlay hidden">
@@ -229,7 +248,7 @@
 
           <div id="webllm-settings" class="provider-block hidden">
             <div id="webllm-device" class="device-line">Device: unknown</div>
-            <p class="hint">Requires WebGPU (Chrome/Edge 113+, Safari 18+). Full MLC catalog (~159 chat models). Vision/audio tools still use ONNX.</p>
+            <p class="hint">Requires WebGPU (Chrome/Edge 113+, Safari 18+). Newest DeepSeek, Gemma, Qwen, Llama, and Phi builds from WebLLM 0.2.86 (at most four sizes each, up to 80 GB). MedGemma is not in the WebLLM catalog. Vision/audio tools still use ONNX.</p>
 
             <h3 class="onnx-section-title">Chat model (LLM)</h3>
             <ul id="webllm-registry" class="onnx-registry webllm-registry-scroll"></ul>

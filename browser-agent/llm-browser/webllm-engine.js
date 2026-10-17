@@ -5,7 +5,12 @@ import { resolveMaxTokens } from "../llm-config.js";
 import { createGenerationProgressTracker } from "../llm-generation-progress.js";
 import { estimateChatTokens, trimChatMessagesForContext } from "./context-trim.js";
 import { isQwen3ThinkingModel } from "../reasoning-content.js";
-import { enrichWebllmRegistryEntry, isWebllmToolModel } from "./webllm-models.js";
+import {
+  WEBLLM_CURATED_MODEL_IDS,
+  WEBLLM_MAX_VRAM_MB,
+  enrichWebllmRegistryEntry,
+  isWebllmToolModel,
+} from "./webllm-models.js";
 
 const VENDOR_DIR = "llm-browser/vendor/webllm/";
 
@@ -104,9 +109,16 @@ function humanizeModelId(modelId) {
 }
 
 function buildRegistry(webllm) {
+  const allow = new Set(WEBLLM_CURATED_MODEL_IDS);
+  const order = new Map(WEBLLM_CURATED_MODEL_IDS.map((id, i) => [id, i]));
   const functionCallingModelIds = webllm.functionCallingModelIds || [];
-  return webllm.prebuiltAppConfig.model_list
-    .filter((m) => isChatModel(m.model_id))
+  const rows = webllm.prebuiltAppConfig.model_list
+    .filter(
+      (m) =>
+        isChatModel(m.model_id) &&
+        allow.has(m.model_id) &&
+        m.vram_required_MB <= WEBLLM_MAX_VRAM_MB
+    )
     .map((m) =>
       enrichWebllmRegistryEntry(
         {
@@ -121,7 +133,12 @@ function buildRegistry(webllm) {
         { functionCallingModelIds }
       )
     )
-    .sort((a, b) => a.approxSizeMB - b.approxSizeMB || a.id.localeCompare(b.id));
+    .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const missing = WEBLLM_CURATED_MODEL_IDS.filter((id) => !rows.some((row) => row.id === id));
+  if (missing.length) {
+    console.warn("[webllm] curated models missing from prebuiltAppConfig:", missing.join(", "));
+  }
+  return rows;
 }
 
 export async function getModelRegistry() {

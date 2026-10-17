@@ -2,6 +2,7 @@
 
 import { createDialoguePanel } from "../modes/dialogue/index.js";
 import { createWebAppPanel } from "../modes/WebApp/ui.js";
+import { createFlowPanel } from "../modes/flow/index.js";
 import { getDialogueMaxToolRounds } from "../modes/dialogue/config.js";
 import {
   DEFAULT_MAX_TOKENS,
@@ -106,6 +107,7 @@ const OLLAMA_CATALOG_PAGE = 40;
 let lastKnownDevice = null;
 let dialoguePanel = null;
 let webAppPanel = null;
+let flowPanel = null;
 /** @type {Map<string, object>} client-side cache of engine.contextEstimate results, keyed by model id. */
 const contextEstimateCache = new Map();
 
@@ -135,12 +137,24 @@ async function init() {
     },
   });
   webAppPanel.wire();
+  flowPanel = createFlowPanel({
+    $,
+    sendMessage,
+    onFlowChanged() {
+      dialoguePanel?.onFlowContextChanged?.();
+    },
+  });
+  flowPanel.wire();
   dialoguePanel = createDialoguePanel({
     $,
     sendMessage,
     getSettings: () => settings,
     saveSettings,
     getCurrentSystemId: () => webAppPanel.getCurrentSystemId(),
+    getCurrentFlowId: () => flowPanel.getCurrentFlowId(),
+    onChatModelsChanged() {
+      flowPanel?.refreshModelPickers?.();
+    },
     getRegistry: () => {
       const p = settings.provider || "onnx";
       if (p === "webllm") return webllmRegistry;
@@ -195,6 +209,9 @@ async function init() {
     if (msg?.type === "system.reload" || msg?.type === "system.updated") {
       webAppPanel?.onRuntimeMessage(msg);
     }
+    if (msg?.type === "flow.reload" || msg?.type === "flow.updated") {
+      flowPanel?.onRuntimeMessage(msg);
+    }
   });
 
   if (!settings || Object.keys(settings).length === 0) {
@@ -205,6 +222,7 @@ async function init() {
   }
 
   await webAppPanel.refreshSystems();
+  await flowPanel.refreshSessions();
 }
 
 /** Remote providers can run for minutes; call from the panel to avoid MV3 message timeouts. */
@@ -258,10 +276,16 @@ function applySidepanelTab(tab) {
   document.body.dataset.tab = tab;
   document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $("#tab-webapp")?.classList.toggle("active", tab === "webapp");
+  $("#tab-flow")?.classList.toggle("active", tab === "flow");
   const dialogue = $("#tab-dialogue");
   dialogue?.classList.toggle("active", tab === "dialogue");
+  const dock = tab === "webapp" || tab === "flow";
+  dialogue?.classList.toggle("mode-dock", dock);
+  // Keep legacy class for any leftover selectors during transition.
   dialogue?.classList.toggle("webapp-dock", tab === "webapp");
+  dialogue?.classList.toggle("flow-dock", tab === "flow");
   dialoguePanel?.onTabActivate();
+  if (tab === "flow") flowPanel?.onTabActivate?.();
 }
 
 function wireTabs() {

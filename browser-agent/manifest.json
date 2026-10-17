@@ -55,7 +55,7 @@
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "sandbox": {
-    "pages": ["modes/WebApp/sandbox.html"]
+    "pages": ["modes/WebApp/sandbox.html", "modes/flow/sandbox.html"]
   },
   "cross_origin_embedder_policy": {
     "value": "credentialless"

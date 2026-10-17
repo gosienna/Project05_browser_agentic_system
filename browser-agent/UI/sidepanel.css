@@ -124,15 +124,19 @@ main {
   gap: 8px;
 }
 
-body[data-tab="webapp"] main {
+body[data-tab="webapp"] main,
+body[data-tab="flow"] main {
   flex-direction: row;
   align-items: stretch;
   gap: 0;
 }
-body[data-tab="webapp"] #tab-webapp {
+body[data-tab="webapp"] #tab-webapp,
+body[data-tab="flow"] #tab-flow {
   min-width: 0;
 }
-#tab-dialogue.webapp-dock {
+#tab-dialogue.mode-dock,
+#tab-dialogue.webapp-dock,
+#tab-dialogue.flow-dock {
   display: flex;
   flex-direction: column;
   flex: 0 0 40%;
@@ -147,6 +151,13 @@ body[data-tab="webapp"] #tab-webapp {
   border-left: 1px solid #e0e4ee;
   background: #fafafa;
 }
+#tab-dialogue.mode-dock #dialogue-documents-toggle,
+#tab-dialogue.mode-dock #dialogue-pdf-toggle,
+#tab-dialogue.mode-dock #dialogue-rag-tools-label,
+#tab-dialogue.mode-dock #dialogue-rag-status,
+#tab-dialogue.mode-dock #dialogue-pdf-btn,
+#tab-dialogue.mode-dock #dialogue-documents-panel,
+#tab-dialogue.mode-dock #dialogue-pdf-panel,
 #tab-dialogue.webapp-dock #dialogue-documents-toggle,
 #tab-dialogue.webapp-dock #dialogue-pdf-toggle,
 #tab-dialogue.webapp-dock #dialogue-rag-tools-label,
@@ -156,10 +167,16 @@ body[data-tab="webapp"] #tab-webapp {
 #tab-dialogue.webapp-dock #dialogue-pdf-panel {
   display: none !important;
 }
-#tab-dialogue.webapp-dock #dialogue-webapp-tools-label {
+#tab-dialogue.webapp-dock #dialogue-webapp-tools-label,
+body[data-tab="webapp"] #tab-dialogue.mode-dock #dialogue-webapp-tools-label {
   display: flex;
 }
-#dialogue-webapp-tools-label {
+#tab-dialogue.flow-dock #dialogue-flow-tools-label,
+body[data-tab="flow"] #tab-dialogue.mode-dock #dialogue-flow-tools-label {
+  display: flex;
+}
+#dialogue-webapp-tools-label,
+#dialogue-flow-tools-label {
   display: none;
 }
 
@@ -207,7 +224,8 @@ body[data-tab="webapp"] #tab-webapp.components-collapsed {
   flex: 0 1 240px;
   max-width: min(42%, 320px);
 }
-body[data-tab="webapp"]:has(#tab-webapp.components-collapsed) #tab-dialogue.webapp-dock {
+body[data-tab="webapp"]:has(#tab-webapp.components-collapsed) #tab-dialogue.webapp-dock,
+body[data-tab="webapp"]:has(#tab-webapp.components-collapsed) #tab-dialogue.mode-dock {
   flex: 1 1 auto;
   width: auto;
   max-width: none;
@@ -488,7 +506,9 @@ button:disabled { opacity: 0.5; cursor: default; }
   .component-editor-toolbar { background: #2a2f3d; border-color: #3a3a42; }
   .component-meta { color: #aaa; }
   .component-editor-input { background: #26262c; }
-  #tab-dialogue.webapp-dock {
+  #tab-dialogue.webapp-dock,
+  #tab-dialogue.flow-dock,
+  #tab-dialogue.mode-dock {
     background: #1b1b1f;
     border-left-color: #3a3a42;
   }
